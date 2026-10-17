@@ -60,3 +60,7 @@ class AgentMemo(BaseModel):
     tools_invoked: list[str]
     thinking_trace: str
     memo: str
+    #: Provenance, so the stream proves which model actually answered.
+    model: str | None = None
+    provider: str | None = None
+    thinking_budget: int | None = None

@@ -22,9 +22,39 @@ The full race is `python scripts/run_benchmark.py --seeds 100`; ExtraTrees use a
 Set `M5_POLICY_MODE=live_agent` to transparently stamp live-agent M5 runs, or leave the default
 `adaptive_tool`. Set `HITL=1` for the human approval gate.
 
-Frontier model slots accept OpenAI-compatible transports using role-prefixed variables such as
-`AFFINITY_SCIENTIST_BASE_URL` and `AFFINITY_SCIENTIST_API_KEY`; requests set thinking mode and
-high reasoning effort. Missing credentials safely select the deterministic reasoner.
+### Cognitive-diversity council
+
+Each agent role is pinned to a distinct model family (see `AGENT_MODELS` in `core/llm.py`) so the
+council cannot collapse into a single-model echo chamber:
+
+| Agent | Provider | Model | Thinking |
+| --- | --- | --- | --- |
+| Affinity Scientist | Google | `gemini-4-argon` | off |
+| Developability Scientist | Anthropic | `claude-5.5-sonnet` | default (no thinking block) |
+| Scientific Skeptic | Anthropic | `claude-5.5-opus` | `budget_tokens=4096` |
+| Experimental Planner | OpenAI | `gpt-6.1-sol` | strict `json_schema` structured outputs |
+
+Credentials are provider-scoped: `GOOGLE_API_KEY`/`GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, and
+`OPENAI_API_KEY`. Base URLs can be redirected to a gateway with `GEMINI_BASE_URL`, `ANTHROPIC_BASE_URL`
+(e.g. an internal router), and `OPENAI_BASE_URL`; role-specific `AFFINITY_BASE_URL` /
+`SKEPTIC_BASE_URL` style overrides win. Missing credentials safely select the deterministic reasoner,
+and `ModelRouter().describe_roster()` reports which seats are live.
+
+Anthropic extended thinking is opt-in per agent. Pass `thinking_budget=...` to `AnthropicReasoner`
+to inject `{"type": "enabled", "budget_tokens": X}`; leave it `None` for default execution. Tune
+without editing code via `SKEPTIC_THINKING_BUDGET=8192` / `DEVELOPABILITY_THINKING_BUDGET=off`, or
+at runtime with `ModelRouter(thinking_budgets={"skeptic": 8192})` and `router.configure_thinking(...)`.
+`thinking_configuration()` in `core/agents.py` prints the resolved per-agent budgets.
+
+### Pre-flight check
+
+```bash
+python scripts/check_council.py
+```
+
+Prints the pinned model, live/offline transport, effective base URL, and resolved thinking budget
+for every seat, and exits non-zero if any seat fell back to the deterministic reasoner — so a
+degraded single-model run can't be mistaken for a diverse live council.
 
 ## Install the official AbBiBench 1N8Z table
 
