@@ -1,0 +1,15 @@
+# Secrets: never commit
+.env
+.env.local
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+
+# Local artifacts
+results/*.sqlite3
+results/*.sbom.json

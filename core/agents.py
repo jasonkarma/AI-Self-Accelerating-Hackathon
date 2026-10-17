@@ -142,18 +142,19 @@ def thinking_configuration(router: ModelRouter | None = None) -> list[dict]:
     report = []
     for definition in AGENT_DEFINITIONS.values():
         if router is not None:
-            resolved = router.spec_for(definition.role)
-            budget = resolved.thinking_budget if resolved else definition.thinking_budget
+            spec = router.effective_spec_for(definition.role) or router.spec_for(definition.role)
         else:
-            budget = resolve_thinking_budget(definition.model)
+            spec = definition.model
+        budget = resolve_thinking_budget(spec) if spec else None
         report.append(
             {
                 "role": definition.role,
-                "model": definition.model.model,
-                "provider": definition.model.provider,
+                "model": spec.model if spec else definition.model.model,
+                "provider": spec.provider if spec else definition.model.provider,
+                "requested_model": definition.model.model,
                 "thinking_budget": budget,
                 "extended_thinking": bool(budget),
-                "supports_thinking": definition.model.provider == "anthropic",
+                "supports_thinking": (spec or definition.model).provider == "anthropic",
             }
         )
     return report

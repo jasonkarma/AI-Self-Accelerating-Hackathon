@@ -25,26 +25,34 @@ def main() -> int:
     roster = router.describe_roster()
     budgets = {row["role"]: row for row in thinking_configuration(router)}
 
-    header = f"{'ROLE':26} {'PROVIDER':10} {'MODEL':18} {'LIVE':5} {'THINK':>6}  BASE_URL"
+    header = f"{'ROLE':26} {'REQUESTED':32} {'SERVING':32} {'LIVE':5} {'THINK':>6}  BASE_URL"
     print(header)
     print("-" * len(header))
     for row in roster:
         budget = budgets[row["role"]]["thinking_budget"]
+        requested = f"{row['provider']}/{row['model']}"
+        serving = f"{row['effective_provider']}/{row['effective_model']}" if row["live"] else "offline"
+        marker = " *" if row["fallback_used"] else ""
         print(
-            f"{row['role']:26} {row['provider']:10} {row['model']:18} "
+            f"{row['role']:26} {requested:32} {serving + marker:32} "
             f"{str(row['live']):5} {str(budget):>6}  {row['base_url'] or '-'}"
         )
 
-    distinct = len({row["model"] for row in roster})
+    distinct = len({row["effective_model"] for row in roster if row["live"]})
     offline = [row["role"] for row in roster if not row["live"]]
+    rehomed = [row["role"] for row in roster if row["fallback_used"]]
     print()
-    print(f"distinct models: {distinct}/{len(roster)}")
+    print(f"distinct live models: {distinct}/{len(roster)}  (* = served by a fallback)")
     print(f"extended thinking: {[r for r, b in budgets.items() if b['extended_thinking']]}")
+    if rehomed:
+        print(f"re-homed seats: {rehomed}")
     if offline:
-        print(f"offline (deterministic fallback): {offline}")
-        print(json.dumps({"status": "degraded", "offline": offline}, indent=2))
+        print(f"offline (deterministic): {offline}")
+        print(json.dumps({"status": "degraded", "offline": offline, "rehomed": rehomed}, indent=2))
         return 1
-    print(json.dumps({"status": "live", "distinct_models": distinct}, indent=2))
+    if distinct < 3:
+        print("WARNING: fewer than 3 distinct models are answering — cognitive diversity is reduced.")
+    print(json.dumps({"status": "live", "distinct_models": distinct, "rehomed": rehomed}, indent=2))
     return 0
 
 

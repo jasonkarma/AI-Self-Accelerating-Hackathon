@@ -20,6 +20,16 @@ import os
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
+from .env import load_env_file
+
+#: Read ``.env`` from the repo root once, before anything resolves credentials.
+#: Real environment variables keep precedence, so CI/ops exports still win.
+load_env_file()
+
+#: Standard vendor endpoints, used only when no base URL is configured.  Put a
+#: gateway/router in ``.env`` via ANTHROPIC_BASE_URL / OPENAI_BASE_URL /
+#: GEMINI_BASE_URL (or LLM_BASE_URL for a single all-in-one gateway) instead of
+#: editing this file — that keeps the "works out of the box" default intact.
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
@@ -31,6 +41,7 @@ PROVIDER_API_KEY_ENVS: dict[str, tuple[str, ...]] = {
     "google": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
 }
 
+#: Names of the env vars that override ``PROVIDER_DEFAULT_BASE_URLS``.
 PROVIDER_BASE_URL_ENVS: dict[str, tuple[str, ...]] = {
     "anthropic": ("ANTHROPIC_BASE_URL",),
     "openai": ("OPENAI_BASE_URL",),
@@ -108,6 +119,10 @@ class AgentModel:
     ``thinking_budget`` is the *code-declared* default.  Runtime tuning happens
     through ``<SLUG>_THINKING_BUDGET`` (see :func:`resolve_thinking_budget`), so a
     live test can dial the Skeptic down without editing this table.
+
+    ``fallbacks`` is an ordered escape hatch: if the primary provider has no
+    credentials (or is intentionally disabled), the seat re-homes to the next
+    entry instead of silently degrading to the deterministic stub.
     """
 
     slug: str
@@ -118,6 +133,21 @@ class AgentModel:
     structured_outputs: bool = False
     max_tokens: int = 1024
     temperature: float | None = 0.0
+    fallbacks: tuple["AgentModel", ...] = ()
+
+    def rehomed(self, provider: str, model: str) -> "AgentModel":
+        """Clone for another provider/model, dropping provider-specific flags."""
+        return replace(
+            self,
+            provider=normalize_provider(provider),
+            model=model,
+            # Thinking blocks and strict json_schema are provider features; a
+            # re-homed seat must not carry the original's assumptions.
+            thinking_budget=self.thinking_budget if provider == "anthropic" else None,
+            structured_outputs=self.structured_outputs if provider == "openai" else False,
+            # OpenAI reasoning models reject any non-default temperature.
+            temperature=None if provider == "openai" else self.temperature,
+        )
 
 
 def resolve_thinking_budget(spec: AgentModel) -> int | None:
@@ -128,6 +158,64 @@ def resolve_thinking_budget(spec: AgentModel) -> int | None:
     effect without touching source.
     """
     return _env_int(f"{spec.slug.upper()}_THINKING_BUDGET", spec.thinking_budget)
+
+
+def resolve_model(spec: AgentModel) -> AgentModel:
+    """Apply ``<SLUG>_PROVIDER`` / ``<SLUG>_MODEL`` overrides to a seat."""
+    provider = (os.getenv(f"{spec.slug.upper()}_PROVIDER") or spec.provider).strip().lower()
+    model = (os.getenv(f"{spec.slug.upper()}_MODEL") or spec.model).strip()
+    if provider == spec.provider and model == spec.model:
+        return spec
+    return spec.rehomed(provider, model)
+
+
+def _env_fallback(spec: AgentModel, provider_env: str, model_env: str) -> AgentModel | None:
+    provider = (os.getenv(provider_env) or "").strip().lower()
+    model = (os.getenv(model_env) or "").strip()
+    if not provider or not model:
+        return None
+    return spec.rehomed(provider, model)
+
+
+#: Ordered "who else can cover this seat" ladders.  Used only when the primary
+#: provider has no credentials or is disabled, so the council keeps speaking
+#: instead of falling silent.  XAI/DeepSeek/etc. can be added here or via
+#: ``<SLUG>_FALLBACK_PROVIDER`` / ``<SLUG>_FALLBACK_MODEL``.
+AGENT_FALLBACK_CHAINS: dict[str, tuple[tuple[str, str], ...]] = {
+    "affinity": (("openai", "gpt-6.1-sol"), ("anthropic", "claude-5.5-sonnet")),
+    "developability": (("openai", "gpt-6.1-sol"), ("google", "gemini-4-argon")),
+    "skeptic": (("openai", "gpt-6.1-sol"), ("google", "gemini-4-argon")),
+    "planner": (("anthropic", "claude-5.5-sonnet"), ("google", "gemini-4-argon")),
+}
+
+
+def fallback_ladder(spec: AgentModel) -> tuple[AgentModel, ...]:
+    """Build a seat's fallback ladder, evaluated fresh on every call.
+
+    Order: ``<SLUG>_FALLBACK_PROVIDER``/``_MODEL`` -> the code chain in
+    :data:`AGENT_FALLBACK_CHAINS` -> ``LLM_FALLBACK_PROVIDER``/``_MODEL``
+    (a global catch-all such as a local LiteLLM gateway).
+    """
+    ladder: list[AgentModel] = []
+    env_override = _env_fallback(
+        spec, f"{spec.slug.upper()}_FALLBACK_PROVIDER", f"{spec.slug.upper()}_FALLBACK_MODEL"
+    )
+    if env_override:
+        ladder.append(env_override)
+    ladder.extend(spec.fallbacks)
+    global_override = _env_fallback(spec, "LLM_FALLBACK_PROVIDER", "LLM_FALLBACK_MODEL")
+    if global_override:
+        ladder.append(global_override)
+
+    seen = {(spec.provider, spec.model)}
+    unique: list[AgentModel] = []
+    for candidate in ladder:
+        key = (candidate.provider, candidate.model)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return tuple(unique)
 
 
 def _agent(
@@ -150,6 +238,10 @@ def _agent(
         structured_outputs=structured_outputs,
         max_tokens=max_tokens,
         temperature=temperature,
+        fallbacks=tuple(
+            AgentModel(slug=slug, role=role, provider=p, model=m)
+            for p, m in AGENT_FALLBACK_CHAINS.get(slug, ())
+        ),
     )
 
 
@@ -340,18 +432,56 @@ class OpenAICompatibleReasoner:
             return message.get("content") or ""
 
 
-def _env_for(spec: AgentModel, suffix: str, provider_envs: dict[str, tuple[str, ...]]) -> str | None:
-    """Role-specific env wins over the provider-wide default."""
-    candidates = (
-        f"{spec.slug.upper()}_{suffix}",
-        f"{spec.role.upper().replace(' ', '_')}_{suffix}",
-        *provider_envs.get(spec.provider, ()),
-    )
-    for name in candidates:
+PROVIDER_ALIASES: dict[str, str] = {
+    "gemini": "google",
+    "googleai": "google",
+    "google-ai": "google",
+    "claude": "anthropic",
+    "oai": "openai",
+    "openai-compatible": "openai",
+}
+
+
+def normalize_provider(provider: str) -> str:
+    key = provider.strip().lower()
+    return PROVIDER_ALIASES.get(key, key)
+
+
+def _first_env(*names: str) -> str | None:
+    for name in names:
         value = os.getenv(name)
         if value:
             return value
     return None
+
+
+def api_key_for(spec: AgentModel) -> str | None:
+    """Resolve a credential: seat-specific, then provider-wide, then global.
+
+    Unknown providers (``openrouter``, ``groq``, ``litellm``, ...) are supported
+    through their own ``<PROVIDER>_API_KEY`` variable, and ``LLM_API_KEY`` covers
+    any single-gateway setup.
+    """
+    provider = normalize_provider(spec.provider)
+    return _first_env(
+        f"{spec.slug.upper()}_API_KEY",
+        f"{spec.role.upper().replace(' ', '_')}_API_KEY",
+        *PROVIDER_API_KEY_ENVS.get(provider, ()),
+        f"{provider.upper()}_API_KEY",
+        "LLM_API_KEY",
+    )
+
+
+def base_url_for(spec: AgentModel) -> str | None:
+    """Seat-specific URL, then provider-wide, then global, then vendor default."""
+    provider = normalize_provider(spec.provider)
+    explicit = _first_env(
+        f"{spec.slug.upper()}_BASE_URL",
+        *PROVIDER_BASE_URL_ENVS.get(provider, ()),
+        f"{provider.upper()}_BASE_URL",
+        "LLM_BASE_URL",
+    )
+    return explicit or PROVIDER_DEFAULT_BASE_URLS.get(provider)
 
 
 class ModelRouter:
@@ -368,12 +498,14 @@ class ModelRouter:
         self.agents = dict(agents or AGENT_MODELS)
         self._thinking_overrides = dict(thinking_budgets or {})
         self._clients: dict[str, Reasoner] = {}
+        #: slug -> the seat that actually answers (primary or re-homed fallback)
+        self._effective: dict[str, AgentModel | None] = {}
 
     # -- introspection ---------------------------------------------------
     @property
     def models(self) -> dict[str, str]:
-        """Backwards-compatible slug -> model id view."""
-        return {slug: spec.model for slug, spec in self.agents.items()}
+        """Backwards-compatible slug -> model id view (env overrides applied)."""
+        return {slug: resolve_model(spec).model for slug, spec in self.agents.items()}
 
     def slug_for(self, role: str) -> str | None:
         needle = " ".join(role.strip().lower().split())
@@ -384,21 +516,27 @@ class ModelRouter:
         return first if first in self.agents else None
 
     def spec_for(self, role: str) -> AgentModel | None:
-        """Resolve a role to its assignment, applying thinking-budget overrides.
+        """Resolve a role's declared assignment, applying runtime overrides.
 
-        Precedence: explicit ``thinking_budgets`` argument > ``<SLUG>_THINKING_BUDGET``
-        env var > the code-declared default in ``AGENT_MODELS``.
+        Precedence: ``<SLUG>_PROVIDER``/``<SLUG>_MODEL`` > code-declared seat;
+        ``thinking_budgets`` argument > ``<SLUG>_THINKING_BUDGET`` > code default.
+        This is the *intended* seat, before credential-driven fallback.
         """
         slug = self.slug_for(role)
         if slug is None:
             return None
-        spec = replace(
-            self.agents[slug], thinking_budget=resolve_thinking_budget(self.agents[slug])
-        )
+        spec = resolve_model(self.agents[slug])
+        spec = replace(spec, thinking_budget=resolve_thinking_budget(spec))
         for key in (slug, spec.role, spec.role.lower()):
             if key in self._thinking_overrides:
                 return replace(spec, thinking_budget=self._thinking_overrides[key])
         return spec
+
+    def effective_spec_for(self, role: str) -> AgentModel | None:
+        """The seat actually serving requests, after fallback re-homing."""
+        self.client_for(role)  # populates _effective
+        slug = self.slug_for(role)
+        return self._effective.get(slug) if slug else None
 
     def configure_thinking(self, **budgets: int | None) -> None:
         """Retune thinking budgets at runtime, e.g. ``configure_thinking(skeptic=8192)``."""
@@ -406,19 +544,27 @@ class ModelRouter:
         if unknown:
             raise KeyError(f"Unknown agent slug(s): {sorted(unknown)}")
         self._thinking_overrides.update(budgets)
-        # Clients embed their budget in the request payload, so drop stale ones.
+        self.reset()
+
+    def reset(self) -> None:
+        """Drop cached clients so credential/env changes take effect."""
         self._clients.clear()
+        self._effective.clear()
 
     # -- client construction ---------------------------------------------
     def _build(self, spec: AgentModel) -> Reasoner | None:
-        api_key = _env_for(spec, "API_KEY", PROVIDER_API_KEY_ENVS)
+        """Build one transport, or ``None`` when it cannot be configured."""
+        provider = normalize_provider(spec.provider)
+        if provider in {"none", "off", "disabled"}:
+            return None
+        candidate = replace(spec, provider=provider)
+        api_key = api_key_for(candidate)
         if not api_key:
             return None
-        base_url = (
-            _env_for(spec, "BASE_URL", PROVIDER_BASE_URL_ENVS)
-            or PROVIDER_DEFAULT_BASE_URLS[spec.provider]
-        )
-        if spec.provider == "anthropic":
+        base_url = base_url_for(candidate)
+        if not base_url:
+            return None
+        if provider == "anthropic":
             return AnthropicReasoner(
                 model=spec.model,
                 api_key=api_key,
@@ -434,15 +580,31 @@ class ModelRouter:
             structured_outputs=spec.structured_outputs,
             max_tokens=spec.max_tokens,
             temperature=spec.temperature,
-            token_param="max_completion_tokens" if spec.provider == "openai" else "max_tokens",
+            token_param="max_completion_tokens" if provider == "openai" else "max_tokens",
         )
+
+    def _resolve(self, spec: AgentModel) -> tuple[AgentModel | None, Reasoner | None]:
+        """Pick the first seat in the ladder whose transport can actually be built.
+
+        Fallback fires only for *missing credentials*.  Setting
+        ``<SLUG>_PROVIDER=off`` is an explicit opt-out and stays deterministic.
+        """
+        if normalize_provider(spec.provider) in {"none", "off", "disabled"}:
+            return None, None
+        for candidate in (spec, *fallback_ladder(spec)):
+            client = self._build(candidate)
+            if client is not None:
+                return candidate, client
+        return None, None
 
     def client_for(self, role: str) -> Reasoner:
         spec = self.spec_for(role)
         if spec is None:
             return DeterministicReasoner()
         if spec.slug not in self._clients:
-            self._clients[spec.slug] = self._build(spec) or DeterministicReasoner()
+            effective, client = self._resolve(spec)
+            self._effective[spec.slug] = effective
+            self._clients[spec.slug] = client or DeterministicReasoner()
         return self._clients[spec.slug]
 
     def thinking_trace(self, role: str) -> str | None:
@@ -457,15 +619,23 @@ class ModelRouter:
         return getattr(transport, "last_thinking", None) or None
 
     def describe_roster(self) -> list[dict[str, Any]]:
-        """Pre-flight audit: prove the council is genuinely multi-model."""
+        """Pre-flight audit: prove the council is genuinely multi-model.
+
+        Reports both the *requested* seat and the *effective* one, so a silent
+        fallback (Gemini key missing -> Affinity answers on OpenAI) is visible.
+        """
         report: list[dict[str, Any]] = []
         for spec in self.agents.values():
             client = self.client_for(spec.role)
+            effective = self._effective.get(spec.slug)
             report.append(
                 {
                     "role": spec.role,
                     "provider": spec.provider,
                     "model": spec.model,
+                    "effective_provider": effective.provider if effective else None,
+                    "effective_model": effective.model if effective else None,
+                    "fallback_used": bool(effective and (effective.provider, effective.model) != (spec.provider, spec.model)),
                     "live": not isinstance(client, DeterministicReasoner),
                     "base_url": getattr(client, "base_url", None),
                     "thinking_budget": getattr(client, "thinking_budget", None),

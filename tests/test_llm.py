@@ -31,8 +31,9 @@ def test_anthropic_uses_router_env_var(monkeypatch):
     assert reasoner.messages_url == "https://gateway.internal/v1/messages"
 
 
-def test_anthropic_defaults_to_vendor_endpoint(monkeypatch):
+def test_anthropic_falls_back_to_configured_default(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setattr(AnthropicReasoner, "default_base_url", "https://api.anthropic.com")
     reasoner = AnthropicReasoner(model="claude-5.5-sonnet", api_key="test")
     assert reasoner.messages_url == "https://api.anthropic.com/v1/messages"
 
