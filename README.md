@@ -25,3 +25,18 @@ Set `M5_POLICY_MODE=live_agent` to transparently stamp live-agent M5 runs, or le
 Frontier model slots accept OpenAI-compatible transports using role-prefixed variables such as
 `AFFINITY_SCIENTIST_BASE_URL` and `AFFINITY_SCIENTIST_API_KEY`; requests set thinking mode and
 high reasoning effort. Missing credentials safely select the deterministic reasoner.
+
+## Install the official AbBiBench 1N8Z table
+
+```bash
+python scripts/fetch_real_1n8z.py
+cat config/frozen_protocol.json
+```
+
+The fetcher uses direct Hugging Face Hub CSV downloads and therefore avoids `datasets`/`dill`
+compatibility problems on Python 3.14. It validates and stages all files before an atomic swap.
+The official table contains 419 measurements over 416 unique extracted HCDR3 sequences and no
+measured `SRWGGDGFYAMDY` row; duplicates are preserved as experimental replicates, while WT remains
+the label-blind developability threshold reference. Successful installation must report
+`"is_synthetic": false`. When the dataset hash changes, prior campaign/benchmark artifacts are
+archived with a `pre-real-<hash>` suffix to prevent mixed-provenance results.

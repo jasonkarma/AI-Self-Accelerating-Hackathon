@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -18,7 +19,8 @@ def dataset_sha256(frame: pd.DataFrame) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def validate_dataset(frame: pd.DataFrame, *, expected_rows: int | None = None) -> pd.DataFrame:
+def validate_dataset(frame: pd.DataFrame, *, expected_rows: int | None = None,
+                     require_wt: bool = True, require_unique_sequences: bool = True) -> pd.DataFrame:
     missing = set(REQUIRED_COLUMNS) - set(frame.columns)
     if missing:
         raise ValueError(f"Dataset missing columns: {sorted(missing)}")
@@ -28,11 +30,42 @@ def validate_dataset(frame: pd.DataFrame, *, expected_rows: int | None = None) -
     result["y_bind"] = pd.to_numeric(result["y_bind"], errors="raise")
     if expected_rows is not None and len(result) != expected_rows:
         raise ValueError(f"Expected {expected_rows} rows, got {len(result)}")
-    if result["candidate_id"].duplicated().any() or result["sequence"].duplicated().any():
-        raise ValueError("Candidate IDs and sequences must be unique")
-    if WT_SEQUENCE not in set(result["sequence"]):
+    if result["candidate_id"].duplicated().any():
+        raise ValueError("Candidate IDs must be unique")
+    if require_unique_sequences and result["sequence"].duplicated().any():
+        raise ValueError("Sequences must be unique")
+    if require_wt and WT_SEQUENCE not in set(result["sequence"]):
         raise ValueError(f"Wild type {WT_SEQUENCE} is absent")
     return result.reset_index(drop=True)
+
+
+def extract_hcdr3(heavy_chain_sequence: str) -> str:
+    """Extract the residues between the conserved YYC and WGQG framework motifs."""
+    sequence = str(heavy_chain_sequence).strip().upper()
+    matches = re.findall(r"YYC([A-Z]+?)WGQG", sequence)
+    if len(matches) != 1:
+        raise ValueError(f"Expected one YYC...WGQG HCDR3 context, found {len(matches)}")
+    return matches[0]
+
+
+def prepare_abbibench_frame(source: pd.DataFrame, *, prefix: str, expected_rows: int | None = None,
+                            length: int = 13) -> pd.DataFrame:
+    """Convert an official AbBiBench table to the internal oracle schema."""
+    required = {"heavy_chain_seq", "binding_score"}
+    if not required <= set(source.columns):
+        raise ValueError(f"AbBiBench table missing columns: {sorted(required - set(source.columns))}")
+    extracted = source["heavy_chain_seq"].map(extract_hcdr3)
+    keep = extracted.str.len().eq(length)
+    result = pd.DataFrame({
+        "candidate_id": [f"{prefix}-{i:03d}" for i in range(int(keep.sum()))],
+        "sequence": extracted[keep].to_numpy(),
+        "y_bind": pd.to_numeric(source.loc[keep, "binding_score"], errors="raise").to_numpy(),
+    })
+    result["source_is_real"] = True
+    validated = validate_dataset(result, expected_rows=expected_rows, require_wt=False,
+                                 require_unique_sequences=False)
+    validated["source_is_real"] = True
+    return validated
 
 
 def generate_fixture(n: int = 419, seed: int = 180, *, prefix: str = "CAND") -> pd.DataFrame:
@@ -76,7 +109,9 @@ def load_primary(path: Path = SETTINGS.primary_csv, *, generate_if_missing: bool
         synthetic = True
     else:
         synthetic = "source_is_real" not in pd.read_csv(path, nrows=1).columns
-    return validate_dataset(pd.read_csv(path), expected_rows=SETTINGS.pool_size), synthetic
+    raw = pd.read_csv(path)
+    return validate_dataset(raw, expected_rows=SETTINGS.pool_size, require_wt=synthetic,
+                            require_unique_sequences=synthetic), synthetic
 
 
 def public_pool(frame: pd.DataFrame) -> pd.DataFrame:

@@ -13,7 +13,7 @@ from core.oracle import BindingOracle, DevelopabilityOracle
 from core.schemas import PositionalSoftPrior
 from core.surrogate import BindingSurrogate, link_predictions
 from core.tool_arsenal import TOOL_REGISTRY, configure_candidate_lookup, profile_developability_liabilities
-from data.datasets import generate_fixture, public_pool
+from data.datasets import generate_fixture, public_pool, extract_hcdr3, prepare_abbibench_frame
 
 def test_features_are_exactly_299_and_position_aware():
     x=encode_sequence(WT_SEQUENCE); assert x.shape==(299,); assert x[:260].sum()==13
@@ -50,3 +50,11 @@ def test_api_contract_and_risk_components():
         state=client.get("/api/state").json(); contract=json.load(open("api_contract.json")); assert state.keys()==contract.keys()
         assert client.options("/api/state",headers={"Origin":"http://localhost:5173","Access-Control-Request-Method":"GET"}).headers["access-control-allow-origin"]=="*"
         candidate=client.get("/api/candidates?limit=1").json()["items"][0]; assert len(candidate["developability_components_raw"])==6 and len(candidate["developability_components_normalized"])==6
+
+def test_real_abbibench_ingestion_preserves_replicates_without_fabricating_wt():
+    prefix="EVQLVESGGGLVQPGGSLRLSCAASGFNIKDTYIHWVRQAPGKGLEWVARIYPTNGYTRYADSVKGRFTISADTSKNTAYLQMNSLRAEDTAVYYC"
+    suffix="WGQGTLVTVSSA"
+    source=pd.DataFrame({"heavy_chain_seq":[prefix+"ARSGGSSYYYYDY"+suffix,prefix+"ARSGGSSYYYYDY"+suffix],"binding_score":[6.1,5.9]})
+    assert extract_hcdr3(source.heavy_chain_seq.iloc[0])=="ARSGGSSYYYYDY"
+    result=prepare_abbibench_frame(source,prefix="CAND",expected_rows=2)
+    assert len(result)==2 and result.candidate_id.nunique()==2 and result.sequence.nunique()==1
