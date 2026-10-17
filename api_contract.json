@@ -1,0 +1,138 @@
+{
+    "current_round": 3,
+    "phase": "Self-Accelerating Payoff",
+    "kpis": {
+        "best_qualified_binding": 9.38,
+        "delta_vs_wt": 0.53,
+        "query_budget_spent": 20,
+        "total_budget": 35,
+        "wet_lab_cost_saved_usd": 24000,
+        "hypotheses_supported": 2,
+        "hypotheses_falsified": 1
+    },
+    "hcdr3_ribbon": [
+        {
+            "position": 1,
+            "wt_residue": "S",
+            "soft_prior_weight": 0.00,
+            "status": "neutral"
+        },
+        {
+            "position": 3,
+            "wt_residue": "W",
+            "soft_prior_weight": 0.15,
+            "status": "anchor_conserved"
+        },
+        {
+            "position": 6,
+            "wt_residue": "D",
+            "soft_prior_weight": -0.10,
+            "status": "low_risk_swap"
+        },
+        {
+            "position": 8,
+            "wt_residue": "F",
+            "soft_prior_weight": -0.15,
+            "status": "epistasis_alert"
+        }
+    ],
+    "agent_council": [
+        {
+            "role": "Affinity Scientist",
+            "tools_invoked": [
+                "scan_positional_sar",
+                "detect_epistasis_clashes"
+            ],
+            "thinking_trace": "Position 3 W is critical for binding. Mutations here drop -log10 Kd below 6.0.",
+            "memo": "Conserve [W3] and [Y9] as strict anchors. Suggest testing substitutions at [F8]."
+        },
+        {
+            "role": "Developability Scientist",
+            "tools_invoked": [
+                "profile_developability_liabilities"
+            ],
+            "thinking_trace": "F8 creates a hydrophobic patch liability exceeding tau_risk.",
+            "memo": "Agree with substituting [F8]. Swapping to a polar residue like [S8] drops sequence risk by 12%."
+        }
+    ],
+    "batch_slots": [
+        {
+            "slot_id": 1,
+            "slot_type": "Dual-Surrogate UCB",
+            "candidate_id": "CAND-104",
+            "sequence": "SRWGGDGSYAMDY",
+            "mu_bind": 9.12,
+            "sigma_bind": 0.45,
+            "risk_score": 0.38,
+            "risk_passed": true
+        },
+        {
+            "slot_id": 4,
+            "slot_type": "Agent Hypothesis Test",
+            "candidate_id": "CAND-214",
+            "sequence": "SRWGGDGSYAMDY",
+            "mu_bind": 8.95,
+            "sigma_bind": 0.60,
+            "risk_score": 0.32,
+            "risk_passed": true,
+            "hypothesis_id": "HYP-R3-01"
+        },
+        {
+            "slot_id": 5,
+            "slot_type": "Skeptic Falsification Probe",
+            "candidate_id": "CAND-088",
+            "sequence": "SRAGGDGFYAMDY",
+            "mu_bind": 8.70,
+            "sigma_bind": 0.85,
+            "risk_score": 0.55,
+            "risk_passed": true,
+            "falsification_rationale": "Violates W3 anchor rule to test for hidden epistasis."
+        }
+    ],
+    "pareto_data": [
+        {
+            "candidate_id": "WT",
+            "risk": 0.45,
+            "binding": 8.85,
+            "status": "wild_type"
+        },
+        {
+            "candidate_id": "CAND-012",
+            "risk": 0.22,
+            "binding": 7.10,
+            "status": "queried_round_1"
+        },
+        {
+            "candidate_id": "CAND-104",
+            "risk": 0.38,
+            "binding": 9.38,
+            "status": "pareto_frontier"
+        }
+    ],
+    "benchmark_curves": [
+        {
+            "query_count": 5,
+            "m1_random": 7.2,
+            "m3_ucb": 7.2,
+            "m5_hybrid": 7.2
+        },
+        {
+            "query_count": 10,
+            "m1_random": 7.4,
+            "m3_ucb": 8.1,
+            "m5_hybrid": 8.5
+        },
+        {
+            "query_count": 15,
+            "m1_random": 7.5,
+            "m3_ucb": 8.4,
+            "m5_hybrid": 9.1
+        },
+        {
+            "query_count": 20,
+            "m1_random": 7.6,
+            "m3_ucb": 8.6,
+            "m5_hybrid": 9.38
+        }
+    ]
+}

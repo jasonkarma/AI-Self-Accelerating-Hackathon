@@ -1,0 +1,141 @@
+{
+  "m5_policy_mode": "adaptive_tool",
+  "seeds": 10,
+  "curves": [
+    {
+      "query_count": 5,
+      "m1_random": 8.015,
+      "m2_greedy": 8.015,
+      "m3_ucb": 8.015,
+      "m4_fixed_prior": 8.015,
+      "m5_hybrid": 8.015
+    },
+    {
+      "query_count": 10,
+      "m1_random": 8.448,
+      "m2_greedy": 8.858,
+      "m3_ucb": 8.386,
+      "m4_fixed_prior": 8.386,
+      "m5_hybrid": 8.443
+    },
+    {
+      "query_count": 15,
+      "m1_random": 8.461,
+      "m2_greedy": 8.891,
+      "m3_ucb": 8.611,
+      "m4_fixed_prior": 8.6,
+      "m5_hybrid": 8.611
+    },
+    {
+      "query_count": 20,
+      "m1_random": 8.784,
+      "m2_greedy": 8.907,
+      "m3_ucb": 8.722,
+      "m4_fixed_prior": 8.611,
+      "m5_hybrid": 8.611
+    },
+    {
+      "query_count": 25,
+      "m1_random": 8.825,
+      "m2_greedy": 8.926,
+      "m3_ucb": 8.73,
+      "m4_fixed_prior": 8.611,
+      "m5_hybrid": 8.73
+    },
+    {
+      "query_count": 30,
+      "m1_random": 8.905,
+      "m2_greedy": 8.955,
+      "m3_ucb": 8.738,
+      "m4_fixed_prior": 8.75,
+      "m5_hybrid": 8.738
+    },
+    {
+      "query_count": 35,
+      "m1_random": 8.919,
+      "m2_greedy": 8.955,
+      "m3_ucb": 8.738,
+      "m4_fixed_prior": 8.768,
+      "m5_hybrid": 8.738
+    }
+  ],
+  "aubqc": {
+    "m1_random": 2.0056500666666666,
+    "m2_greedy": 2.0457925,
+    "m3_ucb": 1.9990209333333333,
+    "m4_fixed_prior": 1.9828440333333333,
+    "m5_hybrid": 1.9957090000000002
+  },
+  "matched_initial_seeds": {
+    "0": [
+      "CAND-264",
+      "CAND-213",
+      "CAND-112",
+      "CAND-128",
+      "CAND-353"
+    ],
+    "1": [
+      "CAND-212",
+      "CAND-014",
+      "CAND-314",
+      "CAND-397",
+      "CAND-196"
+    ],
+    "2": [
+      "CAND-124",
+      "CAND-045",
+      "CAND-347",
+      "CAND-108",
+      "CAND-173"
+    ],
+    "3": [
+      "CAND-074",
+      "CAND-336",
+      "CAND-035",
+      "CAND-098",
+      "CAND-075"
+    ],
+    "4": [
+      "CAND-392",
+      "CAND-367",
+      "CAND-301",
+      "CAND-213",
+      "CAND-394"
+    ],
+    "5": [
+      "CAND-337",
+      "CAND-334",
+      "CAND-278",
+      "CAND-196",
+      "CAND-009"
+    ],
+    "6": [
+      "CAND-143",
+      "CAND-184",
+      "CAND-396",
+      "CAND-215",
+      "CAND-223"
+    ],
+    "7": [
+      "CAND-260",
+      "CAND-285",
+      "CAND-392",
+      "CAND-242",
+      "CAND-375"
+    ],
+    "8": [
+      "CAND-298",
+      "CAND-073",
+      "CAND-412",
+      "CAND-097",
+      "CAND-136"
+    ],
+    "9": [
+      "CAND-174",
+      "CAND-362",
+      "CAND-047",
+      "CAND-400",
+      "CAND-119"
+    ]
+  }
+}
