@@ -27,8 +27,13 @@ def freeze_protocol(pool: pd.DataFrame, *, output: Path = SETTINGS.protocol_path
     pass_fraction = float(np.mean(risks <= wt_risk))
     if 0.25 <= pass_fraction <= 0.65:
         tau_risk, source = wt_risk, "wild_type"
+        threshold_percentile = pass_fraction
     else:
         tau_risk, source = float(np.median(risks)), "pool_median"
+        threshold_percentile = 0.50
+    qualified_mask = risks <= tau_risk
+    qualified_count = int(np.sum(qualified_mask))
+    qualification_pass_rate = float(np.mean(qualified_mask))
     protocol = {
         "version": "1.2-post-kickoff",
         "dataset_sequence_sha256": sequence_hash(pool),
@@ -36,6 +41,9 @@ def freeze_protocol(pool: pd.DataFrame, *, output: Path = SETTINGS.protocol_path
         "wild_type": WT_SEQUENCE,
         "wt_risk": wt_risk,
         "wt_pass_fraction": pass_fraction,
+        "qualification_pass_rate": qualification_pass_rate,
+        "qualified_count": qualified_count,
+        "threshold_percentile": threshold_percentile,
         "tau_risk": tau_risk,
         "tau_dev": 1.0 - tau_risk,
         "threshold_source": source,
@@ -46,7 +54,7 @@ def freeze_protocol(pool: pd.DataFrame, *, output: Path = SETTINGS.protocol_path
     serialized = json.dumps(protocol, indent=2, sort_keys=True) + "\n"
     if output.exists():
         current = json.loads(output.read_text())
-        if current.get("dataset_sequence_sha256") == protocol["dataset_sequence_sha256"]:
+        if current == protocol:
             return current
     output.write_text(serialized)
     return protocol

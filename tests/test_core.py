@@ -23,6 +23,9 @@ def test_risk_and_label_blind_freeze(tmp_path):
     frame=generate_fixture(); public=public_pool(frame); normalizer=RiskNormalizer.fit(public.sequence)
     score=normalizer.score(WT_SEQUENCE); assert 0<=score["risk"]<=1; assert score["y_dev"]==pytest.approx(1-score["risk"])
     protocol=freeze_protocol(public,output=tmp_path/"p.json",is_synthetic=True); assert protocol["threshold_source"] in {"wild_type","pool_median"}; assert protocol["is_synthetic"]
+    assert protocol["qualified_count"] == round(protocol["qualification_pass_rate"] * len(public))
+    if protocol["threshold_source"] == "pool_median":
+        assert protocol["threshold_percentile"] == 0.50
     with pytest.raises(ValueError): freeze_protocol(frame,output=tmp_path/"bad.json",is_synthetic=True)
 
 def test_ledger_immutable_and_oracles_idempotent(tmp_path):
@@ -58,3 +61,12 @@ def test_real_abbibench_ingestion_preserves_replicates_without_fabricating_wt():
     assert extract_hcdr3(source.heavy_chain_seq.iloc[0])=="ARSGGSSYYYYDY"
     result=prepare_abbibench_frame(source,prefix="CAND",expected_rows=2)
     assert len(result)==2 and result.candidate_id.nunique()==2 and result.sequence.nunique()==1
+
+def test_protocol_same_hash_migrates_new_diagnostics(tmp_path):
+    public=public_pool(generate_fixture())
+    path=tmp_path/"protocol.json"
+    protocol=freeze_protocol(public,output=path,is_synthetic=True)
+    legacy={key:value for key,value in protocol.items() if key not in {"qualification_pass_rate","qualified_count","threshold_percentile"}}
+    path.write_text(json.dumps(legacy))
+    migrated=freeze_protocol(public,output=path,is_synthetic=True)
+    assert {"qualification_pass_rate","qualified_count","threshold_percentile"} <= migrated.keys()

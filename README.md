@@ -40,3 +40,7 @@ measured `SRWGGDGFYAMDY` row; duplicates are preserved as experimental replicate
 the label-blind developability threshold reference. Successful installation must report
 `"is_synthetic": false`. When the dataset hash changes, prior campaign/benchmark artifacts are
 archived with a `pre-real-<hash>` suffix to prevent mixed-provenance results.
+The frozen protocol reports both `wt_pass_fraction` (the pre-fallback WT diagnostic) and
+`qualification_pass_rate` / `qualified_count` (the final frozen threshold outcome). A median
+fallback records `threshold_percentile: 0.5`; ties can make the realized pass rate slightly above
+or below exactly 50%.

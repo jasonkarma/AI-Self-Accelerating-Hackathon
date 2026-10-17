@@ -20,8 +20,11 @@
     }
   },
   "pool_size": 419,
+  "qualification_pass_rate": 0.5011933174224343,
+  "qualified_count": 210,
   "tau_dev": 0.6478721298495645,
   "tau_risk": 0.35212787015043545,
+  "threshold_percentile": 0.5,
   "threshold_source": "pool_median",
   "version": "1.2-post-kickoff",
   "wild_type": "SRWGGDGFYAMDY",

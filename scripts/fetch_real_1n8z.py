@@ -89,9 +89,11 @@ def atomic_install(primary: pd.DataFrame, development: pd.DataFrame) -> dict:
         primary.to_csv(primary_tmp, index=False)
         development.to_csv(development_tmp, index=False)
         protocol = freeze_protocol(public_pool(primary), output=protocol_tmp, is_synthetic=False)
-        LOGGER.info("Staged files: primary_sha256=%s development_sha256=%s sequence_sha256=%s tau_dev=%.8f",
+        LOGGER.info("Staged files: primary_sha256=%s development_sha256=%s sequence_sha256=%s tau_dev=%.8f qualification_pass_rate=%.8f qualified_count=%d threshold_percentile=%.2f",
                     file_sha256(primary_tmp), file_sha256(development_tmp),
-                    protocol["dataset_sequence_sha256"], protocol["tau_dev"])
+                    protocol["dataset_sequence_sha256"], protocol["tau_dev"],
+                    protocol["qualification_pass_rate"], protocol["qualified_count"],
+                    protocol["threshold_percentile"])
         # All validation and threshold computation succeeded; only now replace live files.
         old_protocol = None
         if SETTINGS.protocol_path.exists():
@@ -125,6 +127,9 @@ def main() -> None:
     protocol = atomic_install(primary, development)
     print(json.dumps({"rows": len(primary), "development_rows": len(development),
                       "is_synthetic": protocol["is_synthetic"], "tau_dev": protocol["tau_dev"],
+                      "qualification_pass_rate": protocol["qualification_pass_rate"],
+                      "qualified_count": protocol["qualified_count"],
+                      "threshold_percentile": protocol["threshold_percentile"],
                       "dataset_sequence_sha256": protocol["dataset_sequence_sha256"]}, indent=2))
 
 
