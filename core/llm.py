@@ -116,9 +116,11 @@ def _env_int(name: str, default: int | None) -> int | None:
 class AgentModel:
     """Immutable cognitive-diversity assignment for one council role.
 
-    ``thinking_budget`` is the *code-declared* default.  Runtime tuning happens
-    through ``<SLUG>_THINKING_BUDGET`` (see :func:`resolve_thinking_budget`), so a
-    live test can dial the Skeptic down without editing this table.
+    ``thinking_budget`` (Anthropic) and ``reasoning_effort`` (OpenAI) are the
+    *code-declared* defaults.  Runtime tuning happens through
+    ``<SLUG>_THINKING_BUDGET`` / ``<SLUG>_REASONING_EFFORT`` (see
+    :func:`resolve_thinking_budget` and :func:`resolve_reasoning_effort`), so a
+    live test can dial deliberation up or down without editing this table.
 
     ``fallbacks`` is an ordered escape hatch: if the primary provider has no
     credentials (or is intentionally disabled), the seat re-homes to the next
@@ -133,20 +135,25 @@ class AgentModel:
     structured_outputs: bool = False
     max_tokens: int = 1024
     temperature: float | None = 0.0
+    #: OpenAI-style deliberation hint: "low" | "medium" | "high". Anthropic uses
+    #: ``thinking_budget`` instead; Google ignores both.
+    reasoning_effort: str | None = None
     fallbacks: tuple["AgentModel", ...] = ()
 
     def rehomed(self, provider: str, model: str) -> "AgentModel":
         """Clone for another provider/model, dropping provider-specific flags."""
+        normalized = normalize_provider(provider)
         return replace(
             self,
-            provider=normalize_provider(provider),
+            provider=normalized,
             model=model,
-            # Thinking blocks and strict json_schema are provider features; a
-            # re-homed seat must not carry the original's assumptions.
-            thinking_budget=self.thinking_budget if provider == "anthropic" else None,
-            structured_outputs=self.structured_outputs if provider == "openai" else False,
+            # Thinking blocks, strict json_schema and reasoning_effort are all
+            # provider features; a re-homed seat must not carry stale settings.
+            thinking_budget=self.thinking_budget if normalized == "anthropic" else None,
+            structured_outputs=self.structured_outputs if normalized == "openai" else False,
+            reasoning_effort=self.reasoning_effort if normalized == "openai" else None,
             # OpenAI reasoning models reject any non-default temperature.
-            temperature=None if provider == "openai" else self.temperature,
+            temperature=None if normalized == "openai" else self.temperature,
         )
 
 
@@ -158,6 +165,32 @@ def resolve_thinking_budget(spec: AgentModel) -> int | None:
     effect without touching source.
     """
     return _env_int(f"{spec.slug.upper()}_THINKING_BUDGET", spec.thinking_budget)
+
+
+#: Accepted OpenAI deliberation levels; anything else is treated as "unset".
+REASONING_EFFORTS = ("low", "medium", "high")
+_EFFORT_DISABLED = {"", "0", "off", "none", "false", "disable", "disabled", "default"}
+
+
+def resolve_reasoning_effort(spec: AgentModel) -> str | None:
+    """Resolve the OpenAI deliberation hint for a seat.
+
+    Reads ``<SLUG>_REASONING_EFFORT`` (``off``/``none`` disables it).  Only
+    meaningful for OpenAI-transported seats, so other providers always get
+    ``None`` rather than sending a field their API would reject.
+    """
+    if normalize_provider(spec.provider) != "openai":
+        return None
+    raw = os.getenv(f"{spec.slug.upper()}_REASONING_EFFORT")
+    value = (spec.reasoning_effort if raw is None else raw).strip().lower()
+    if value in _EFFORT_DISABLED:
+        return None
+    if value not in REASONING_EFFORTS:
+        raise ValueError(
+            f"{spec.slug.upper()}_REASONING_EFFORT must be one of {REASONING_EFFORTS} "
+            f"or 'off', got {value!r}"
+        )
+    return value
 
 
 def resolve_model(spec: AgentModel) -> AgentModel:
@@ -228,6 +261,7 @@ def _agent(
     structured_outputs: bool = False,
     max_tokens: int = 1024,
     temperature: float | None = 0.0,
+    reasoning_effort: str | None = None,
 ) -> AgentModel:
     return AgentModel(
         slug=slug,
@@ -238,6 +272,7 @@ def _agent(
         structured_outputs=structured_outputs,
         max_tokens=max_tokens,
         temperature=temperature,
+        reasoning_effort=reasoning_effort,
         fallbacks=tuple(
             AgentModel(slug=slug, role=role, provider=p, model=m)
             for p, m in AGENT_FALLBACK_CHAINS.get(slug, ())
@@ -255,8 +290,8 @@ AGENT_MODELS: dict[str, AgentModel] = {
         "Developability Scientist",
         "anthropic",
         "claude-5.5-sonnet",
-        thinking_budget=None,  # default execution: no extended-thinking block
-        max_tokens=1024,
+        thinking_budget=2048,  # moderate: enough to weigh liability trade-offs
+        max_tokens=4096,
     ),
     "skeptic": _agent(
         "skeptic",
@@ -274,6 +309,7 @@ AGENT_MODELS: dict[str, AgentModel] = {
         structured_outputs=True,
         max_tokens=2048,
         temperature=None,  # reasoning models reject non-default temperature
+        reasoning_effort="high",  # final JSON synthesis must not break schema
     ),
 }
 
@@ -526,7 +562,11 @@ class ModelRouter:
         if slug is None:
             return None
         spec = resolve_model(self.agents[slug])
-        spec = replace(spec, thinking_budget=resolve_thinking_budget(spec))
+        spec = replace(
+            spec,
+            thinking_budget=resolve_thinking_budget(spec),
+            reasoning_effort=resolve_reasoning_effort(spec),
+        )
         for key in (slug, spec.role, spec.role.lower()):
             if key in self._thinking_overrides:
                 return replace(spec, thinking_budget=self._thinking_overrides[key])
@@ -581,6 +621,9 @@ class ModelRouter:
             max_tokens=spec.max_tokens,
             temperature=spec.temperature,
             token_param="max_completion_tokens" if provider == "openai" else "max_tokens",
+            # Re-homed seats resolve against their own slug's env var, so a
+            # fallback onto OpenAI still honors AFFINITY_REASONING_EFFORT.
+            reasoning_effort=resolve_reasoning_effort(candidate),
         )
 
     def _resolve(self, spec: AgentModel) -> tuple[AgentModel | None, Reasoner | None]:
@@ -625,7 +668,10 @@ class ModelRouter:
         fallback (Gemini key missing -> Affinity answers on OpenAI) is visible.
         """
         report: list[dict[str, Any]] = []
-        for spec in self.agents.values():
+        for declared in self.agents.values():
+            # Report the *configured* intent (env overrides applied), not the
+            # hard-coded default, so the audit matches what .env actually asks for.
+            spec = self.spec_for(declared.role) or declared
             client = self.client_for(spec.role)
             effective = self._effective.get(spec.slug)
             report.append(
@@ -635,10 +681,13 @@ class ModelRouter:
                     "model": spec.model,
                     "effective_provider": effective.provider if effective else None,
                     "effective_model": effective.model if effective else None,
-                    "fallback_used": bool(effective and (effective.provider, effective.model) != (spec.provider, spec.model)),
+                    "fallback_used": bool(
+                        effective and (effective.provider, effective.model) != (spec.provider, spec.model)
+                    ),
                     "live": not isinstance(client, DeterministicReasoner),
                     "base_url": getattr(client, "base_url", None),
                     "thinking_budget": getattr(client, "thinking_budget", None),
+                    "reasoning_effort": getattr(client, "reasoning_effort", None),
                     "structured_outputs": spec.structured_outputs,
                 }
             )

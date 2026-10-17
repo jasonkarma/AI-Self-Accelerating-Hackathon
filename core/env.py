@@ -19,6 +19,12 @@ DEFAULT_ENV_PATH = ROOT / ".env"
 _QUOTES = {'"', "'"}
 
 
+def default_env_path() -> Path:
+    """``LLM_ENV_FILE`` lets tests (or alternate deployments) pick another file."""
+    override = os.getenv("LLM_ENV_FILE")
+    return Path(override) if override else DEFAULT_ENV_PATH
+
+
 def _parse_line(line: str) -> tuple[str, str] | None:
     line = line.strip()
     if not line or line.startswith("#"):
@@ -45,7 +51,7 @@ def load_env_file(path: Path | str | None = None, *, override: bool = False) -> 
     Returns the names actually applied, which makes the loader easy to test and
     easy to log at startup.
     """
-    target = Path(path) if path is not None else DEFAULT_ENV_PATH
+    target = Path(path) if path is not None else default_env_path()
     if not target.is_file():
         return []
 

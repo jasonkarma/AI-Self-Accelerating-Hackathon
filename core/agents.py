@@ -11,7 +11,13 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
-from .llm import AGENT_MODELS, AgentModel, ModelRouter, resolve_thinking_budget
+from .llm import (
+    AGENT_MODELS,
+    AgentModel,
+    ModelRouter,
+    resolve_reasoning_effort,
+    resolve_thinking_budget,
+)
 from .prompts import (
     AFFINITY_SCIENTIST_PROMPT,
     DEVELOPABILITY_SCIENTIST_PROMPT,
@@ -138,23 +144,29 @@ async def run_planner(
 
 
 def thinking_configuration(router: ModelRouter | None = None) -> list[dict]:
-    """Audit view: which agents think, and with what (resolved) budget."""
+    """Audit view: which agents deliberate, and how hard (resolved values)."""
     report = []
     for definition in AGENT_DEFINITIONS.values():
         if router is not None:
             spec = router.effective_spec_for(definition.role) or router.spec_for(definition.role)
         else:
             spec = definition.model
-        budget = resolve_thinking_budget(spec) if spec else None
+        spec = spec or definition.model
+        budget = resolve_thinking_budget(spec)
+        effort = resolve_reasoning_effort(spec)
         report.append(
             {
                 "role": definition.role,
-                "model": spec.model if spec else definition.model.model,
-                "provider": spec.provider if spec else definition.model.provider,
+                "model": spec.model,
+                "provider": spec.provider,
                 "requested_model": definition.model.model,
                 "thinking_budget": budget,
                 "extended_thinking": bool(budget),
-                "supports_thinking": (spec or definition.model).provider == "anthropic",
+                "supports_thinking": spec.provider == "anthropic",
+                "reasoning_effort": effort,
+                "effort_label": (
+                    f"{budget} tokens" if budget else (effort or "none")
+                ),
             }
         )
     return report

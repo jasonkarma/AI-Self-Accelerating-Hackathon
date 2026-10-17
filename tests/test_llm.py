@@ -1,4 +1,4 @@
-"""Guards for cognitive diversity, gateway routing, and thinking budgets."""
+"""Guards for cognitive diversity, gateway routing, and deliberation settings."""
 from __future__ import annotations
 
 import pytest
@@ -9,6 +9,7 @@ from core.llm import (
     AnthropicReasoner,
     ModelRouter,
     OpenAICompatibleReasoner,
+    resolve_reasoning_effort,
     resolve_thinking_budget,
     strict_json_schema,
 )
@@ -49,19 +50,52 @@ def test_thinking_block_only_when_budget_configured(monkeypatch):
     assert "thinking" not in plain.build_payload("system", {})
 
 
-def test_skeptic_thinks_and_developability_does_not():
+def test_skeptic_and_developability_think_with_asymmetric_budgets():
     budgets = {row["role"]: row["thinking_budget"] for row in thinking_configuration()}
     assert budgets["Scientific Skeptic"] == 4096
-    assert budgets["Developability Scientist"] is None
+    assert budgets["Developability Scientist"] == 2048
+    assert budgets["Affinity Scientist"] is None
     assert AGENT_DEFINITIONS["planner"].response_schema is RoundDecisionRecord
+
+
+def test_planner_defaults_to_high_reasoning_effort():
+    assert AGENT_MODELS["planner"].reasoning_effort == "high"
+    assert resolve_reasoning_effort(AGENT_MODELS["planner"]) == "high"
+    # Non-OpenAI seats never emit the field.
+    assert resolve_reasoning_effort(AGENT_MODELS["skeptic"]) is None
+
+
+def test_reasoning_effort_env_override(monkeypatch):
+    planner = AGENT_MODELS["planner"]
+    monkeypatch.setenv("PLANNER_REASONING_EFFORT", "medium")
+    assert resolve_reasoning_effort(planner) == "medium"
+
+    monkeypatch.setenv("PLANNER_REASONING_EFFORT", "off")
+    assert resolve_reasoning_effort(planner) is None
+
+    monkeypatch.setenv("PLANNER_REASONING_EFFORT", "turbo")
+    with pytest.raises(ValueError):
+        resolve_reasoning_effort(planner)
+
+
+def test_planner_payload_carries_reasoning_effort():
+    planner = OpenAICompatibleReasoner(
+        base_url="https://api.openai.com/v1",
+        api_key="t",
+        model="gpt-6.1-sol",
+        structured_outputs=True,
+        token_param="max_completion_tokens",
+        reasoning_effort="high",
+    )
+    assert planner.build_payload("system", {})["reasoning_effort"] == "high"
 
 
 def test_agent_thinking_budget_can_be_tuned_by_environment(monkeypatch):
     spec = AGENT_MODELS["developability"]
-    assert resolve_thinking_budget(spec) is None
-
-    monkeypatch.setenv("DEVELOPABILITY_THINKING_BUDGET", "2048")
     assert resolve_thinking_budget(spec) == 2048
+
+    monkeypatch.setenv("DEVELOPABILITY_THINKING_BUDGET", "1024")
+    assert resolve_thinking_budget(spec) == 1024
 
     monkeypatch.setenv("SKEPTIC_THINKING_BUDGET", "off")
     assert resolve_thinking_budget(AGENT_MODELS["skeptic"]) is None

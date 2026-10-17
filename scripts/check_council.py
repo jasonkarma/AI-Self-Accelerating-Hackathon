@@ -25,17 +25,20 @@ def main() -> int:
     roster = router.describe_roster()
     budgets = {row["role"]: row for row in thinking_configuration(router)}
 
-    header = f"{'ROLE':26} {'REQUESTED':32} {'SERVING':32} {'LIVE':5} {'THINK':>6}  BASE_URL"
+    header = (
+        f"{'ROLE':26} {'REQUESTED':30} {'SERVING':30} {'LIVE':5} "
+        f"{'DELIBERATION':14}  BASE_URL"
+    )
     print(header)
     print("-" * len(header))
     for row in roster:
-        budget = budgets[row["role"]]["thinking_budget"]
+        deliberation = budgets[row["role"]]["effort_label"]
         requested = f"{row['provider']}/{row['model']}"
         serving = f"{row['effective_provider']}/{row['effective_model']}" if row["live"] else "offline"
         marker = " *" if row["fallback_used"] else ""
         print(
-            f"{row['role']:26} {requested:32} {serving + marker:32} "
-            f"{str(row['live']):5} {str(budget):>6}  {row['base_url'] or '-'}"
+            f"{row['role']:26} {requested:30} {serving + marker:30} "
+            f"{str(row['live']):5} {deliberation:14}  {row['base_url'] or '-'}"
         )
 
     distinct = len({row["effective_model"] for row in roster if row["live"]})
@@ -44,6 +47,7 @@ def main() -> int:
     print()
     print(f"distinct live models: {distinct}/{len(roster)}  (* = served by a fallback)")
     print(f"extended thinking: {[r for r, b in budgets.items() if b['extended_thinking']]}")
+    print(f"reasoning effort: { {r: b['reasoning_effort'] for r, b in budgets.items() if b['reasoning_effort']} }")
     if rehomed:
         print(f"re-homed seats: {rehomed}")
     if offline:
