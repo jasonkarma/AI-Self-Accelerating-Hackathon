@@ -12,6 +12,8 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+import pandas as pd
+
 from .llm import (
     AGENT_MODELS,
     AgentModel,
@@ -25,7 +27,13 @@ from .prompts import (
     EXPERIMENTAL_PLANNER_SYNTHESIZER_PROMPT,
     SKEPTIC_CRITIC_PROMPT,
 )
-from .schemas import AgentMemo, RoundDecisionRecord
+from .acquisition import (
+    AGENT_PRIOR_BOUND,
+    adaptive_prior_score,
+    positional_priors_from_revealed,
+    sar_effect_table,
+)
+from .schemas import AgentMemo, PositionalSoftPrior, RoundDecisionRecord
 
 
 @dataclass(frozen=True)
@@ -88,6 +96,104 @@ def _schema_for(definition: AgentDefinition) -> dict | None:
     if definition.response_schema is None:
         return None
     return definition.response_schema.model_json_schema()
+
+
+#: How many SAR rows the planner is shown. Enough to reason about which
+#: substitutions are actually working, few enough to keep the prompt bounded.
+SAR_HINT_ROWS = 12
+
+
+def surrogate_residuals(
+    revealed: pd.DataFrame | None,
+    mu: dict[str, float] | None,
+) -> dict[str, float]:
+    """``y_bind - mu_bind`` for each revealed candidate.
+
+    Residuals, not raw bindings, are the right target for a positional effect:
+    the surrogate already absorbs the additive multi-mutation structure, so a
+    candidate that measured high *and* was predicted high says nothing about its
+    individual substitutions, while a candidate that surprised the model does.
+    Using raw ``y_bind`` is what let co-mutation confounding masquerade as a
+    single-site effect.
+    """
+    if revealed is None or getattr(revealed, "empty", True) or not mu:
+        return {}
+    residuals: dict[str, float] = {}
+    for row in revealed.itertuples():
+        predicted = mu.get(str(row.candidate_id))
+        if predicted is None or pd.isna(row.y_bind):
+            continue
+        residuals[str(row.candidate_id)] = float(row.y_bind) - float(predicted)
+    return residuals
+
+
+def adaptive_prior_evidence(
+    ledger: pd.DataFrame | None,
+    tau_dev: float | None,
+    *,
+    priors: list[PositionalSoftPrior] | None = None,
+    sequences: list[str] | None = None,
+    residuals: dict[str, float] | None = None,
+    falsified_positions: set[int] | frozenset[int] = frozenset(),
+) -> dict:
+    """Deterministic evidence behind ``Δ_agent``, for the planner and the fallback.
+
+    The agents' prior is the council's declared positional priors **plus** an
+    empirical-Bayes-shrunk SAR term. Both halves are shown to the planner so a
+    memo can cite *why* a substitution scores, and the same numbers feed
+    :func:`core.acquisition.adaptive_prior_score` at selection time - one code
+    path, so a live run and the benchmark cannot diverge.
+
+    Nothing here reads ``y_bind`` for an unrevealed candidate: ``ledger`` is the
+    campaign's revealed frame by construction.
+    """
+    effects = sar_effect_table(ledger, tau_dev=tau_dev, residuals=residuals)
+    derived = list(
+        priors
+        if priors is not None
+        else positional_priors_from_revealed(ledger, falsified_positions=falsified_positions)
+    )
+    ranked = sorted(effects.items(), key=lambda item: abs(item[1][1]), reverse=True)[:SAR_HINT_ROWS]
+    return {
+        "sar_basis": effects.basis,
+        "sar_support": effects.support,
+        "sar_effects": [
+            {"position": position, "residue": residue, "n": n, "shrunk_effect": round(effect, 3)}
+            for (position, residue), (n, effect) in ranked
+        ],
+        "falsified_positions": sorted(int(p) for p in falsified_positions),
+        "positional_priors": [prior.model_dump() for prior in derived],
+        "scored_examples": (
+            {
+                sequence: round(
+                    adaptive_prior_score(
+                        sequence,
+                        priors=derived,
+                        sar_effects=effects,
+                        falsified_positions=falsified_positions,
+                    ),
+                    4,
+                )
+                for sequence in sequences
+            }
+            if sequences
+            else {}
+        ),
+        "bounds": {
+            "delta_agent": AGENT_PRIOR_BOUND,
+            "note": "Δ_agent is tanh-saturated; it can re-rank neighbours, never override the surrogate",
+        },
+    }
+
+
+def deterministic_priors(
+    ledger: pd.DataFrame | None,
+    tau_dev: float | None,
+    *,
+    falsified_positions: set[int] | frozenset[int] = frozenset(),
+) -> list[PositionalSoftPrior]:
+    """Priors used by the offline fallback decision and by ``AdaptiveToolPolicy``."""
+    return positional_priors_from_revealed(ledger, falsified_positions=falsified_positions)
 
 
 async def run_agent(
@@ -176,6 +282,10 @@ async def run_planner(
         "latest_revealed_candidate_ids": deterministic_evidence.get(
             "latest_revealed_candidate_ids", []
         ),
+        # The exact SAR table and derived priors the selector will use for
+        # Δ_agent. The planner chooses *which* rule to state; the numbers behind
+        # it are deterministic and identical to the acquisition-time values.
+        "adaptive_prior_evidence": deterministic_evidence.get("adaptive_prior_evidence", {}),
         "deterministic_evidence": deterministic_evidence,
         "council_memos": [
             {

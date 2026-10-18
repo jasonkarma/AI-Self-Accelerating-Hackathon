@@ -12,59 +12,59 @@
     },
     {
       "query_count": 10,
-      "m1_random": 7.824,
-      "m2_greedy": 7.696,
-      "m3_ucb": 7.856,
-      "m4_fixed_prior": 7.756,
-      "m5_hybrid": 7.787
+      "m1_random": 7.993,
+      "m2_greedy": 8.231,
+      "m3_ucb": 7.924,
+      "m4_fixed_prior": 8.294,
+      "m5_hybrid": 8.018
     },
     {
       "query_count": 15,
-      "m1_random": 8.0,
-      "m2_greedy": 7.924,
-      "m3_ucb": 7.862,
-      "m4_fixed_prior": 8.172,
-      "m5_hybrid": 7.862
+      "m1_random": 8.082,
+      "m2_greedy": 8.294,
+      "m3_ucb": 8.249,
+      "m4_fixed_prior": 8.294,
+      "m5_hybrid": 8.388
     },
     {
       "query_count": 20,
-      "m1_random": 8.077,
-      "m2_greedy": 8.096,
-      "m3_ucb": 8.079,
-      "m4_fixed_prior": 8.219,
-      "m5_hybrid": 7.943
+      "m1_random": 8.231,
+      "m2_greedy": 8.306,
+      "m3_ucb": 8.394,
+      "m4_fixed_prior": 8.316,
+      "m5_hybrid": 8.394
     },
     {
       "query_count": 25,
-      "m1_random": 8.199,
-      "m2_greedy": 8.157,
-      "m3_ucb": 8.254,
-      "m4_fixed_prior": 8.522,
-      "m5_hybrid": 7.988
+      "m1_random": 8.306,
+      "m2_greedy": 8.352,
+      "m3_ucb": 8.394,
+      "m4_fixed_prior": 8.388,
+      "m5_hybrid": 8.399
     },
     {
       "query_count": 30,
-      "m1_random": 8.399,
-      "m2_greedy": 8.266,
-      "m3_ucb": 8.305,
-      "m4_fixed_prior": 8.775,
-      "m5_hybrid": 8.112
+      "m1_random": 8.341,
+      "m2_greedy": 8.427,
+      "m3_ucb": 8.394,
+      "m4_fixed_prior": 8.399,
+      "m5_hybrid": 8.489
     },
     {
       "query_count": 35,
-      "m1_random": 8.399,
-      "m2_greedy": 8.266,
-      "m3_ucb": 8.341,
-      "m4_fixed_prior": 8.775,
-      "m5_hybrid": 8.112
+      "m1_random": 8.341,
+      "m2_greedy": 8.495,
+      "m3_ucb": 8.399,
+      "m4_fixed_prior": 8.578,
+      "m5_hybrid": 8.489
     }
   ],
   "aubqc": {
-    "m1_random": 1.863894631797611,
-    "m2_greedy": 1.8681903208614952,
-    "m3_ucb": 1.8665838717596681,
-    "m4_fixed_prior": 1.9125162758053633,
-    "m5_hybrid": 1.8557963312731272
+    "m1_random": 1.8848449482312688,
+    "m2_greedy": 1.921099360662017,
+    "m3_ucb": 1.9009581397786977,
+    "m4_fixed_prior": 1.9193928324409324,
+    "m5_hybrid": 1.930081954042634
   },
   "matched_initial_seeds": {
     "0": [

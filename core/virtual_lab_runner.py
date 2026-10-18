@@ -8,7 +8,14 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 import pandas as pd
 
-from .agents import AGENT_DEFINITIONS, run_planner, run_scientists
+from .acquisition import qualified_pool
+from .agents import (
+    AGENT_DEFINITIONS,
+    adaptive_prior_evidence,
+    deterministic_priors,
+    run_planner,
+    run_scientists,
+)
 from .llm import DeterministicReasoner, ModelRouter
 from .schemas import AgentMemo, PositionalSoftPrior, RoundDecisionRecord
 from .tool_arsenal import (
@@ -65,9 +72,17 @@ class RoundEventBus:
 
 
 def _deterministic_decision(
-    round_number: int, ledger: pd.DataFrame, ranked: list[str], tools: list[str]
+    round_number: int, ledger: pd.DataFrame, ranked: list[str], tools: list[str],
+    *, priors: list[PositionalSoftPrior] | None = None,
 ) -> RoundDecisionRecord:
-    """Frozen contract-satisfying decision, used when the planner is offline."""
+    """Frozen contract-satisfying decision, used when the planner is offline.
+
+    The priors are derived from the revealed ledger (top-``k`` consensus
+    substitutions) instead of a hardcoded ``W3`` rule, so the offline fallback
+    speaks the same language as :func:`core.acquisition.adaptive_prior_score`.
+    ``ranked`` is ordered by ``sigma_joint``; slots 4 and 5 are only a starting
+    point because the selector re-derives them from ``Δ_agent``.
+    """
     return RoundDecisionRecord(
         round_number=round_number,
         phase="Cold-Start Tuition (Exploration)" if round_number <= 2 else "Self-Accelerating Payoff (Exploitation)",
@@ -78,7 +93,7 @@ def _deterministic_decision(
         supporting_candidate_ids=ledger.candidate_id.astype(str).head(3).tolist() if not ledger.empty else [],
         agent_disagreement_summary="Skeptic reserves a direct falsification slot.",
         confidence_rating="Low" if len(ledger) < 15 else "Medium",
-        positional_priors=[PositionalSoftPrior(position=3, preferred_residues=["W"], discouraged_residues=[], weight_delta=.15)],
+        positional_priors=priors or [PositionalSoftPrior(position=3, preferred_residues=["W"], discouraged_residues=[], weight_delta=.15)],
         slot3_uncertainty_target_id=ranked[0],
         slot4_hypothesis_target_id=ranked[1],
         slot5_falsification_target_id=ranked[2],
@@ -219,7 +234,11 @@ class VirtualLabRunner:
         except (KeyError, TypeError) as exc:
             return {"tool": "profile_developability_liabilities", "rows": [], "error": str(exc)}
 
-    async def plan_round(self, round_number: int, ledger: pd.DataFrame, unqueried: pd.DataFrame) -> tuple[RoundDecisionRecord, list[AgentMemo]]:
+    async def plan_round(self, round_number: int, ledger: pd.DataFrame, unqueried: pd.DataFrame,
+                         *, tau_dev: float | None = None,
+                         residuals: dict[str, float] | None = None,
+                         falsified_positions: set[int] | frozenset[int] = frozenset(),
+                         ) -> tuple[RoundDecisionRecord, list[AgentMemo]]:
         phase_short = "Cold-Start Tuition" if round_number <= 2 else "Self-Accelerating Payoff"
         phase_exact = "Cold-Start Tuition (Exploration)" if round_number <= 2 else "Self-Accelerating Payoff (Exploitation)"
         await self.events.emit("round_started", {"round": round_number, "phase": phase_short})
@@ -234,7 +253,16 @@ class VirtualLabRunner:
         for name, output in tools.items():
             await self.events.emit("tool_output", {"tool": name, "output": output})
 
-        ranked = unqueried.sort_values(["sigma_joint", "candidate_id"], ascending=[False, True]).candidate_id.tolist()
+        # Slots are only ever filled from the qualified pool: an unqualified
+        # candidate cannot count toward best_qualified_binding, so a planner
+        # naming one would waste oracle budget. ``y_dev`` is sequence-derived and
+        # therefore free at t=0 (SPEC §2), so gating on it leaks nothing.
+        eligible = qualified_pool(unqueried, tau_dev)
+        ranked = eligible.sort_values(["sigma_joint", "candidate_id"], ascending=[False, True]).candidate_id.tolist()
+        if len(ranked) < 3:
+            # Never let the gate starve the quota: fall back to the full pool.
+            eligible = unqueried
+            ranked = unqueried.sort_values(["sigma_joint", "candidate_id"], ascending=[False, True]).candidate_id.tolist()
 
         async def stream_memo(memo: AgentMemo) -> None:
             await self.events.emit("agent_memo", memo.model_dump())
@@ -248,7 +276,24 @@ class VirtualLabRunner:
             self.router, tools, on_memo=stream_memo, on_error=report_error
         )
 
-        decision = _deterministic_decision(round_number, ledger, ranked, list(tools))
+        # The exact Σ-priors + empirical-SAR numbers behind Δ_agent, reused for
+        # the fallback decision and the planner's context so the LLM sees the same
+        # arithmetic the selector will apply.
+        derived_priors = deterministic_priors(ledger, tau_dev, falsified_positions=falsified_positions)
+        sample_sequences = (
+            eligible.sequence.astype(str).head(5).tolist() if "sequence" in eligible.columns else []
+        )
+        prior_evidence = adaptive_prior_evidence(
+            ledger, tau_dev,
+            priors=derived_priors,
+            sequences=sample_sequences,
+            residuals=residuals,
+            falsified_positions=falsified_positions,
+        )
+        decision = _deterministic_decision(
+            round_number, ledger, ranked, list(tools),
+            priors=derived_priors,
+        )
 
         if self.router.is_live(AGENT_DEFINITIONS["planner"].role):
             await self.events.emit("planner_started", {"role": AGENT_DEFINITIONS["planner"].role})
@@ -261,6 +306,15 @@ class VirtualLabRunner:
                         "tools": tools,
                         "max_joint_uncertainty_candidate": ranked[0],
                         "next_uncertainty_candidates": ranked[1:6],
+                        "candidate_sequences": (
+                            {str(row.candidate_id): str(row.sequence) for row in eligible.head(12).itertuples()}
+                            if "sequence" in eligible.columns else {}
+                        ),
+                        "surrogate_residuals": {
+                            cid: round(value, 3) for cid, value in (residuals or {}).items()
+                        },
+                        "falsified_positions": sorted(int(p) for p in falsified_positions),
+                        "adaptive_prior_evidence": prior_evidence,
                         "latest_revealed_candidate_ids": (
                             ledger.candidate_id.astype(str).tolist() if not ledger.empty else []
                         ),

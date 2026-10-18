@@ -67,6 +67,40 @@ real (instead of dumping t=0 state), and streams each scientist's name, thinking
 the terminal as it finishes, then prints the validated `RoundDecisionRecord` JSON.
 Flags: `--rounds N`, `--allow-offline`, `--verbose` (full tool payloads), `--no-color`.
 
+The final `CAMPAIGN STATE` block ends with a `BASELINE COMPARISON · q=35` table read from
+`results/benchmark_10seeds.json`, showing this live run's `best_qualified_binding` and AUBQC next to
+`M1`–`M4` **and** `M5 (10-seed)`, so the ten-seed benchmark M5 and the single live M5 are visible
+side by side. `delta vs WT` is measured against the measured WT when the pool contains it, otherwise
+against the frozen q=5 seed baseline, so it moves with `best_qualified_binding` instead of staying at
+`0.0`. Each round's hypothesis is graded as a paired H1-vs-H0 experiment (Slot 4 against Slot 5) and
+printed with its verdict, and the campaign can be resumed from an existing ledger without losing
+those counters — delete `results/campaign.sqlite3` for a clean slate.
+
+### How the batch is designed
+
+Every slot is filled from the developability-qualified pool (`y_dev >= tau_dev`), because an
+unqualified candidate can never move `best_qualified_binding`. Two acquisition scores decide the
+batch:
+
+```
+A_null(s) = A_base(s) + loop_prior_score(s)      # shared with M4
+A_H1(s)   = A_null(s) + Δ_agent(s)               # M5, |Δ_agent| <= 0.06
+```
+
+| Slot | Objective |
+| --- | --- |
+| 1–2 | top 2 by `A_H1` — surrogate exploitation plus the agents' vote |
+| 3 | `A_null + (1 − spent/budget) · 0.50 · σ_joint` — optimistic UCB that anneals to pure exploitation |
+| 4 | top `A_H1` among `Δ_agent > 0` — the H1 positive arm |
+| 5 | top `A_null` among `Δ_agent <= 0` — the H0 null control |
+
+Slots 4 and 5 form a paired control experiment inside every batch, so a hypothesis is graded by the
+candidates measured against it rather than against a cross-round median. `Δ_agent` is the council's
+summed positional priors plus an empirical-Bayes SAR term over surrogate **residuals**, shrunk by
+`n / (n + 3)` with `n < 2` contributing nothing — noisy singletons are damped during cold start, and
+confirmed multi-observation SAR steers later rounds without any round switch. A rule that loses its
+paired test is inverted in later rounds, so the lab genuinely self-corrects.
+
 ### Pre-flight check
 
 ```bash

@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import math
 import os
 import shutil
 import sys
@@ -94,6 +96,101 @@ class Console:
 
 
 CONSOLE = Console()
+
+#: Methods shown beside the live run. ``m5_hybrid`` is the **10-seed benchmark**
+#: M5 (``AdaptiveToolPolicy`` driving the same portfolio), not the council — it
+#: is labelled "M5 (10-seed)" so it can never be mistaken for the live number,
+#: which is reported separately as "live M5".
+BASELINE_METHODS = ("m1_random", "m2_greedy", "m3_ucb", "m4_fixed_prior", "m5_hybrid")
+BASELINE_LABELS = {
+    "m1_random": "M1",
+    "m2_greedy": "M2",
+    "m3_ucb": "M3",
+    "m4_fixed_prior": "M4",
+    "m5_hybrid": "M5 (10-seed)",
+}
+
+
+def load_benchmark(path: Path | None = None) -> dict | None:
+    """Read the frozen benchmark artifact; ``None`` when it is absent or stale."""
+    path = path or SETTINGS.benchmark_path
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def _fmt(value: Any, width: int = 6) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return f"{'n/a':>{width}}"
+    return f"{'n/a' if not math.isfinite(number) else f'{number:.3f}':>{width}}"
+
+
+def print_benchmark_comparison(campaign) -> None:
+    """Compact q=35 comparison of this live run against M1-M5 (10-seed)."""
+    benchmark = load_benchmark()
+    kpis = campaign.state["kpis"]
+    live_best = float(kpis["best_qualified_binding"])
+    live_aubqc = campaign.aubqc()
+
+    CONSOLE.section("BASELINE COMPARISON · q=35")
+    if not benchmark:
+        print(f"  {CONSOLE.paint('results/benchmark_10seeds.json unavailable — run scripts/run_benchmark.py', 'yellow')}")
+        return
+
+    curves = benchmark.get("curves") or []
+    final = next((row for row in curves if int(row.get("query_count", 0)) == 35), None)
+    if final is None and curves:
+        final = max(curves, key=lambda row: int(row.get("query_count", 0)))
+    final = final or {}
+    aubqc = benchmark.get("aubqc") or {}
+
+    cells = "".join(
+        f"  {BASELINE_LABELS[method]} {_fmt(final.get(method))}"
+        for method in BASELINE_METHODS
+    )
+    CONSOLE.kv("best qualified binding", f"live M5 {_fmt(live_best)}" + cells)
+    aubqc_cells = "".join(
+        f"  {BASELINE_LABELS[method]} {_fmt(aubqc.get(method))}"
+        for method in BASELINE_METHODS
+    )
+    CONSOLE.kv("AUBQC (1/30 scaling)", f"live M5 {_fmt(live_aubqc)}" + aubqc_cells)
+
+    # Two comparisons, because they answer different questions: the 10-seed M5
+    # is the *same* policy family run many times (does the design work on
+    # average?), while the live M5 is one council-driven campaign (does it work
+    # here?). Both are reported, never averaged together.
+    benchmark_values = {
+        method: final.get(method) for method in BASELINE_METHODS if final.get(method) is not None
+    }
+    benchmark_aubqc = {
+        method: aubqc.get(method) for method in BASELINE_METHODS if aubqc.get(method) is not None
+    }
+    if benchmark_values:
+        name, value = max(benchmark_values.items(), key=lambda item: float(item[1]))
+        gap = live_best - float(value)
+        verdict = "ahead of" if gap > 0 else ("level with" if gap == 0 else "behind")
+        print(
+            f"  {CONSOLE.paint('→', 'grey')} live M5 {verdict} the best q=35 baseline "
+            f"({BASELINE_LABELS[name]} {_fmt(value)}) by {gap:+.3f} binding units"
+        )
+    if benchmark_aubqc:
+        name, value = max(benchmark_aubqc.items(), key=lambda item: float(item[1]))
+        gap = live_aubqc - float(value)
+        verdict = "ahead of" if gap > 0 else ("level with" if gap == 0 else "behind")
+        print(
+            f"  {CONSOLE.paint('→', 'grey')} live M5 AUBQC {verdict} the best baseline "
+            f"({BASELINE_LABELS[name]} {_fmt(value)}) by {gap:+.4f}"
+        )
+    seeds = benchmark.get("seeds", "?")
+    policy = benchmark.get("m5_policy_mode", "?")
+    note = (
+        f"reference: {seeds} seeds, median best-qualified binding at q=35 "
+        f"(M5 benchmark policy={policy}); live M5 is this single campaign"
+    )
+    print(f"  {CONSOLE.paint(note, 'dim')}")
 
 
 # ── Event rendering ───────────────────────────────────────────────────────────
@@ -328,7 +425,14 @@ async def run(args: argparse.Namespace) -> int:
     CONSOLE.kv("queries spent", f"{kpis['query_budget_spent']}/{kpis['total_budget']}")
     CONSOLE.kv("hypotheses supported", kpis["hypotheses_supported"])
     CONSOLE.kv("hypotheses falsified", kpis["hypotheses_falsified"])
+    if campaign.hypotheses:
+        history = "  ".join(
+            f"R{item['round_number']}:{item['verdict']}" for item in campaign.hypotheses
+        )
+        CONSOLE.kv("verdicts by round", history)
     CONSOLE.kv("ledger verified", campaign.ledger.verify())
+
+    print_benchmark_comparison(campaign)
 
     return 0
 
