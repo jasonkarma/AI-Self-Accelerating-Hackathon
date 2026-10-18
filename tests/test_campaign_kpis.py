@@ -8,12 +8,17 @@ import pytest
 
 from core.acquisition import (
     AGENT_PRIOR_BOUND,
+    SLOT5_FALSIFY_LABEL,
     adaptive_prior_score,
     fixed_expert_prior,
+    horizon_factor,
     loop_prior_score,
     qualified_pool,
+    sar_maturity_score,
     sar_effect_table,
     select_five_slots,
+    value_of_information,
+    voi_context,
 )
 from core.baselines import METHODS, run_method
 from core.constants import WT_SEQUENCE
@@ -260,12 +265,97 @@ def test_slot3_anneals_exploration_with_budget():
     frame = _scored_frame()
     early = select_five_slots(frame, None, tau_dev=0.5, queries_spent=5, total_budget=35)[2]
     late = select_five_slots(frame, None, tau_dev=0.5, queries_spent=35, total_budget=35)[2]
-    # With no budget left, slot 3 must be the argmax of A_null (no sigma bonus).
-    no_bonus = frame.assign(
-        a_null=frame.a_base + [loop_prior_score(s) for s in frame.sequence]
-    ).sort_values(["a_null", "candidate_id"], ascending=[False, True])
-    # It may coincide with an earlier pick; only assert the annealing direction.
+    # The annealing direction only: on the final batch VoI is 0, so no candidate
+    # can score above its own A_H1, and max(A_H1 + bonus) >= max(A_H1).
     assert late["optimistic"] <= early["optimistic"] + 1e-9
+
+
+def test_dynamic_voi_formula_and_final_batch_are_exact():
+    """H is post-batch horizon; the final batch has strictly zero VoI."""
+    assert horizon_factor(5, total_budget=35, batch_size=5) == 1.0
+    assert horizon_factor(10, total_budget=35, batch_size=5) == pytest.approx(0.8)
+    assert horizon_factor(30, total_budget=35, batch_size=5) == 0.0
+
+    mature = sar_maturity_score([0.0, 0.5 * AGENT_PRIOR_BOUND, AGENT_PRIOR_BOUND])
+    assert mature == 1.0
+    assert value_of_information(1.0, mature) == pytest.approx(0.35)
+    assert value_of_information(0.0, 0.0) == 0.0
+
+    final = voi_context(
+        [AGENT_PRIOR_BOUND], queries_spent=30, total_budget=35, batch_size=5
+    )
+    assert final == {
+        "horizon": 0.0,
+        "sar_maturity": 1.0,
+        "voi": 0.0,
+        "harvest": True,
+    }
+
+
+def _dynamic_voi_frame() -> pd.DataFrame:
+    """A controlled frontier whose soft prior creates positive and null arms."""
+    rows = []
+    for i in range(9):
+        sequence = "ARWGGDGFYAMDY" if i < 6 else WT_SEQUENCE
+        rows.append({
+            "candidate_id": f"V{i}",
+            "sequence": sequence,
+            "y_dev": 0.9,
+            "a_base": 1.00 - 0.01 * i,
+            "sigma_joint": 1.0 if i == 8 else 0.0,
+            "sigma_bind": 0.1,
+            "sigma_dev": 0.1,
+            "mu_bind": 1.0,
+        })
+    return pd.DataFrame(rows)
+
+
+def _positive_prior_decision():
+    from core.schemas import RoundDecisionRecord
+
+    return RoundDecisionRecord(
+        round_number=1,
+        phase="Cold-Start Tuition (Exploration)",
+        tools_invoked=[],
+        hypothesis_id="HYP-VOI-01",
+        hypothesis_statement="Position 1 A is beneficial.",
+        previous_hypothesis_verdict="N/A (Round 1)",
+        supporting_candidate_ids=[],
+        agent_disagreement_summary="Controlled regression fixture.",
+        confidence_rating="Medium",
+        positional_priors=[
+            PositionalSoftPrior(position=1, preferred_residues=["A"], weight_delta=0.04)
+        ],
+        slot3_uncertainty_target_id="V0",
+        slot4_hypothesis_target_id="V1",
+        slot5_falsification_target_id="V6",
+    )
+
+
+def test_dynamic_slot3_uses_a_h1_and_slot5_switches_to_harvest():
+    frame = _dynamic_voi_frame()
+    decision = _positive_prior_decision()
+
+    # Early and unresolved: no SAR maturity and H=1 => VoI=1. Slot 5 must retain
+    # the strict non-positive control restriction.
+    early = select_five_slots(
+        frame, None, queries_spent=5, total_budget=35, batch_size=5
+    )
+    assert early[2]["optimistic"] == pytest.approx(
+        early[2]["a_h1"] + 0.50 * early[2]["voi"] * early[2]["sigma_joint"]
+    )
+    assert early[4]["slot_type"] == SLOT5_FALSIFY_LABEL
+    assert early[4]["delta_agent"] <= 0
+
+    # Final batch: H=VoI=0. Slot 3 is pure A_H1, and Slot 5 drops the sign filter
+    # and harvests the best remaining A_null candidate even though it is boosted.
+    final = select_five_slots(
+        frame, decision, queries_spent=30, total_budget=35, batch_size=5
+    )
+    assert final[2]["voi"] == 0.0
+    assert final[2]["optimistic"] == pytest.approx(final[2]["a_h1"])
+    assert final[4]["slot_type"] == SLOT5_FALSIFY_LABEL
+    assert final[4]["delta_agent"] > 0
 
 
 def test_select_five_slots_is_deterministic():

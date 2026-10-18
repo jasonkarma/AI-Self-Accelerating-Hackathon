@@ -9,12 +9,19 @@ the live campaign cannot drift apart:
   **residuals**, so a co-mutation artefact cannot masquerade as a single-site
   effect.
 * :func:`select_five_slots` — a paired H1/H0 experiment design: two exploitation
-  picks, one optimistic multi-beta exploration pick that anneals with budget, one
-  hypothesis-testing pick, and one null-control pick.
+  picks, one Value-of-Information exploration pick, one hypothesis-testing pick,
+  and one *dynamic* H0 / payoff-harvest pick.
 
 Nothing here is calibrated against a particular seed set, and there is no rank
 window or "top-N frontier" cutoff: slot 3 and slot 5 are scored by their own
 objectives over the *whole* qualified pool.
+
+The exploration -> exploitation transition is not a hand-written round switch.
+:func:`value_of_information` combines the remaining horizon ``H`` with the
+empirical SAR convergence ``C`` of the qualified frontier. Once the SAR term is
+corroborated (in practice by round 3-4), ``VoI`` falls below
+:data:`VOI_EXPLOIT_THRESHOLD` and the campaign shifts into all-in exploitation
+for the remaining rounds instead of boycotting proven SAR mutations.
 """
 from __future__ import annotations
 
@@ -54,12 +61,33 @@ SAR_MIN_OBSERVATIONS = 2
 SAR_HIT_WEIGHT = 0.03
 SAR_DELTA_SCALE = 0.30
 
-#: Optimistic-exploration coefficient for slot 3. Decays as ``1 - spent/budget``,
-#: so early rounds behave like a UCB and the last round is pure exploitation
-#: without any hand-written round switch.
+#: Optimistic-exploration coefficient for slot 3, now scaled by ``VoI`` instead of
+#: the old static ``1 - spent/budget``. ``VoI`` already collapses to 0.0 on the
+#: final batch, so slot 3 reverts to pure ``A_H1`` exploitation without any
+#: hand-written round switch.
 SLOT3_OPTIMISM = 0.50
 
 SLOT_COUNT = 5
+
+# ── Expected Value of Information (dynamic exploration -> exploitation) ──────
+#: How much corroborated SAR evidence discounts the value of further exploring.
+#: At ``sar_maturity == 1.0`` the exploration term keeps only ``1 - 0.65 = 0.35``
+#: of the remaining horizon, so a campaign whose frontier is already explained by
+#: positive SAR evidence stops paying for falsification probes.
+VOI_SAR_WEIGHT = 0.65
+
+#: Decision boundary for slot 5. Above it the batch still needs a strict
+#: ``Δ_agent <= 0`` null control (unknown territory, hypotheses unproven); at or
+#: below it the campaign is in payoff-harvest mode and slot 5 competes on
+#: ``A_null`` across the whole qualified pool instead of boycotting proven SAR.
+VOI_EXPLOIT_THRESHOLD = 0.35
+
+#: Stable slot labels used by the API and campaign reconciliation. Slot 5 keeps
+#: its historical label in harvest mode: its *allocation rule* changes, while it
+#: remains the null-objective side of the paired audit.
+SLOT3_LABEL = "Max Joint Uncertainty"
+SLOT4_LABEL = "Agent Hypothesis Test"
+SLOT5_FALSIFY_LABEL = "Skeptic Falsification Probe"
 
 
 # ── Shared WT loop prior ─────────────────────────────────────────────────────
@@ -321,6 +349,91 @@ def qualified_pool(frame: pd.DataFrame, tau_dev: float | None) -> pd.DataFrame:
     return qualified if len(qualified) >= SLOT_COUNT else frame
 
 
+# ── Expected Value of Information ────────────────────────────────────────────
+def horizon_factor(
+    queries_spent: int,
+    *,
+    total_budget: int,
+    batch_size: int = SLOT_COUNT,
+) -> float:
+    """Remaining-horizon factor ``H`` in ``[0, 1]``.
+
+    ``H`` asks how many batches are still funded *after the one being designed*::
+
+        future_queries = max(0, total_budget - (queries_spent + batch_size))
+        denom          = max(1, total_budget - 2 * batch_size)
+        H              = min(1.0, future_queries / denom)
+
+    It is ``1.0`` on the first batch after the seed (one full horizon left) and
+    strictly ``0.0`` on the final batch, where nothing after this one can ever be
+    measured — so no experiment designed now can inform a later decision. The
+    ``denom`` is the number of queries that remain after the first two batches,
+    which normalises ``H`` to the actual campaign length instead of hard-coding
+    "6 rounds".
+    """
+    future_queries = max(0, int(total_budget) - (int(queries_spent) + int(batch_size)))
+    denom = max(1, int(total_budget) - 2 * int(batch_size))
+    return float(min(1.0, future_queries / denom))
+
+
+def sar_maturity_score(delta_agent) -> float:
+    """Empirical SAR convergence ``C`` in ``[0, 1]``.
+
+    ``C`` is how strongly the qualified frontier is *already* corroborated by
+    positive SAR evidence::
+
+        C = min(1, max(0, max(Δ_agent)) / (0.5 · AGENT_PRIOR_BOUND))
+
+    Half the adaptive prior bound is the "established" bar: once some unqueried
+    qualified candidate sits at half the maximum the prior can contribute, the
+    substitution that carries it is no longer a live question — continuing to
+    spend a slot falsifying it buys nothing.
+    """
+    values = np.asarray(list(delta_agent), dtype=float) if len(delta_agent) else np.empty(0)
+    values = values[np.isfinite(values)]
+    max_pos_delta = max(0.0, float(np.max(values))) if values.size else 0.0
+    return float(min(1.0, max_pos_delta / (0.5 * AGENT_PRIOR_BOUND)))
+
+
+def value_of_information(horizon: float, sar_maturity: float) -> float:
+    """``VoI = H · (1 - 0.65 · C)``.
+
+    Horizon says *how long* new information could still matter; ``C`` says *how
+    much* is still unresolved. A campaign that has corroborated its SAR term is
+    discounted to 35% of its remaining horizon, and a campaign on its final batch
+    is worth exactly ``0.0`` regardless of ``C`` — nothing can be re-decided after
+    it.
+    """
+    h = float(np.clip(horizon, 0.0, 1.0))
+    c = float(np.clip(sar_maturity, 0.0, 1.0))
+    return float(max(0.0, min(1.0, h * (1.0 - VOI_SAR_WEIGHT * c))))
+
+
+def voi_context(
+    delta_agent,
+    *,
+    queries_spent: int,
+    total_budget: int,
+    batch_size: int = SLOT_COUNT,
+) -> dict:
+    """``(H, C, VoI)`` plus the harvest-mode flag, for one batch.
+
+    ``harvest`` is ``VoI <= VOI_EXPLOIT_THRESHOLD`` (rounded to 9 dp so a float
+    artefact of exactly 0.35 cannot flip the branch). In harvest mode the batch
+    no longer pays for a strict null control: slot 5 competes on ``A_null`` across
+    the whole qualified pool.
+    """
+    horizon = horizon_factor(queries_spent, total_budget=total_budget, batch_size=batch_size)
+    maturity = sar_maturity_score(delta_agent)
+    voi = value_of_information(horizon, maturity)
+    return {
+        "horizon": horizon,
+        "sar_maturity": maturity,
+        "voi": voi,
+        "harvest": bool(round(voi, 9) <= VOI_EXPLOIT_THRESHOLD),
+    }
+
+
 # ── The 5-slot portfolio ─────────────────────────────────────────────────────
 def select_five_slots(
     unqueried: pd.DataFrame,
@@ -333,11 +446,8 @@ def select_five_slots(
     falsified_positions: set[int] | frozenset[int] = frozenset(),
     queries_spent: int | None = None,
     total_budget: int | None = None,
+    batch_size: int = SLOT_COUNT,
 ) -> list[dict]:
-    # ``queries_spent`` / ``total_budget`` drive slot 3's annealing. When a
-    # caller omits them, derive ``queries_spent`` from the revealed ledger (the
-    # only defensible source) and take the budget from settings. Falling back to
-    # "0 spent" would leave a late round maximally exploratory.
     """Qualified 5-slot portfolio as a paired H1/H0 experiment (SPEC §6).
 
     Two acquisition scores are defined over the qualified unqueried pool::
@@ -346,27 +456,44 @@ def select_five_slots(
         A_H1(s)   = A_null(s) + Δ_agent(s)
 
     ``A_null`` is the shared M4 objective (surrogate + WT anchor rule); ``A_H1``
-    is M5's, which adds the council's bounded adaptive prior. The batch then
-    spends its five slots as:
+    is M5's, which adds the council's bounded adaptive prior. One Expected Value
+    of Information number, :func:`voi_context`, decides how much the batch is
+    still allowed to explore::
+
+        VoI = H · (1 - 0.65 · C)
+
+    The five slots are then:
 
     1-2  top 2 by ``A_H1`` — core exploitation.
-    3    ``A_null + (1 - spent/budget) · 0.50 · sigma_joint`` maximised over the
-         whole pool — an *optimistic* UCB whose exploration weight anneals to
-         zero as budget is spent, so late rounds are pure exploitation. Raw
+    3    ``A_H1 + 0.50 · VoI · sigma_joint`` maximised over the whole pool. As
+         ``VoI -> 0`` (SAR already corroborated, or ``future_queries == 0`` on the
+         final batch) the bonus vanishes and slot 3 *is* a pure ``A_H1``
+         exploitation slot, without a hand-written round switch. Raw
          ``max sigma_joint`` is deliberately not used: unconstrained, it picks
          the least-informed candidate in the pool regardless of whether that
          candidate could ever win.
     4    top ``A_H1`` among ``Δ_agent > 0`` — the H1 positive arm, i.e. a
          candidate the live hypothesis actually favours. Falls back to the
          unconstrained ``A_H1`` argmax if the prior boosts nobody (round 1).
-    5    top ``A_null`` among ``Δ_agent <= 0`` — the H0 null-control arm. This is
-         the paired counterfactual: if the agents are wrong, slot 5 still spends
-         on the best null-frontier candidate, so a bad hypothesis cannot starve
-         the batch of exploitative picks.
+    5    the dynamic H0 / payoff-harvest arm, on the unmodified null objective:
 
-    Because slot 4 and slot 5 are selected on the *same* batch from opposite
-    signs of ``Δ_agent``, every round yields a direct H1-vs-H0 comparison for
-    :func:`core.tool_arsenal.audit_past_hypotheses` to grade.
+         * ``VoI > 0.35`` (early, unconverged: the hypotheses still need strict
+           falsification) — top ``A_null`` among ``Δ_agent <= 0``.
+         * ``VoI <= 0.35`` (SAR corroborated by round 3-4, or the final harvest
+           rounds) — top ``A_null`` over the *full* remaining pool, with the
+           ``Δ_agent <= 0`` restriction dropped. Refusing the best null-frontier
+           candidate merely because it carries a proven SAR substitution is what
+           starved the last rounds of payoff.
+
+    Slots 4 and 5 are still chosen on the *same* batch, so every round yields a
+    direct H1-vs-H0 comparison for
+    :func:`core.tool_arsenal.audit_past_hypotheses` to grade — in harvest mode the
+    control is simply allowed to be the better candidate.
+
+    ``queries_spent`` / ``total_budget`` / ``batch_size`` drive ``H``. When a
+    caller omits them, ``queries_spent`` is derived from the revealed ledger (the
+    only defensible source) and the budget from settings: falling back to
+    "0 spent" would leave a late round maximally exploratory.
     """
     if len(unqueried) < SLOT_COUNT:
         raise ValueError("At least five unqueried candidates are required")
@@ -376,9 +503,6 @@ def select_five_slots(
         if total_budget is None:
             total_budget = SETTINGS.total_budget
         if queries_spent is None:
-            # The revealed ledger is the only defensible source: assuming "0
-            # spent" would leave every late round maximally exploratory, which is
-            # the opposite of annealing.
             revealed = 0 if ledger is None else int(len(ledger))
             queries_spent = revealed or int(SETTINGS.initial_queries)
 
@@ -402,10 +526,21 @@ def select_five_slots(
     frame["a_h1"] = frame.a_null + frame.delta_agent
     pool = qualified_pool(frame, tau_dev)
 
-    # Annealing exploration weight: 1.0 at the start, 0.0 once budget is spent.
-    remaining_budget = max(0, int(total_budget) - int(queries_spent))
-    exploration = (remaining_budget / float(total_budget)) if total_budget else 0.0
-    pool = pool.assign(optimistic=pool.a_null + exploration * SLOT3_OPTIMISM * pool.sigma_joint)
+    # ``C`` is measured over the *qualified* pool, i.e. over the candidates the
+    # batch could actually spend a slot on, not over optimistically-scored
+    # candidates that can never be queried.
+    context = voi_context(
+        pool.delta_agent.to_numpy(),
+        queries_spent=int(queries_spent),
+        total_budget=int(total_budget),
+        batch_size=int(batch_size),
+    )
+    pool = pool.assign(
+        horizon=context["horizon"],
+        sar_maturity=context["sar_maturity"],
+        voi=context["voi"],
+        optimistic=pool.a_h1 + SLOT3_OPTIMISM * context["voi"] * pool.sigma_joint,
+    )
 
     selected: list[dict] = []
 
@@ -425,22 +560,27 @@ def select_five_slots(
     for _, row in pool.sort_values(["a_h1", "candidate_id"], ascending=[False, True]).head(2).iterrows():
         take(row, "Dual-Surrogate UCB")
 
-    # Slot 3: optimistic multi-beta UCB, annealed by remaining budget.
+    # Slot 3: dynamic-VoI exploration; degenerates to pure A_H1 as VoI -> 0.
     rest = remaining()
-    take(best(rest, "optimistic"), "Max Joint Uncertainty")
+    take(best(rest, "optimistic"), SLOT3_LABEL)
 
     # Slot 4: H1 arm. The planner's declared target can only *tie-break*; it can
     # never force a candidate the acquisition score does not rank.
     rest = remaining()
     supported = rest.loc[rest.delta_agent > 0]
     hypothesis = best(supported, "a_h1") if not supported.empty else best(rest, "a_h1")
-    take(hypothesis, "Agent Hypothesis Test")
+    take(hypothesis, SLOT4_LABEL)
 
-    # Slot 5: H0 null-control arm, on the unmodified null objective.
+    # Slot 5: dynamic H0 control / payoff harvest. The Delta_agent <= 0
+    # restriction is a falsification device, not a permanent rule: once VoI says
+    # the SAR term is corroborated, boycotting proven mutations is a boycott.
     rest = remaining()
-    control = rest.loc[rest.delta_agent <= 0]
-    probe = best(control, "a_null") if not control.empty else best(rest, "a_null")
-    take(probe, "Skeptic Falsification Probe")
+    if context["harvest"]:
+        take(best(rest, "a_null"), SLOT5_FALSIFY_LABEL)
+    else:
+        control = rest.loc[rest.delta_agent <= 0]
+        probe = best(control, "a_null") if not control.empty else best(rest, "a_null")
+        take(probe, SLOT5_FALSIFY_LABEL)
 
     picked = [row["candidate_id"] for row in selected]
     if len(set(picked)) != len(picked):

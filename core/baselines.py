@@ -100,6 +100,7 @@ def _pick_m5(
     total_budget: int,
     falsified_positions: set[int] | frozenset[int],
     priors: list | None = None,
+    batch_size: int = SLOT_COUNT,
 ) -> list[str]:
     """M5's five slots, delegated to the single shared portfolio.
 
@@ -137,6 +138,7 @@ def _pick_m5(
         falsified_positions=falsified_positions,
         queries_spent=queries_spent,
         total_budget=total_budget,
+        batch_size=batch_size,
     )
     return [str(slot["candidate_id"]) for slot in chosen]
 
@@ -222,6 +224,7 @@ def run_method(frame: pd.DataFrame, normalizer: RiskNormalizer, tau_dev: float, 
                 total_budget=total_budget,
                 falsified_positions=falsified_positions,
                 priors=policy.last_priors,
+                batch_size=SLOT_COUNT,
             )
             picks.append(round_picks)
             queried.extend(round_picks)

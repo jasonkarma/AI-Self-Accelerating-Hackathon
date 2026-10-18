@@ -276,6 +276,7 @@ class Campaign:
             falsified_positions=falsified,
             queries_spent=int(len(revealed)),
             total_budget=SETTINGS.total_budget,
+            batch_size=SETTINGS.batch_size,
         )
         ids = [s["candidate_id"] for s in slots]
         # Stamp the decision with what the quota *actually* measures, plus the
