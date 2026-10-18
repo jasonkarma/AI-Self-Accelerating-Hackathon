@@ -27,7 +27,7 @@ def main() -> int:
 
     header = (
         f"{'ROLE':26} {'REQUESTED':30} {'SERVING':30} {'LIVE':5} "
-        f"{'DELIBERATION':14}  BASE_URL"
+        f"{'DELIBERATION':14} {'CAP':6}  BASE_URL"
     )
     print(header)
     print("-" * len(header))
@@ -36,9 +36,12 @@ def main() -> int:
         requested = f"{row['provider']}/{row['model']}"
         serving = f"{row['effective_provider']}/{row['effective_model']}" if row["live"] else "offline"
         marker = " *" if row["fallback_used"] else ""
+        # The ceiling actually sent on the wire: a small cap is the usual cause
+        # of an empty/truncated memo on a reasoning seat.
+        cap = row.get("max_tokens") or "-"
         print(
             f"{row['role']:26} {requested:30} {serving + marker:30} "
-            f"{str(row['live']):5} {deliberation:14}  {row['base_url'] or '-'}"
+            f"{str(row['live']):5} {deliberation:14} {str(cap):6}  {row['base_url'] or '-'}"
         )
 
     distinct = len({row["effective_model"] for row in roster if row["live"]})

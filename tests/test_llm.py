@@ -9,6 +9,7 @@ from core.llm import (
     AnthropicReasoner,
     ModelRouter,
     OpenAICompatibleReasoner,
+    resolve_max_tokens,
     resolve_reasoning_effort,
     resolve_thinking_budget,
     strict_json_schema,
@@ -99,6 +100,67 @@ def test_agent_thinking_budget_can_be_tuned_by_environment(monkeypatch):
 
     monkeypatch.setenv("SKEPTIC_THINKING_BUDGET", "off")
     assert resolve_thinking_budget(AGENT_MODELS["skeptic"]) is None
+
+
+def test_affinity_seat_has_headroom_for_deliberation():
+    """Regression: Round 2 crashed as ``4096 ... truncated output``.
+
+    The completion ceiling covers the model's hidden thinking as well as the
+    visible memo, so a <140-word prompt still needs thousands of tokens.
+    """
+    affinity = AGENT_MODELS["affinity"]
+    assert affinity.max_tokens >= 8192
+    # Every other seat must stay at or above the same floor to avoid the same bug.
+    assert all(spec.max_tokens >= 4096 for spec in AGENT_MODELS.values())
+
+
+def test_openai_transport_sends_the_configured_ceiling():
+    reasoner = OpenAICompatibleReasoner(
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+        api_key="t",
+        model="gemini-4-argon",
+        max_tokens=8192,
+    )
+    assert reasoner.build_payload("system", {})["max_tokens"] == 8192
+
+    # OpenAI proper rejects ``max_tokens`` on reasoning models.
+    openai_style = OpenAICompatibleReasoner(
+        base_url="https://api.openai.com/v1",
+        api_key="t",
+        model="gpt-6.1-sol",
+        max_tokens=8192,
+        token_param="max_completion_tokens",
+    )
+    payload = openai_style.build_payload("system", {})
+    assert payload["max_completion_tokens"] == 8192
+    assert "max_tokens" not in payload
+
+
+def test_max_tokens_env_override(monkeypatch):
+    affinity = AGENT_MODELS["affinity"]
+    assert resolve_max_tokens(affinity) == 8192
+
+    monkeypatch.setenv("AFFINITY_MAX_TOKENS", "16384")
+    assert resolve_max_tokens(affinity) == 16384
+
+    monkeypatch.setenv("AFFINITY_MAX_TOKENS", "0")
+    with pytest.raises(ValueError):
+        resolve_max_tokens(affinity)
+
+
+def test_fallback_seats_inherit_the_token_ceiling():
+    """A re-homed seat must not silently drop back to the 1024 dataclass default."""
+    for spec in AGENT_MODELS.values():
+        assert spec.fallbacks, f"{spec.slug} declares no fallback ladder"
+        for fallback in spec.fallbacks:
+            assert fallback.max_tokens == spec.max_tokens
+            assert fallback.timeout == spec.timeout
+
+
+def test_router_applies_max_tokens_override(monkeypatch):
+    monkeypatch.setenv("AFFINITY_MAX_TOKENS", "16384")
+    router = ModelRouter()
+    assert router.spec_for("Affinity Scientist").max_tokens == 16384
 
 
 def test_router_thinking_overrides_beat_env(monkeypatch):

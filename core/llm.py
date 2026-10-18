@@ -112,6 +112,23 @@ def _env_int(name: str, default: int | None) -> int | None:
     return value or None
 
 
+PROVIDER_ALIASES: dict[str, str] = {
+    "gemini": "google",
+    "googleai": "google",
+    "google-ai": "google",
+    "claude": "anthropic",
+    "oai": "openai",
+    "openai-compatible": "openai",
+}
+
+
+def normalize_provider(provider: str) -> str:
+    """Canonical provider key; defined before ``AgentModel`` so that seat
+    re-homing during module import (``AGENT_MODELS`` fallback ladders) works."""
+    key = provider.strip().lower()
+    return PROVIDER_ALIASES.get(key, key)
+
+
 @dataclass(frozen=True)
 class AgentModel:
     """Immutable cognitive-diversity assignment for one council role.
@@ -121,6 +138,13 @@ class AgentModel:
     ``<SLUG>_THINKING_BUDGET`` / ``<SLUG>_REASONING_EFFORT`` (see
     :func:`resolve_thinking_budget` and :func:`resolve_reasoning_effort`), so a
     live test can dial deliberation up or down without editing this table.
+
+    ``max_tokens`` is the completion ceiling (sent as ``max_tokens`` or, for
+    OpenAI proper, ``max_completion_tokens``).  It is *not* "the length of the
+    answer": reasoning models bill their hidden deliberation against the same
+    budget, so a seat with ``reasoning_effort="high"`` can burn the whole
+    ceiling before emitting a single visible token.  Override per seat with
+    ``<SLUG>_MAX_TOKENS`` (see :func:`resolve_max_tokens`).
 
     ``fallbacks`` is an ordered escape hatch: if the primary provider has no
     credentials (or is intentionally disabled), the seat re-homes to the next
@@ -171,6 +195,24 @@ def resolve_thinking_budget(spec: AgentModel) -> int | None:
     effect without touching source.
     """
     return _env_int(f"{spec.slug.upper()}_THINKING_BUDGET", spec.thinking_budget)
+
+
+def resolve_max_tokens(spec: AgentModel) -> int:
+    """Completion ceiling for a seat, override with ``<SLUG>_MAX_TOKENS``.
+
+    The override exists because the usable ceiling is a *gateway* property, not a
+    model property: an OpenAI-compatible router may clamp ``max_tokens`` well
+    below what the vendor allows (or reject the request outright).  Keeping the
+    default in ``AGENT_MODELS`` therefore only sets the baseline; a run on a
+    gateway with a different cap is an env change, not a source change.
+    """
+    raw = os.getenv(f"{spec.slug.upper()}_MAX_TOKENS")
+    if raw is None:
+        return spec.max_tokens
+    value = int(raw.strip())
+    if value <= 0:
+        raise ValueError(f"{spec.slug.upper()}_MAX_TOKENS must be a positive token budget")
+    return value
 
 
 #: Accepted OpenAI deliberation levels; anything else is treated as "unset".
@@ -310,7 +352,7 @@ def _agent(
     reasoning_effort: str | None = None,
     timeout: float = 90.0,
 ) -> AgentModel:
-    return AgentModel(
+    seat = AgentModel(
         slug=slug,
         role=role,
         provider=provider,
@@ -322,9 +364,14 @@ def _agent(
         temperature=temperature,
         reasoning_effort=reasoning_effort,
         timeout=timeout,
+    )
+    # Fallbacks inherit the seat's token ceiling.  Re-building them bare would
+    # reset max_tokens to the dataclass default (1024), so a re-homed seat would
+    # truncate even though the primary seat was given real headroom.
+    return replace(
+        seat,
         fallbacks=tuple(
-            AgentModel(slug=slug, role=role, provider=p, model=m)
-            for p, m in AGENT_FALLBACK_CHAINS.get(slug, ())
+            seat.rehomed(p, m) for p, m in AGENT_FALLBACK_CHAINS.get(slug, ())
         ),
     )
 
@@ -336,9 +383,16 @@ AGENT_MODELS: dict[str, AgentModel] = {
         "Affinity Scientist",
         "google",
         "gemini-4-argon",
-        # Re-homed onto a reasoning model the budget covers *thinking* too,
-        # so 1024 produced empty completions. Keep headroom for real prose.
-        max_tokens=4096,
+        # The completion budget covers *thinking* as well as prose, so 1024
+        # produced empty completions and 4096 truncated the Round 2 memo
+        # mid-sentence.  The prompt asks for <140 words, so 8192 is all headroom
+        # for a reasoning model, not a longer answer.  Clamp per gateway with
+        # AFFINITY_MAX_TOKENS if the router refuses the larger ceiling.
+        max_tokens=8192,
+        # A larger ceiling means a longer wait, and resolve_timeout() only floors
+        # the timeout for OpenAI effort seats — Gemini-on-OpenAI-compat has no
+        # reasoning_effort, so it would stay at the fast default of 90s.
+        timeout=120.0,
     ),
     "developability": _agent(
         "developability",
@@ -552,33 +606,21 @@ class OpenAICompatibleReasoner:
             choice = response.json()["choices"][0]
             content = choice["message"].get("content") or ""
             self.last_raw = content
+            used = (response.json().get("usage") or {}).get("completion_tokens")
             if choice.get("finish_reason") == "length":
                 # Reasoning tokens are billed against this budget, so a
                 # high-effort model can spend every token thinking and return
                 # ``content: null``. Fail loudly instead of returning "".
+                spent = f", {used} used" if used else ""
                 raise ValueError(
-                    f"{self.model} hit the {self.token_param} limit ({self.max_tokens}) "
+                    f"{self.model} hit the {self.token_param} limit ({self.max_tokens}{spent}) "
                     f"({'empty completion' if not content else 'truncated output'}); "
-                    "raise max_tokens or lower reasoning_effort"
+                    "raise max_tokens or lower reasoning_effort "
+                    "(per-seat override: <SLUG>_MAX_TOKENS, e.g. AFFINITY_MAX_TOKENS=16384)"
                 )
             if not content.strip():
                 raise ValueError(f"{self.model} returned an empty completion")
             return content
-
-
-PROVIDER_ALIASES: dict[str, str] = {
-    "gemini": "google",
-    "googleai": "google",
-    "google-ai": "google",
-    "claude": "anthropic",
-    "oai": "openai",
-    "openai-compatible": "openai",
-}
-
-
-def normalize_provider(provider: str) -> str:
-    key = provider.strip().lower()
-    return PROVIDER_ALIASES.get(key, key)
 
 
 def _first_env(*names: str) -> str | None:
@@ -664,6 +706,7 @@ class ModelRouter:
             spec,
             thinking_budget=resolve_thinking_budget(spec),
             reasoning_effort=resolve_reasoning_effort(spec),
+            max_tokens=resolve_max_tokens(spec),
         )
         for key in (slug, spec.role, spec.role.lower()):
             if key in self._thinking_overrides:
@@ -702,22 +745,25 @@ class ModelRouter:
         base_url = base_url_for(candidate)
         if not base_url:
             return None
+        # Resolve the ceiling per seat so a gateway with a different cap is an
+        # env change (AFFINITY_MAX_TOKENS=16384) rather than a source edit.
+        max_tokens = resolve_max_tokens(candidate)
         if provider == "anthropic":
             return AnthropicReasoner(
                 model=spec.model,
                 api_key=api_key,
                 base_url=base_url,
                 thinking_budget=spec.thinking_budget,
-                    max_tokens=spec.max_tokens,
-                    temperature=spec.temperature,
-                    timeout=spec.timeout,
-                )
+                max_tokens=max_tokens,
+                temperature=spec.temperature,
+                timeout=spec.timeout,
+            )
         return OpenAICompatibleReasoner(
             base_url=base_url,
             api_key=api_key,
             model=spec.model,
             structured_outputs=spec.structured_outputs,
-            max_tokens=spec.max_tokens,
+            max_tokens=max_tokens,
             temperature=spec.temperature,
             token_param="max_completion_tokens" if provider == "openai" else "max_tokens",
             # Re-homed seats resolve against their own slug's env var, so a
@@ -794,6 +840,9 @@ class ModelRouter:
                     "thinking_budget": getattr(client, "thinking_budget", None),
                     "reasoning_effort": getattr(client, "reasoning_effort", None),
                     "response_format": getattr(client, "response_format", None),
+                    # The token ceiling actually sent on the wire: the seat's
+                    # default after <SLUG>_MAX_TOKENS, not the declared value.
+                    "max_tokens": getattr(client, "max_tokens", None),
                 }
             )
         return report

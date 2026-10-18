@@ -236,7 +236,10 @@ def preflight(router, *, allow_offline: bool) -> list[dict]:
         marker = " *" if row["fallback_used"] else ""
         budget = row.get("thinking_budget")
         effort = row.get("reasoning_effort")
+        ceiling = row.get("max_tokens")
         deliberation = f"thinking={budget}" if budget else (f"effort={effort}" if effort else "direct")
+        if ceiling:
+            deliberation = f"{deliberation} cap={ceiling}"
         colour = "green" if row["live"] else "red"
         serving_cell = f"{(serving + marker)[:30]:30}"
         print(

@@ -27,12 +27,12 @@ Set `M5_POLICY_MODE=live_agent` to transparently stamp live-agent M5 runs, or le
 Each agent role is pinned to a distinct model family (see `AGENT_MODELS` in `core/llm.py`) so the
 council cannot collapse into a single-model echo chamber:
 
-| Agent | Provider | Model | Thinking |
-| --- | --- | --- | --- |
-| Affinity Scientist | Google | `gemini-4-argon` | off |
-| Developability Scientist | Anthropic | `claude-5.5-sonnet` | default (no thinking block) |
-| Scientific Skeptic | Anthropic | `claude-5.5-opus` | `budget_tokens=4096` |
-| Experimental Planner | OpenAI | `gpt-6.1-sol` | strict `json_schema` structured outputs |
+| Agent | Provider | Model | Thinking | `max_tokens` |
+| --- | --- | --- | --- | --- |
+| Affinity Scientist | Google | `gemini-4-argon` | provider-native reasoning (no thinking block) | 8192 |
+| Developability Scientist | Anthropic | `claude-5.5-sonnet` | `budget_tokens=2048` | 4096 |
+| Scientific Skeptic | Anthropic | `claude-5.5-opus` | `budget_tokens=4096` | 8192 |
+| Experimental Planner | OpenAI | `gpt-6.1-sol` | `reasoning_effort=high` + `json_object` | 8192 |
 
 Credentials are provider-scoped: `GOOGLE_API_KEY`/`GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, and
 `OPENAI_API_KEY`. Base URLs can be redirected to a gateway with `GEMINI_BASE_URL`, `ANTHROPIC_BASE_URL`
@@ -47,6 +47,14 @@ at runtime with `ModelRouter(thinking_budgets={"skeptic": 8192})` and `router.co
 `thinking_configuration()` in `core/agents.py` prints the resolved per-agent budgets.
 Seats also accept `<SLUG>_TIMEOUT` (seconds); any seat re-homed onto a reasoning model gets a
 240s floor automatically, since reasoning tokens bill against the same wall clock.
+
+`max_tokens` is a *completion ceiling*, not an answer length: reasoning-capable models bill their
+hidden deliberation against the same budget, so a seat can spend the entire ceiling thinking and
+return an empty or truncated memo (`finish_reason="length"`). The usable cap is a property of the
+**gateway**, so each seat accepts `<SLUG>_MAX_TOKENS` — e.g. `AFFINITY_MAX_TOKENS=16384` — and
+`describe_roster()` / the CLI preflight report the ceiling actually sent on the wire. Prefer raising
+the ceiling over disabling reasoning: the deliberation is what produces the separation between
+single-position effects and epistatic confounding.
 
 ### Running the campaign from the CLI
 
