@@ -9,7 +9,7 @@ from .ledger import ImmutableLedger
 from .oracle import BindingOracle, DevelopabilityOracle
 from .surrogate import BindingSurrogate, DevelopabilitySurrogate, link_predictions
 from .acquisition import select_five_slots
-from .virtual_lab_runner import VirtualLabRunner, RoundEventBus
+from .virtual_lab_runner import VirtualLabRunner
 from config.settings import SETTINGS
 
 class Campaign:
@@ -41,6 +41,9 @@ class Campaign:
         return pd.DataFrame(rows)
 
     async def execute_round(self) -> dict:
+        # Reset rather than replace: replacing the bus would silently drop the
+        # synchronous listeners a CLI attaches to watch the round live.
+        self.runner.events.reset()
         revealed = self.revealed()
         if revealed.empty:
             initial = np.random.default_rng(0).choice(self.private.candidate_id.to_numpy(), SETTINGS.initial_queries, replace=False).tolist()
@@ -61,7 +64,6 @@ class Campaign:
         linked = link_predictions(mb, sb, md, sd, self.protocol["tau_dev"])
         unqueried = unqueried.assign(mu_bind=mb, sigma_bind=sb, mu_dev=md, sigma_dev=sd,
                                      a_base=linked.a_base, sigma_joint=linked.sigma_joint)
-        self.runner.events = RoundEventBus()
         decision, memos = await self.runner.plan_round(round_number, revealed, unqueried)
         slots = select_five_slots(unqueried, decision)
         ids = [s["candidate_id"] for s in slots]

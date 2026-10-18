@@ -132,12 +132,17 @@ class AgentModel:
     provider: str  # "google" | "anthropic" | "openai"
     model: str
     thinking_budget: int | None = None
+    #: Structured-output flavour: "json_schema" (OpenAI strict), "json_object"
+    #: (broadly supported), or None. Resolved from <SLUG>_RESPONSE_FORMAT.
     structured_outputs: bool = False
+    response_format: str | None = None
     max_tokens: int = 1024
     temperature: float | None = 0.0
     #: OpenAI-style deliberation hint: "low" | "medium" | "high". Anthropic uses
     #: ``thinking_budget`` instead; Google ignores both.
     reasoning_effort: str | None = None
+    #: Per-request HTTP timeout in seconds. High reasoning effort needs headroom.
+    timeout: float = 90.0
     fallbacks: tuple["AgentModel", ...] = ()
 
     def rehomed(self, provider: str, model: str) -> "AgentModel":
@@ -150,7 +155,8 @@ class AgentModel:
             # Thinking blocks, strict json_schema and reasoning_effort are all
             # provider features; a re-homed seat must not carry stale settings.
             thinking_budget=self.thinking_budget if normalized == "anthropic" else None,
-            structured_outputs=self.structured_outputs if normalized == "openai" else False,
+            structured_outputs=self.structured_outputs,
+            response_format=self.response_format,
             reasoning_effort=self.reasoning_effort if normalized == "openai" else None,
             # OpenAI reasoning models reject any non-default temperature.
             temperature=None if normalized == "openai" else self.temperature,
@@ -189,6 +195,45 @@ def resolve_reasoning_effort(spec: AgentModel) -> str | None:
         raise ValueError(
             f"{spec.slug.upper()}_REASONING_EFFORT must be one of {REASONING_EFFORTS} "
             f"or 'off', got {value!r}"
+        )
+    return value
+
+
+#: Accepted structured-output flavours.
+RESPONSE_FORMATS = ("json_schema", "json_object", "off")
+
+
+def resolve_timeout(spec: AgentModel) -> float:
+    """Per-seat HTTP timeout, override with ``<SLUG>_TIMEOUT`` (seconds).
+
+    Reasoning models bill deliberation against the same wall clock, so a seat
+    that resolved onto one gets a floor of 240s even if its seat was configured
+    for a fast non-reasoning model.
+    """
+    raw = os.getenv(f"{spec.slug.upper()}_TIMEOUT")
+    configured = float(raw) if raw else spec.timeout
+    if resolve_reasoning_effort(spec) and normalize_provider(spec.provider) == "openai":
+        return max(configured, 240.0)
+    return configured
+
+
+def resolve_response_format(spec: AgentModel) -> str | None:
+    """Resolve how structured output is requested for a seat.
+
+    ``json_schema`` is the strongest guarantee but many OpenAI-compatible
+    gateways reject it or leak the schema into the completion.  ``json_object``
+    is far more widely supported: the model still emits JSON, and the pydantic
+    validation downstream is the real contract.  ``off`` omits the field.
+    """
+    raw = os.getenv(f"{spec.slug.upper()}_RESPONSE_FORMAT")
+    value = (spec.response_format or raw or "").strip().lower()
+    if not value:
+        return "json_schema" if spec.structured_outputs else None
+    if value in {"off", "none", "0", "false", "disable", "disabled"}:
+        return None
+    if value not in {"json_schema", "json_object"}:
+        raise ValueError(
+            f"{spec.slug.upper()}_RESPONSE_FORMAT must be one of {RESPONSE_FORMATS}, got {value!r}"
         )
     return value
 
@@ -259,9 +304,11 @@ def _agent(
     *,
     thinking_budget: int | None = None,
     structured_outputs: bool = False,
+    response_format: str | None = None,
     max_tokens: int = 1024,
     temperature: float | None = 0.0,
     reasoning_effort: str | None = None,
+    timeout: float = 90.0,
 ) -> AgentModel:
     return AgentModel(
         slug=slug,
@@ -270,9 +317,11 @@ def _agent(
         model=model,
         thinking_budget=thinking_budget,
         structured_outputs=structured_outputs,
+        response_format=response_format,
         max_tokens=max_tokens,
         temperature=temperature,
         reasoning_effort=reasoning_effort,
+        timeout=timeout,
         fallbacks=tuple(
             AgentModel(slug=slug, role=role, provider=p, model=m)
             for p, m in AGENT_FALLBACK_CHAINS.get(slug, ())
@@ -283,7 +332,13 @@ def _agent(
 #: Single source of truth for "which mind answers as which scientist".
 AGENT_MODELS: dict[str, AgentModel] = {
     "affinity": _agent(
-        "affinity", "Affinity Scientist", "google", "gemini-4-argon", max_tokens=1024
+        "affinity",
+        "Affinity Scientist",
+        "google",
+        "gemini-4-argon",
+        # Re-homed onto a reasoning model the budget covers *thinking* too,
+        # so 1024 produced empty completions. Keep headroom for real prose.
+        max_tokens=4096,
     ),
     "developability": _agent(
         "developability",
@@ -307,9 +362,16 @@ AGENT_MODELS: dict[str, AgentModel] = {
         "openai",
         "gpt-6.1-sol",
         structured_outputs=True,
-        max_tokens=2048,
+        # json_object: widely supported by gateways, unlike json_schema, which
+        # several routers reject outright or echo back into the completion.
+        response_format="json_object",
+        # ~600 reasoning tokens + a few hundred JSON tokens; 8192 leaves room
+        # for a verbose decision without silently truncating the object.
+        max_tokens=8192,
         temperature=None,  # reasoning models reject non-default temperature
         reasoning_effort="high",  # final JSON synthesis must not break schema
+        # High effort plus a large evidence payload regularly exceeds 90s.
+        timeout=240.0,
     ),
 }
 
@@ -353,6 +415,7 @@ class AnthropicReasoner:
         # Anthropic requires max_tokens > budget_tokens when thinking is enabled.
         self.max_tokens = max(max_tokens, thinking_budget + 1024) if thinking_budget else max_tokens
         self.last_thinking: str | None = None
+        self.last_raw: str | None = None
 
     @property
     def messages_url(self) -> str:
@@ -390,7 +453,16 @@ class AnthropicReasoner:
             response = await client.post(
                 self.messages_url, headers=self.headers, json=self.build_payload(system, context)
             )
-            response.raise_for_status()
+            if response.status_code >= 400:
+                # Surface the gateway's own explanation: a 403 usually means the
+                # token has no access to *this model id*, which is otherwise
+                # indistinguishable from a bad key.
+                raise httpx.HTTPStatusError(
+                    f"{response.status_code} for {self.model} at {self.messages_url}: "
+                    f"{response.text[:400]}",
+                    request=response.request,
+                    response=response,
+                )
             return self._extract(response.json())
 
     def _extract(self, body: dict[str, Any]) -> str:
@@ -419,16 +491,22 @@ class OpenAICompatibleReasoner:
         timeout: float = 90.0,
         token_param: str = "max_tokens",
         reasoning_effort: str | None = None,
+        response_format: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
-        self.structured_outputs = structured_outputs
+        #: "json_schema" | "json_object" | None. Gateways frequently reject
+        #: ``json_schema`` (or leak the schema into the completion), so make the
+        #: flavour configurable instead of assuming the strict variant works.
+        self.response_format = response_format or ("json_schema" if structured_outputs else None)
+        self.structured_outputs = self.response_format is not None
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.timeout = timeout
         self.token_param = token_param
         self.reasoning_effort = reasoning_effort
+        self.last_raw: str | None = None
 
     def build_payload(self, system: str, context: dict, *, schema: dict | None = None) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -443,7 +521,9 @@ class OpenAICompatibleReasoner:
             payload["temperature"] = self.temperature
         if self.reasoning_effort:
             payload["reasoning_effort"] = self.reasoning_effort
-        if schema is not None and self.structured_outputs:
+        if schema is not None and self.response_format == "json_object":
+            payload["response_format"] = {"type": "json_object"}
+        elif schema is not None and self.response_format == "json_schema":
             payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
@@ -463,9 +543,27 @@ class OpenAICompatibleReasoner:
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 json=self.build_payload(system, context, schema=schema),
             )
-            response.raise_for_status()
-            message = response.json()["choices"][0]["message"]
-            return message.get("content") or ""
+            if response.status_code >= 400:
+                raise httpx.HTTPStatusError(
+                    f"{response.status_code} from {self.base_url}: {response.text[:400]}",
+                    request=response.request,
+                    response=response,
+                )
+            choice = response.json()["choices"][0]
+            content = choice["message"].get("content") or ""
+            self.last_raw = content
+            if choice.get("finish_reason") == "length":
+                # Reasoning tokens are billed against this budget, so a
+                # high-effort model can spend every token thinking and return
+                # ``content: null``. Fail loudly instead of returning "".
+                raise ValueError(
+                    f"{self.model} hit the {self.token_param} limit ({self.max_tokens}) "
+                    f"({'empty completion' if not content else 'truncated output'}); "
+                    "raise max_tokens or lower reasoning_effort"
+                )
+            if not content.strip():
+                raise ValueError(f"{self.model} returned an empty completion")
+            return content
 
 
 PROVIDER_ALIASES: dict[str, str] = {
@@ -610,9 +708,10 @@ class ModelRouter:
                 api_key=api_key,
                 base_url=base_url,
                 thinking_budget=spec.thinking_budget,
-                max_tokens=spec.max_tokens,
-                temperature=spec.temperature,
-            )
+                    max_tokens=spec.max_tokens,
+                    temperature=spec.temperature,
+                    timeout=spec.timeout,
+                )
         return OpenAICompatibleReasoner(
             base_url=base_url,
             api_key=api_key,
@@ -624,6 +723,8 @@ class ModelRouter:
             # Re-homed seats resolve against their own slug's env var, so a
             # fallback onto OpenAI still honors AFFINITY_REASONING_EFFORT.
             reasoning_effort=resolve_reasoning_effort(candidate),
+            response_format=resolve_response_format(candidate),
+            timeout=resolve_timeout(candidate),
         )
 
     def _resolve(self, spec: AgentModel) -> tuple[AgentModel | None, Reasoner | None]:
@@ -649,6 +750,10 @@ class ModelRouter:
             self._effective[spec.slug] = effective
             self._clients[spec.slug] = client or DeterministicReasoner()
         return self._clients[spec.slug]
+
+    def is_live(self, role: str) -> bool:
+        """True when this seat resolved a real transport rather than the stub."""
+        return not isinstance(self.client_for(role), DeterministicReasoner)
 
     def thinking_trace(self, role: str) -> str | None:
         """Return the last extended-thinking transcript for a role, if any.
@@ -688,7 +793,7 @@ class ModelRouter:
                     "base_url": getattr(client, "base_url", None),
                     "thinking_budget": getattr(client, "thinking_budget", None),
                     "reasoning_effort": getattr(client, "reasoning_effort", None),
-                    "structured_outputs": spec.structured_outputs,
+                    "response_format": getattr(client, "response_format", None),
                 }
             )
         return report

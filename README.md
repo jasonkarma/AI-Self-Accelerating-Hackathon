@@ -45,6 +45,19 @@ to inject `{"type": "enabled", "budget_tokens": X}`; leave it `None` for default
 without editing code via `SKEPTIC_THINKING_BUDGET=8192` / `DEVELOPABILITY_THINKING_BUDGET=off`, or
 at runtime with `ModelRouter(thinking_budgets={"skeptic": 8192})` and `router.configure_thinking(...)`.
 `thinking_configuration()` in `core/agents.py` prints the resolved per-agent budgets.
+Seats also accept `<SLUG>_TIMEOUT` (seconds); any seat re-homed onto a reasoning model gets a
+240s floor automatically, since reasoning tokens bill against the same wall clock.
+
+### Running the campaign from the CLI
+
+```bash
+python scripts/run_campaign.py --rounds 1
+```
+
+Forces `M5_POLICY_MODE=live_agent` before `config.settings` is imported, executes the rounds for
+real (instead of dumping t=0 state), and streams each scientist's name, thinking trace and memo to
+the terminal as it finishes, then prints the validated `RoundDecisionRecord` JSON.
+Flags: `--rounds N`, `--allow-offline`, `--verbose` (full tool payloads), `--no-color`.
 
 ### Pre-flight check
 

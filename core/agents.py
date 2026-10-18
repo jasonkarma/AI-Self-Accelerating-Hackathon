@@ -9,6 +9,7 @@ touching orchestration code.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from .llm import (
@@ -102,26 +103,48 @@ async def run_agent(
     return await router.run(spec.role, spec.prompt, context, schema=schema)
 
 
-async def run_scientists(router: ModelRouter, tools: dict) -> list[AgentMemo]:
-    """Run the three scientists concurrently (Skeptic joins the same gather)."""
+async def run_scientists(
+    router: ModelRouter,
+    tools: dict,
+    *,
+    on_memo: Callable[[AgentMemo], Awaitable[None]] | None = None,
+    on_error: Callable[[str, BaseException], Awaitable[None]] | None = None,
+) -> list[AgentMemo]:
+    """Run the three scientists concurrently (Skeptic joins the same gather).
+
+    ``on_memo`` fires as each seat finishes, so a CLI/SSE consumer can stream the
+    debate instead of waiting for the slowest model. A seat that raises still
+    produces a memo describing the failure, so one bad credential or model id
+    does not abort the round.
+    """
 
     async def one(definition: AgentDefinition) -> AgentMemo:
+        resolved = router.spec_for(definition.role)
         context = {
             "role": definition.role,
             "tools": {name: tools.get(name) for name in definition.tools_invoked},
             "fallback": f"{definition.role} reviewed deterministic evidence; confidence remains bounded.",
         }
-        text = await run_agent(router, definition.slug, context=context, definition=definition)
-        resolved = router.spec_for(definition.role)
-        return AgentMemo(
+        try:
+            text = await run_agent(router, definition.slug, context=context, definition=definition)
+            trace = router.thinking_trace(definition.role) or text
+        except Exception as exc:  # noqa: BLE001 - one bad seat must not kill the round
+            text = f"{definition.role} unavailable ({type(exc).__name__}): {exc}"
+            trace = text
+            if on_error is not None:
+                await on_error(definition.role, exc)
+        memo = AgentMemo(
             role=definition.role,
             tools_invoked=list(definition.tools_invoked),
-            thinking_trace=router.thinking_trace(definition.role) or text,
+            thinking_trace=trace,
             memo=text,
             model=resolved.model if resolved else definition.model.model,
             provider=resolved.provider if resolved else definition.model.provider,
             thinking_budget=resolved.thinking_budget if resolved else definition.thinking_budget,
         )
+        if on_memo is not None:
+            await on_memo(memo)
+        return memo
 
     memos = await asyncio.gather(*(one(AGENT_DEFINITIONS[s]) for s in SCIENTIST_SLUGS))
     return list(memos)
@@ -133,11 +156,35 @@ async def run_planner(
     deterministic_evidence: dict,
     memos: list[AgentMemo],
 ) -> str:
-    """Ask the OpenAI planner for a ``RoundDecisionRecord`` under a strict schema."""
+    """Ask the planner for a ``RoundDecisionRecord`` as JSON.
+
+    The contract lives in the prompt (see ``EXPERIMENTAL_PLANNER_SYNTHESIZER_PROMPT``)
+    because gateways frequently reject ``json_schema`` and leak the schema text
+    into the completion. The pydantic model is still enforced downstream.
+    """
     definition = AGENT_DEFINITIONS["planner"]
+    # Scientists write freely (markdown tables and all). Cap each memo so the
+    # planner's context — and therefore its completion budget — stays bounded.
+    memo_cap = 1200
     context = {
+        "round_number": deterministic_evidence.get("round_number"),
+        "phase": deterministic_evidence.get("phase"),
+        "max_joint_uncertainty_candidate": deterministic_evidence.get(
+            "max_joint_uncertainty_candidate"
+        ),
+        "next_uncertainty_candidates": deterministic_evidence.get("next_uncertainty_candidates", []),
+        "latest_revealed_candidate_ids": deterministic_evidence.get(
+            "latest_revealed_candidate_ids", []
+        ),
         "deterministic_evidence": deterministic_evidence,
-        "council_memos": [memo.model_dump() for memo in memos],
+        "council_memos": [
+            {
+                "role": memo.role,
+                "memo": memo.memo[:memo_cap],
+                "truncated": len(memo.memo) > memo_cap,
+            }
+            for memo in memos
+        ],
         "fallback": "{}",
     }
     return await run_agent(router, "planner", context=context, definition=definition)
