@@ -249,15 +249,51 @@ def test_select_five_slots_returns_qualified_distinct_h1_h0_arms():
     assert [s["slot_id"] for s in slots] == [1, 2, 3, 4, 5]
     assert len({s["candidate_id"] for s in slots}) == 5
     assert all({"loop_prior", "a_null", "a_h1", "delta_agent"} <= set(slot) for slot in slots)
-    # Slot 4 is the H1 arm (agents boost it) and slot 5 is the H0 null control
-    # (agents do not). That pairing is what makes the round gradeable.
+    # Slot 4 is the H1 promotion arm (agents boost it); slot 5 is the H0 null
+    # baseline. That pairing is what makes the round gradeable.
     assert slots[3]["delta_agent"] > 0
-    assert slots[4]["delta_agent"] <= 0
+    assert slots[4]["a_null"] == pytest.approx(slots[4]["a_base"])
     # Slots 1-2 are the top two A_H1 candidates in the whole qualified pool.
-    ranked = frame.assign(
-        loop_prior=[loop_prior_score(s) for s in frame.sequence]
-    )
     assert slots[0]["a_h1"] >= slots[1]["a_h1"]
+
+
+def test_m5_null_arm_is_the_unbiased_baseline_not_m4s_static_prior():
+    """FLAW 1 regression: M5 must not inherit M4's refuted WT-anchor prior.
+
+    ``A_null = A_base + loop_prior`` chained the hybrid to the static prior that
+    loses to plain UCB on 1N8Z (the ``AR...``/aromatic-rich binders are exactly
+    what that rule penalises). ``A_null`` is now defined as the null *baseline*
+    ``Δ_agent == 0``, i.e. ``A_base`` itself, while M4 keeps the static rule.
+    """
+    frame = _scored_frame()
+    slots = select_five_slots(frame, None, queries_spent=5, total_budget=35)
+    for slot in slots:
+        assert slot["a_null"] == pytest.approx(slot["a_base"])
+        assert slot["a_h1"] == pytest.approx(slot["a_base"] + slot["delta_agent"])
+    # ``loop_prior`` survives only as a diagnostic column for the UI/ledger.
+    assert all(np.isfinite(slot["loop_prior"]) for slot in slots)
+
+    # A candidate the static rule dislikes but the surrogate loves must not be
+    # pushed down. ``ARWGGDGFYYFDY`` is the shape the 1N8Z leaderboard actually
+    # rewards (AR-start, five aromatics, ``...YYFDY``) and the shape M4's rule
+    # punishes; give it a strictly higher A_base and require M5 to rank it first.
+    binder = "ARWGGDGFYYFDY"
+    rows = [
+        {"candidate_id": "AR", "sequence": binder, "y_dev": 0.9,
+         "a_base": 1.10, "sigma_joint": 0.0, "sigma_bind": 0.1, "sigma_dev": 0.1, "mu_bind": 1.0},
+        {"candidate_id": "WT", "sequence": WT_SEQUENCE, "y_dev": 0.9,
+         "a_base": 1.00, "sigma_joint": 0.0, "sigma_bind": 0.1, "sigma_dev": 0.1, "mu_bind": 1.0},
+    ] + [
+        {"candidate_id": f"X{i}", "sequence": binder, "y_dev": 0.9,
+         "a_base": 0.90 - 0.01 * i, "sigma_joint": 0.0, "sigma_bind": 0.1,
+         "sigma_dev": 0.1, "mu_bind": 1.0}
+        for i in range(4)
+    ]
+    ranked = select_five_slots(pd.DataFrame(rows), None, queries_spent=5, total_budget=35)
+    assert ranked[0]["candidate_id"] == "AR"
+    # M4, by contrast, applies the anchor rule and penalises the better binder —
+    # which is exactly why M5 must not inherit that term.
+    assert fixed_expert_prior(WT_SEQUENCE) > fixed_expert_prior(binder)
 
 
 def test_slot3_anneals_exploration_with_budget():
@@ -284,12 +320,9 @@ def test_dynamic_voi_formula_and_final_batch_are_exact():
     final = voi_context(
         [AGENT_PRIOR_BOUND], queries_spent=30, total_budget=35, batch_size=5
     )
-    assert final == {
-        "horizon": 0.0,
-        "sar_maturity": 1.0,
-        "voi": 0.0,
-        "harvest": True,
-    }
+    # ``VoI`` drives slot 3 only. There is no phase flag any more: the H0 null
+    # control is tested on every batch, because it is a definition, not a mode.
+    assert final == {"horizon": 0.0, "sar_maturity": 1.0, "voi": 0.0}
 
 
 def _dynamic_voi_frame() -> pd.DataFrame:
@@ -332,30 +365,57 @@ def _positive_prior_decision():
     )
 
 
-def test_dynamic_slot3_uses_a_h1_and_slot5_switches_to_harvest():
+def test_slot5_always_tests_the_null_baseline_never_the_anti_hypothesis():
+    """FLAW 2 regression: H0 is ``Δ_agent == 0``, not ``Δ_agent <= 0``.
+
+    Restricting slot 5 to non-positive ``Δ_agent`` made the lab boycott its own
+    proven substitutions for 20% of every early batch. The control must instead
+    be the unmodified baseline (what M3 would query next), on *every* batch —
+    early (VoI high) exactly as on the final one (VoI = 0).
+    """
     frame = _dynamic_voi_frame()
     decision = _positive_prior_decision()
 
-    # Early and unresolved: no SAR maturity and H=1 => VoI=1. Slot 5 must retain
-    # the strict non-positive control restriction.
-    early = select_five_slots(
-        frame, None, queries_spent=5, total_budget=35, batch_size=5
-    )
+    # Early and unresolved: no SAR maturity and H=1 => VoI=1.
+    early = select_five_slots(frame, decision, queries_spent=5, total_budget=35, batch_size=5)
     assert early[2]["optimistic"] == pytest.approx(
         early[2]["a_h1"] + 0.50 * early[2]["voi"] * early[2]["sigma_joint"]
     )
     assert early[4]["slot_type"] == SLOT5_FALSIFY_LABEL
-    assert early[4]["delta_agent"] <= 0
+    # The control is the best remaining A_base candidate regardless of sign, so
+    # a positively-boosted baseline candidate is no longer banned.
+    remaining = frame.loc[~frame.candidate_id.isin({s["candidate_id"] for s in early[:4]})]
+    assert early[4]["a_null"] == pytest.approx(remaining.a_base.max())
+    assert early[4]["a_base"] == pytest.approx(early[4]["a_null"])
 
-    # Final batch: H=VoI=0. Slot 3 is pure A_H1, and Slot 5 drops the sign filter
-    # and harvests the best remaining A_null candidate even though it is boosted.
-    final = select_five_slots(
-        frame, decision, queries_spent=30, total_budget=35, batch_size=5
-    )
+    # Final batch: H=VoI=0, so slot 3 is pure A_H1 and slot 5 is unchanged in
+    # rule — the control does not depend on the VoI phase.
+    final = select_five_slots(frame, decision, queries_spent=30, total_budget=35, batch_size=5)
     assert final[2]["voi"] == 0.0
     assert final[2]["optimistic"] == pytest.approx(final[2]["a_h1"])
     assert final[4]["slot_type"] == SLOT5_FALSIFY_LABEL
-    assert final[4]["delta_agent"] > 0
+    remaining = frame.loc[~frame.candidate_id.isin({s["candidate_id"] for s in final[:4]})]
+    assert final[4]["a_null"] == pytest.approx(remaining.a_base.max())
+
+
+def test_slot4_promotes_agents_positive_hypothesis_over_raw_surrogate_rank():
+    """Slot 4 maximises ``A_H1 + 0.50 · max(0, Δ_agent)``, not just ``A_H1``."""
+    frame = _dynamic_voi_frame()
+    decision = _positive_prior_decision()
+    slots = select_five_slots(frame, decision, queries_spent=5, total_budget=35, batch_size=5)
+    slot4 = slots[3]
+    assert slot4["delta_agent"] > 0
+    assert slot4["agent_promoted"] == pytest.approx(
+        slot4["a_h1"] + 0.50 * max(0.0, slot4["delta_agent"])
+    )
+    rest = frame.loc[~frame.candidate_id.isin({s["candidate_id"] for s in slots[:3]})]
+    boosted = rest.assign(
+        delta_agent=[
+            adaptive_prior_score(s, priors=decision.positional_priors) for s in rest.sequence
+        ]
+    )
+    expected = (boosted.a_base + boosted.delta_agent + 0.50 * boosted.delta_agent.clip(lower=0.0))
+    assert slot4["agent_promoted"] == pytest.approx(expected.max())
 
 
 def test_select_five_slots_is_deterministic():

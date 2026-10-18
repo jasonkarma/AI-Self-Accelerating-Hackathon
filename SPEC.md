@@ -156,12 +156,26 @@ surrogates for tool 4); no tool can read hidden labels for unqueried IDs.
 
 ## 6. Batch allocation (`K = 5`) — matched across methods
 
+M5's batch is a **paired H1/H0 design**. Two scores are defined over the qualified unqueried pool:
+
+```
+A_base(s) = surrogate UCB                       # M3's objective; the H0 null hypothesis (Δ_agent = 0)
+A_H1(s)   = A_base(s) + Δ_agent(s)              # M5, |Δ_agent| <= 0.06
+```
+
 | Slot | Rule |
 |---|---|
-| 1–2 | Top 2 unqueried by `A_base` |
-| 3 | Max `sigma_joint` |
-| 4 | Max `A_agent = A_base + Δ_agent` (M5 only) |
-| 5 | Max `A_base` among candidates with `Δ_agent < 0` (M5 only) |
+| 1–2 | Top 2 unqueried by `A_H1` |
+| 3 | Max `A_H1 + 0.50 · VoI · sigma_joint` |
+| 4 | Max `A_H1 + 0.50 · max(0, Δ_agent)` — H1 promotion arm |
+| 5 | Max `A_base` — H0 null-baseline control (what M3 would query next) |
+
+`A_null` is `A_base`, not `A_base + loop_prior`: the static WT anchor rule (`loop_prior_score`) is
+M4's objective alone. On 1N8Z the best binders start `AR...` and carry 4–5 aromatics, so that rule
+penalises the true frontier and M4 trails plain UCB; M5 must not inherit the bias. The H0 control is
+the **equality** hypothesis `Δ_agent == 0`, never `Δ_agent <= 0` — banning positively-boosted
+candidates would make the lab boycott its own proven substitutions. When slots 1–4 promote a
+hypothesis candidate over `A_base`, slot 5 automatically tests the displaced baseline candidate.
 
 For M1–M4, slots 3–5 fall back to the deterministic extension of each method (random / greedy /
 UCB / UCB+fixed-prior). Slots are always de-duplicated, and the selector always returns exactly 5
@@ -169,6 +183,8 @@ unique IDs while the unqueried pool has ≥ 5 members.
 
 `Δ_agent(s) ∈ [-0.15, +0.15]` is bounded per positional soft prior, capped in aggregate after the
 `0.65/0.35` objective weighting, and can **never** filter a candidate or alter the metric.
+
+`VoI = H · (1 − 0.65 · C)` scales slot 3's exploration bonus only; it is not a phase switch.
 
 ---
 
@@ -187,6 +203,18 @@ Metrics:
 
 - **AUBQC** = `(1/30) * Σ_{q=5,10,...,35} y*(q)`, where `y*(q)` is the best measured `y_bind`
   among **risk-qualified** candidates (`Risk ≤ tau_dev`) seen by query `q`.
+- **`normalized_aubqc`** — the same area with `y*(q)` rescaled between the seed score `y*(5)`
+  (0.0) and the best qualified binder in the pool (1.0), so the number is a fraction of the
+  available headroom rather than an absolute log-`Kd`.
+- **`top5_panel_aubqc`** — mean `y_bind` of the best five qualified candidates discovered so far,
+  at each checkpoint. Portfolio depth, not one lucky maximum; exploration slots that surface
+  non-binders simply do not enter the panel.
+- **`spearman_rho_curves`** — `scipy.stats.spearmanr` between the method's scoring model
+  (`mu_bind + Δ_agent`) and true `y_bind` over the qualified pool, at each checkpoint. This is the
+  metric comparable to zero-shot affinity predictors on 1N8Z (AF3 `-0.16`, ProteinMPNN `-0.17`,
+  ESM-2 `-0.13`). Undefined correlations are reported as `null`, not `0.0`.
+- **`top_decile_hit_rate`** — fraction of the 30 post-seed queries that discover a candidate at or
+  above the 90th percentile of all qualified binders in the pool.
 - Target qualification success rate at `q ∈ {15, 25, 35}`.
 - Pareto hypervolume over `(y_bind, -Risk)` with reference `(6.0, 1.0)`.
 - Uncertainty coverage of the nominal 80% interval.

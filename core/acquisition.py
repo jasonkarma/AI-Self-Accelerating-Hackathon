@@ -3,25 +3,40 @@
 Three things live here, deliberately in one module so the benchmark methods and
 the live campaign cannot drift apart:
 
-* :func:`loop_prior_score` — the static WT anchor rule shared by M4 and M5.
+* :func:`loop_prior_score` — the static WT anchor rule. It is **M4's** objective
+  and nothing else. On 1N8Z the highest-affinity HCDR3 variants start with
+  ``AR...`` and often carry 4-5 aromatics, so a textbook WT-anchor prior
+  penalises exactly the sequences that bind: M4 finishes behind plain UCB. M5
+  therefore does **not** consume this term.
 * :func:`adaptive_prior_score` — ``Δ_agent``: the council's bounded positional
   priors plus an empirical-Bayes-shrunk SAR term computed over surrogate
   **residuals**, so a co-mutation artefact cannot masquerade as a single-site
   effect.
 * :func:`select_five_slots` — a paired H1/H0 experiment design: two exploitation
-  picks, one Value-of-Information exploration pick, one hypothesis-testing pick,
-  and one *dynamic* H0 / payoff-harvest pick.
+  picks, one Value-of-Information exploration pick, one hypothesis-promotion
+  pick, and one *true* null-baseline control.
+
+The two arms are the two candidates an ideal experiment would compare::
+
+    A_H1(s) = A_base(s) + Δ_agent(s)     # what the agents want queried
+    A_null(s) = A_base(s)                # what M3 would query, Δ_agent = 0
+
+The null control is the **equality** hypothesis ``Δ_agent == 0``, not its
+opposite. Restricting slot 5 to ``Δ_agent <= 0`` made the lab boycott its own
+proven substitutions for a fifth of every early batch — sabotage dressed up as
+falsification — and because slot 5 inherited M4's static prior it also imported
+that prior's bias. Chaining the hybrid to a prior the data already refuted is
+how M5 ends up *behind* the method it is supposed to improve on.
 
 Nothing here is calibrated against a particular seed set, and there is no rank
-window or "top-N frontier" cutoff: slot 3 and slot 5 are scored by their own
-objectives over the *whole* qualified pool.
+window or "top-N frontier" cutoff: every slot is scored by its own objective
+over the *whole* qualified pool.
 
 The exploration -> exploitation transition is not a hand-written round switch.
 :func:`value_of_information` combines the remaining horizon ``H`` with the
 empirical SAR convergence ``C`` of the qualified frontier. Once the SAR term is
-corroborated (in practice by round 3-4), ``VoI`` falls below
-:data:`VOI_EXPLOIT_THRESHOLD` and the campaign shifts into all-in exploitation
-for the remaining rounds instead of boycotting proven SAR mutations.
+corroborated (in practice by round 3-4), ``VoI`` falls toward zero and slot 3
+stops paying for falsification probes — no round counter involved.
 """
 from __future__ import annotations
 
@@ -31,15 +46,14 @@ import pandas as pd
 from .constants import ANCHOR_POSITIONS, SOFT_PRIOR_BOUND, WT_SEQUENCE
 from .schemas import PositionalSoftPrior, RoundDecisionRecord
 
-# ── Static WT loop prior (M4, shared with M5) ────────────────────────────────
+# ── Static WT loop prior (M4 only) ───────────────────────────────────────────
 ANCHOR_CONSERVATION_BONUS = 0.15
 AROMATIC_SLACK = 3
 AROMATIC_PENALTY = 0.05
 
 #: ``loop_prior_score`` is an additive bonus on ``A_base``, which is itself
-#: unbounded, so the rule is clipped into the same band as ``Δ_agent``. The two
-#: priors are then composable: the anchor rule shifts the ordering, the council
-#: re-ranks within it, and neither can drown out the surrogate.
+#: unbounded, so the rule is clipped into the same band as ``Δ_agent``. M4 is
+#: scored with exactly this term; M5 is not scored with it at all.
 LOOP_PRIOR_BOUND = 0.15
 
 # ── Empirical-Bayes SAR term ─────────────────────────────────────────────────
@@ -67,6 +81,13 @@ SAR_DELTA_SCALE = 0.30
 #: hand-written round switch.
 SLOT3_OPTIMISM = 0.50
 
+#: Slot 4 is the H1 *promotion* arm: it maximises ``A_H1`` plus an explicit bonus
+#: on the positive part of ``Δ_agent``, so a candidate the learned SAR actively
+#: favours is tested above its raw surrogate rank — but never so far above that
+#: ``A_H1`` stops mattering (the bonus tops out at ``0.5 · AGENT_PRIOR_BOUND``,
+#: i.e. 0.03 binding units, a small fraction of a typical ``A_base`` step).
+SLOT4_AGENT_BOOST = 0.50
+
 SLOT_COUNT = 5
 
 # ── Expected Value of Information (dynamic exploration -> exploitation) ──────
@@ -76,29 +97,29 @@ SLOT_COUNT = 5
 #: positive SAR evidence stops paying for falsification probes.
 VOI_SAR_WEIGHT = 0.65
 
-#: Decision boundary for slot 5. Above it the batch still needs a strict
-#: ``Δ_agent <= 0`` null control (unknown territory, hypotheses unproven); at or
-#: below it the campaign is in payoff-harvest mode and slot 5 competes on
-#: ``A_null`` across the whole qualified pool instead of boycotting proven SAR.
-VOI_EXPLOIT_THRESHOLD = 0.35
-
-#: Stable slot labels used by the API and campaign reconciliation. Slot 5 keeps
-#: its historical label in harvest mode: its *allocation rule* changes, while it
-#: remains the null-objective side of the paired audit.
+#: Stable slot labels used by the API and campaign reconciliation.
 SLOT3_LABEL = "Max Joint Uncertainty"
 SLOT4_LABEL = "Agent Hypothesis Test"
+#: Slot 5 keeps its historical label because it is still the arm that can
+#: falsify the agents' hypothesis in the paired audit. What changed is its
+#: *allocation rule*: it now tests the unmodified ``A_base`` baseline
+#: (``Δ_agent == 0``) instead of boycotting candidates the agents like.
 SLOT5_FALSIFY_LABEL = "Skeptic Falsification Probe"
 
 
 # ── Shared WT loop prior ─────────────────────────────────────────────────────
 def loop_prior_score(sequence: str) -> float:
-    """WT anchor-conservation loop prior: the rule set shared by M4 **and** M5.
+    """M4's static WT anchor-conservation prior. M5 does **not** use it.
 
     Conserving the four structural anchors (``W3``, ``Y11``, ``D12``, ``Y13``)
     earns a bounded bonus; carrying more than three aromatics is charged an
-    aggregation-liability penalty. M4 adds exactly this term to ``A_base``; M5
-    keeps it and layers ``Δ_agent`` on top, so the hybrid inherits the expert
-    rule instead of replacing it.
+    aggregation-liability penalty. M4 adds exactly this term to ``A_base``.
+
+    It stays a *separate* method on purpose. The 1N8Z landscape is dominated by
+    ``AR...``/``...YYFDY`` binders, so the rule penalises the true frontier and
+    M4 loses to plain UCB; keeping M4 scored this way is the evidence that a
+    static textbook prior fails under HCDR3 epistasis. M5 starts instead from the
+    unbiased ``A_base`` and adds only empirical-Bayes evidence.
     """
     conserved = sum(sequence[p - 1] == WT_SEQUENCE[p - 1] for p in ANCHOR_POSITIONS) / len(ANCHOR_POSITIONS)
     aromatic_excess = max(0, sum(residue in "FWY" for residue in sequence) - AROMATIC_SLACK)
@@ -288,9 +309,9 @@ def adaptive_prior_score(
     """``Δ_agent``: summed soft priors **plus** the shrunk empirical SAR term.
 
     Both terms are evidence about the same candidate, so they are summed before
-    saturation. ``A_H1 = A_null + Δ_agent`` therefore strictly augments M4's
-    ordering rather than replacing it, and ``|Δ_agent| ≤ 0.06`` keeps the
-    surrogate in charge of the ordering.
+    saturation. ``A_H1 = A_base + Δ_agent``: the adaptive term is an *additive*
+    re-ranking on top of the unbiased surrogate, never a filter, and
+    ``|Δ_agent| ≤ 0.06`` keeps the surrogate in charge of the ordering.
     """
     raw = _soft_prior_total(sequence, list(priors), falsified_positions) + _sar_total(sequence, sar_effects)
     return _saturate(raw, bound)
@@ -416,22 +437,16 @@ def voi_context(
     total_budget: int,
     batch_size: int = SLOT_COUNT,
 ) -> dict:
-    """``(H, C, VoI)`` plus the harvest-mode flag, for one batch.
+    """``(H, C, VoI)`` for one batch.
 
-    ``harvest`` is ``VoI <= VOI_EXPLOIT_THRESHOLD`` (rounded to 9 dp so a float
-    artefact of exactly 0.35 cannot flip the branch). In harvest mode the batch
-    no longer pays for a strict null control: slot 5 competes on ``A_null`` across
-    the whole qualified pool.
+    ``VoI`` now drives exactly one decision — how much slot 3 may pay for
+    exploration. There is no "harvest mode" flag any more: slot 5 tests the null
+    baseline on every batch, because the H0 control is a definition, not a phase.
     """
     horizon = horizon_factor(queries_spent, total_budget=total_budget, batch_size=batch_size)
     maturity = sar_maturity_score(delta_agent)
     voi = value_of_information(horizon, maturity)
-    return {
-        "horizon": horizon,
-        "sar_maturity": maturity,
-        "voi": voi,
-        "harvest": bool(round(voi, 9) <= VOI_EXPLOIT_THRESHOLD),
-    }
+    return {"horizon": horizon, "sar_maturity": maturity, "voi": voi}
 
 
 # ── The 5-slot portfolio ─────────────────────────────────────────────────────
@@ -452,13 +467,18 @@ def select_five_slots(
 
     Two acquisition scores are defined over the qualified unqueried pool::
 
-        A_null(s) = A_base(s) + loop_prior_score(s)
-        A_H1(s)   = A_null(s) + Δ_agent(s)
+        A_base(s) = surrogate UCB                     # unbiased, Δ_agent = 0
+        A_H1(s)   = A_base(s) + Δ_agent(s)            # |Δ_agent| <= 0.06
 
-    ``A_null`` is the shared M4 objective (surrogate + WT anchor rule); ``A_H1``
-    is M5's, which adds the council's bounded adaptive prior. One Expected Value
-    of Information number, :func:`voi_context`, decides how much the batch is
-    still allowed to explore::
+    ``A_base`` is M3's objective and the *true null hypothesis*: the candidate
+    the lab would query if the agents had said nothing. ``A_H1`` is M5's. The
+    static WT anchor prior belongs to M4 alone — it is deliberately **not** part
+    of either arm here, because on 1N8Z it penalises the ``AR...``/aromatic-rich
+    binders that actually top the leaderboard, and a hybrid that inherits a
+    refuted prior starts every campaign behind the method it improves on.
+
+    One Expected Value of Information number, :func:`voi_context`, decides how
+    much the batch may still pay for exploration::
 
         VoI = H · (1 - 0.65 · C)
 
@@ -472,23 +492,21 @@ def select_five_slots(
          ``max sigma_joint`` is deliberately not used: unconstrained, it picks
          the least-informed candidate in the pool regardless of whether that
          candidate could ever win.
-    4    top ``A_H1`` among ``Δ_agent > 0`` — the H1 positive arm, i.e. a
-         candidate the live hypothesis actually favours. Falls back to the
-         unconstrained ``A_H1`` argmax if the prior boosts nobody (round 1).
-    5    the dynamic H0 / payoff-harvest arm, on the unmodified null objective:
+    4    ``A_H1 + 0.50 · max(0, Δ_agent)`` — the H1 promotion arm: a candidate the
+         learned SAR / agent hypothesis actively favours is tested above its raw
+         surrogate rank. The bonus is small (``<= 0.03``) so it re-ranks
+         neighbours without overriding the surrogate.
+    5    top ``A_base`` — the H0 null-baseline control, i.e. what M3 would have
+         queried next. The null hypothesis is ``Δ_agent == 0``, **not**
+         ``Δ_agent <= 0``. Banning every positively-boosted candidate would make
+         the lab boycott its own proven substitutions for a fifth of every early
+         batch. Whenever slots 1-4 promote a hypothesis candidate over ``A_base``,
+         slot 5 automatically picks up the displaced baseline candidate, giving a
+         clean H1-vs-H0 comparison without ever banning evidence.
 
-         * ``VoI > 0.35`` (early, unconverged: the hypotheses still need strict
-           falsification) — top ``A_null`` among ``Δ_agent <= 0``.
-         * ``VoI <= 0.35`` (SAR corroborated by round 3-4, or the final harvest
-           rounds) — top ``A_null`` over the *full* remaining pool, with the
-           ``Δ_agent <= 0`` restriction dropped. Refusing the best null-frontier
-           candidate merely because it carries a proven SAR substitution is what
-           starved the last rounds of payoff.
-
-    Slots 4 and 5 are still chosen on the *same* batch, so every round yields a
-    direct H1-vs-H0 comparison for
-    :func:`core.tool_arsenal.audit_past_hypotheses` to grade — in harvest mode the
-    control is simply allowed to be the better candidate.
+    Slots 4 and 5 are chosen on the *same* batch, so every round yields a direct
+    H1-vs-H0 comparison for
+    :func:`core.tool_arsenal.audit_past_hypotheses` to grade.
 
     ``queries_spent`` / ``total_budget`` / ``batch_size`` drive ``H``. When a
     caller omits them, ``queries_spent`` is derived from the revealed ledger (the
@@ -515,6 +533,9 @@ def select_five_slots(
         else positional_priors_from_revealed(ledger, falsified_positions=falsified_positions)
     )
 
+    # Diagnostic only: M4's static anchor rule is reported so the UI and the
+    # ledger can show what M4 would have scored, but it is **not** an additive
+    # term in either arm. Chaining M5 to it would import M4's bad prior.
     frame["loop_prior"] = [loop_prior_score(s) for s in frame.sequence]
     frame["delta_agent"] = [
         adaptive_prior_score(
@@ -522,7 +543,10 @@ def select_five_slots(
         )
         for s in frame.sequence
     ]
-    frame["a_null"] = frame.a_base + frame.loop_prior
+    # ``a_null`` is the null *baseline* (Δ_agent == 0), not "A_base plus M4's
+    # prior". Retaining the historical column name keeps the ledger schema stable
+    # while making its meaning exact.
+    frame["a_null"] = frame.a_base
     frame["a_h1"] = frame.a_null + frame.delta_agent
     pool = qualified_pool(frame, tau_dev)
 
@@ -540,6 +564,7 @@ def select_five_slots(
         sar_maturity=context["sar_maturity"],
         voi=context["voi"],
         optimistic=pool.a_h1 + SLOT3_OPTIMISM * context["voi"] * pool.sigma_joint,
+        agent_promoted=pool.a_h1 + SLOT4_AGENT_BOOST * pool.delta_agent.clip(lower=0.0),
     )
 
     selected: list[dict] = []
@@ -564,23 +589,18 @@ def select_five_slots(
     rest = remaining()
     take(best(rest, "optimistic"), SLOT3_LABEL)
 
-    # Slot 4: H1 arm. The planner's declared target can only *tie-break*; it can
-    # never force a candidate the acquisition score does not rank.
+    # Slot 4: H1 promotion arm. The planner's declared target can only
+    # *tie-break*; it can never force a candidate the acquisition score does not
+    # rank.
     rest = remaining()
-    supported = rest.loc[rest.delta_agent > 0]
-    hypothesis = best(supported, "a_h1") if not supported.empty else best(rest, "a_h1")
-    take(hypothesis, SLOT4_LABEL)
+    take(best(rest, "agent_promoted"), SLOT4_LABEL)
 
-    # Slot 5: dynamic H0 control / payoff harvest. The Delta_agent <= 0
-    # restriction is a falsification device, not a permanent rule: once VoI says
-    # the SAR term is corroborated, boycotting proven mutations is a boycott.
+    # Slot 5: H0 null-baseline control. ``Δ_agent == 0`` is the hypothesis under
+    # test, so the control is the best remaining candidate on the *unmodified*
+    # baseline — the one M3 would query next. If slots 1-4 promoted a hypothesis
+    # candidate over that baseline, this slot now tests the displaced one.
     rest = remaining()
-    if context["harvest"]:
-        take(best(rest, "a_null"), SLOT5_FALSIFY_LABEL)
-    else:
-        control = rest.loc[rest.delta_agent <= 0]
-        probe = best(control, "a_null") if not control.empty else best(rest, "a_null")
-        take(probe, SLOT5_FALSIFY_LABEL)
+    take(best(rest, "a_null"), SLOT5_FALSIFY_LABEL)
 
     picked = [row["candidate_id"] for row in selected]
     if len(set(picked)) != len(picked):

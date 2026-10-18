@@ -83,23 +83,45 @@ unqualified candidate can never move `best_qualified_binding`. Two acquisition s
 batch:
 
 ```
-A_null(s) = A_base(s) + loop_prior_score(s)      # shared with M4
-A_H1(s)   = A_null(s) + Δ_agent(s)               # M5, |Δ_agent| <= 0.06
+A_base(s) = surrogate UCB                        # M3's objective = the H0 null hypothesis
+A_H1(s)   = A_base(s) + Δ_agent(s)               # M5, |Δ_agent| <= 0.06
 ```
+
+`A_null` is `A_base` itself. The static WT anchor rule (`loop_prior_score`) is **M4's** objective
+only: on 1N8Z the best binders start `AR...` and carry 4–5 aromatics, which that rule penalises, so
+M4 trails plain UCB and M5 must not inherit the bias.
 
 | Slot | Objective |
 | --- | --- |
 | 1–2 | top 2 by `A_H1` — surrogate exploitation plus the agents' vote |
-| 3 | `A_null + (1 − spent/budget) · 0.50 · σ_joint` — optimistic UCB that anneals to pure exploitation |
-| 4 | top `A_H1` among `Δ_agent > 0` — the H1 positive arm |
-| 5 | top `A_null` among `Δ_agent <= 0` — the H0 null control |
+| 3 | `A_H1 + 0.50 · VoI · σ_joint` — optimistic UCB that anneals to pure exploitation as `VoI → 0` |
+| 4 | `A_H1 + 0.50 · max(0, Δ_agent)` — the H1 promotion arm |
+| 5 | top `A_base` — the H0 null-baseline control (what M3 would query next) |
 
 Slots 4 and 5 form a paired control experiment inside every batch, so a hypothesis is graded by the
-candidates measured against it rather than against a cross-round median. `Δ_agent` is the council's
-summed positional priors plus an empirical-Bayes SAR term over surrogate **residuals**, shrunk by
-`n / (n + 3)` with `n < 2` contributing nothing — noisy singletons are damped during cold start, and
-confirmed multi-observation SAR steers later rounds without any round switch. A rule that loses its
-paired test is inverted in later rounds, so the lab genuinely self-corrects.
+candidates measured against it rather than against a cross-round median. The control is the
+*equality* hypothesis `Δ_agent == 0`, not its opposite: restricting slot 5 to `Δ_agent <= 0` made the
+lab boycott its own proven substitutions for a fifth of every early batch. When slots 1–4 promote a
+hypothesis candidate over `A_base`, slot 5 automatically tests the displaced baseline candidate.
+
+`Δ_agent` is the council's summed positional priors plus an empirical-Bayes SAR term over surrogate
+**residuals**, shrunk by `n / (n + 3)` with `n < 2` contributing nothing — noisy singletons are damped
+during cold start, and confirmed multi-observation SAR steers later rounds without any round switch. A
+rule that loses its paired test is inverted in later rounds, so the lab genuinely self-corrects.
+
+### Benchmark metrics
+
+`python scripts/run_benchmark.py --seeds 100` reports four metrics beside AUBQC:
+
+| Metric | What it measures |
+| --- | --- |
+| `normalized_aubqc` | AUBQC with `y*(q)` rescaled 0.0 (seed score) → 1.0 (pool ceiling), i.e. fraction of available headroom |
+| `top5_panel_aubqc` | mean binding of the best five qualified leads found so far — portfolio depth, not one lucky max |
+| `spearman_rho` | rank correlation between the method's scoring model and true binding over the qualified pool |
+| `top_decile_hit_rate` | fraction of the 30 post-seed queries that land in the pool's top decile |
+
+The Spearman column is the one comparable to zero-shot affinity predictors on 1N8Z (AF3 `-0.16`,
+ProteinMPNN `-0.17`, ESM-2 `-0.13`); it is reported as `n/a` for M1, which has no scoring model at all.
 
 ### Pre-flight check
 
