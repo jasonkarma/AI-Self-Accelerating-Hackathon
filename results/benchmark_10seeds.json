@@ -1,71 +1,267 @@
 {
   "m5_policy_mode": "adaptive_tool",
-  "seeds": 10,
+  "seeds": 100,
   "curves": [
     {
       "query_count": 5,
-      "m1_random": 7.383,
-      "m2_greedy": 7.383,
-      "m3_ucb": 7.383,
-      "m4_fixed_prior": 7.383,
-      "m5_hybrid": 7.383
+      "m1_random": 7.705,
+      "m2_greedy": 7.705,
+      "m3_ucb": 7.705,
+      "m4_fixed_prior": 7.705,
+      "m5_hybrid": 7.705
     },
     {
       "query_count": 10,
-      "m1_random": 7.993,
-      "m2_greedy": 8.231,
-      "m3_ucb": 7.924,
-      "m4_fixed_prior": 8.294,
-      "m5_hybrid": 8.018
+      "m1_random": 8.027,
+      "m2_greedy": 8.129,
+      "m3_ucb": 8.118,
+      "m4_fixed_prior": 8.109,
+      "m5_hybrid": 8.129
     },
     {
       "query_count": 15,
-      "m1_random": 8.082,
-      "m2_greedy": 8.294,
-      "m3_ucb": 8.249,
+      "m1_random": 8.129,
+      "m2_greedy": 8.272,
+      "m3_ucb": 8.305,
       "m4_fixed_prior": 8.294,
-      "m5_hybrid": 8.388
+      "m5_hybrid": 8.316
     },
     {
       "query_count": 20,
-      "m1_random": 8.231,
-      "m2_greedy": 8.306,
-      "m3_ucb": 8.394,
+      "m1_random": 8.272,
+      "m2_greedy": 8.329,
+      "m3_ucb": 8.341,
       "m4_fixed_prior": 8.316,
-      "m5_hybrid": 8.394
+      "m5_hybrid": 8.341
     },
     {
       "query_count": 25,
-      "m1_random": 8.306,
-      "m2_greedy": 8.352,
-      "m3_ucb": 8.394,
+      "m1_random": 8.341,
+      "m2_greedy": 8.388,
+      "m3_ucb": 8.399,
       "m4_fixed_prior": 8.388,
-      "m5_hybrid": 8.399
+      "m5_hybrid": 8.394
     },
     {
       "query_count": 30,
-      "m1_random": 8.341,
-      "m2_greedy": 8.427,
-      "m3_ucb": 8.394,
-      "m4_fixed_prior": 8.399,
-      "m5_hybrid": 8.489
+      "m1_random": 8.388,
+      "m2_greedy": 8.466,
+      "m3_ucb": 8.466,
+      "m4_fixed_prior": 8.388,
+      "m5_hybrid": 8.524
     },
     {
       "query_count": 35,
-      "m1_random": 8.341,
-      "m2_greedy": 8.495,
-      "m3_ucb": 8.399,
-      "m4_fixed_prior": 8.578,
-      "m5_hybrid": 8.489
+      "m1_random": 8.466,
+      "m2_greedy": 8.524,
+      "m3_ucb": 8.524,
+      "m4_fixed_prior": 8.495,
+      "m5_hybrid": 8.524
     }
   ],
   "aubqc": {
-    "m1_random": 1.8848449482312688,
-    "m2_greedy": 1.921099360662017,
-    "m3_ucb": 1.9009581397786977,
-    "m4_fixed_prior": 1.9193928324409324,
-    "m5_hybrid": 1.930081954042634
+    "m1_random": 1.9061099189083057,
+    "m2_greedy": 1.923953739778768,
+    "m3_ucb": 1.924602955388789,
+    "m4_fixed_prior": 1.9176080651227192,
+    "m5_hybrid": 1.9282182191372434
   },
+  "normalized_curves": [
+    {
+      "query_count": 5,
+      "m1_random": 0.0,
+      "m2_greedy": 0.0,
+      "m3_ucb": 0.0,
+      "m4_fixed_prior": 0.0,
+      "m5_hybrid": 0.0
+    },
+    {
+      "query_count": 10,
+      "m1_random": 0.0,
+      "m2_greedy": 0.3389,
+      "m3_ucb": 0.3036,
+      "m4_fixed_prior": 0.2752,
+      "m5_hybrid": 0.3889
+    },
+    {
+      "query_count": 15,
+      "m1_random": 0.381,
+      "m2_greedy": 0.4735,
+      "m3_ucb": 0.4452,
+      "m4_fixed_prior": 0.414,
+      "m5_hybrid": 0.4973
+    },
+    {
+      "query_count": 20,
+      "m1_random": 0.4588,
+      "m2_greedy": 0.5114,
+      "m3_ucb": 0.5749,
+      "m4_fixed_prior": 0.5194,
+      "m5_hybrid": 0.5228
+    },
+    {
+      "query_count": 25,
+      "m1_random": 0.4942,
+      "m2_greedy": 0.5815,
+      "m3_ucb": 0.6132,
+      "m4_fixed_prior": 0.5842,
+      "m5_hybrid": 0.5748
+    },
+    {
+      "query_count": 30,
+      "m1_random": 0.55,
+      "m2_greedy": 0.5983,
+      "m3_ucb": 0.635,
+      "m4_fixed_prior": 0.6088,
+      "m5_hybrid": 0.6412
+    },
+    {
+      "query_count": 35,
+      "m1_random": 0.6,
+      "m2_greedy": 0.6432,
+      "m3_ucb": 0.6574,
+      "m4_fixed_prior": 0.6901,
+      "m5_hybrid": 0.6674
+    }
+  ],
+  "normalized_aubqc": {
+    "m1_random": 0.08546318580408417,
+    "m2_greedy": 0.09937947047701608,
+    "m3_ucb": 0.10289269302251658,
+    "m4_fixed_prior": 0.09620730237285262,
+    "m5_hybrid": 0.10340375282060009
+  },
+  "top5_panel_curves": [
+    {
+      "query_count": 5,
+      "m1_random": 7.095,
+      "m2_greedy": 7.095,
+      "m3_ucb": 7.095,
+      "m4_fixed_prior": 7.095,
+      "m5_hybrid": 7.095
+    },
+    {
+      "query_count": 10,
+      "m1_random": 7.505,
+      "m2_greedy": 7.791,
+      "m3_ucb": 7.573,
+      "m4_fixed_prior": 7.52,
+      "m5_hybrid": 7.799
+    },
+    {
+      "query_count": 15,
+      "m1_random": 7.8,
+      "m2_greedy": 8.062,
+      "m3_ucb": 7.936,
+      "m4_fixed_prior": 7.82,
+      "m5_hybrid": 8.078
+    },
+    {
+      "query_count": 20,
+      "m1_random": 7.959,
+      "m2_greedy": 8.136,
+      "m3_ucb": 8.075,
+      "m4_fixed_prior": 8.025,
+      "m5_hybrid": 8.148
+    },
+    {
+      "query_count": 25,
+      "m1_random": 8.032,
+      "m2_greedy": 8.185,
+      "m3_ucb": 8.141,
+      "m4_fixed_prior": 8.117,
+      "m5_hybrid": 8.185
+    },
+    {
+      "query_count": 30,
+      "m1_random": 8.084,
+      "m2_greedy": 8.211,
+      "m3_ucb": 8.194,
+      "m4_fixed_prior": 8.168,
+      "m5_hybrid": 8.222
+    },
+    {
+      "query_count": 35,
+      "m1_random": 8.175,
+      "m2_greedy": 8.237,
+      "m3_ucb": 8.227,
+      "m4_fixed_prior": 8.25,
+      "m5_hybrid": 8.254
+    }
+  ],
+  "top5_panel_aubqc": {
+    "m1_random": 1.8153066895193506,
+    "m2_greedy": 1.8496013391748443,
+    "m3_ucb": 1.8321276897955194,
+    "m4_fixed_prior": 1.8230004224217833,
+    "m5_hybrid": 1.8509041586917294
+  },
+  "spearman_rho_curves": [
+    {
+      "query_count": 5,
+      "m1_random": null,
+      "m2_greedy": 0.3144,
+      "m3_ucb": 0.0473,
+      "m4_fixed_prior": -0.06,
+      "m5_hybrid": 0.3431
+    },
+    {
+      "query_count": 10,
+      "m1_random": null,
+      "m2_greedy": 0.3524,
+      "m3_ucb": 0.1979,
+      "m4_fixed_prior": 0.0852,
+      "m5_hybrid": 0.3845
+    },
+    {
+      "query_count": 15,
+      "m1_random": null,
+      "m2_greedy": 0.4139,
+      "m3_ucb": 0.2739,
+      "m4_fixed_prior": 0.15,
+      "m5_hybrid": 0.4503
+    },
+    {
+      "query_count": 20,
+      "m1_random": null,
+      "m2_greedy": 0.4441,
+      "m3_ucb": 0.2761,
+      "m4_fixed_prior": 0.2409,
+      "m5_hybrid": 0.4706
+    },
+    {
+      "query_count": 25,
+      "m1_random": null,
+      "m2_greedy": 0.4609,
+      "m3_ucb": 0.2929,
+      "m4_fixed_prior": 0.2612,
+      "m5_hybrid": 0.4908
+    },
+    {
+      "query_count": 30,
+      "m1_random": null,
+      "m2_greedy": 0.4795,
+      "m3_ucb": 0.3101,
+      "m4_fixed_prior": 0.2793,
+      "m5_hybrid": 0.5073
+    },
+    {
+      "query_count": 35,
+      "m1_random": null,
+      "m2_greedy": 0.5081,
+      "m3_ucb": 0.3442,
+      "m4_fixed_prior": 0.2804,
+      "m5_hybrid": 0.5247
+    }
+  ],
+  "top_decile_hit_rate": {
+    "m1_random": 0.098,
+    "m2_greedy": 0.19766666666666666,
+    "m3_ucb": 0.13366666666666666,
+    "m4_fixed_prior": 0.124,
+    "m5_hybrid": 0.202
+  },
+  "top_decile_definition": "y_bind >= 90th percentile of the developability-qualified pool",
   "matched_initial_seeds": {
     "0": [
       "CAND-264",
@@ -136,6 +332,1563 @@
       "CAND-047",
       "CAND-400",
       "CAND-119"
+    ],
+    "10": [
+      "CAND-086",
+      "CAND-397",
+      "CAND-322",
+      "CAND-110",
+      "CAND-332"
+    ],
+    "11": [
+      "CAND-053",
+      "CAND-247",
+      "CAND-055",
+      "CAND-332",
+      "CAND-208"
+    ],
+    "12": [
+      "CAND-405",
+      "CAND-104",
+      "CAND-395",
+      "CAND-026",
+      "CAND-254"
+    ],
+    "13": [
+      "CAND-359",
+      "CAND-341",
+      "CAND-371",
+      "CAND-357",
+      "CAND-029"
+    ],
+    "14": [
+      "CAND-037",
+      "CAND-062",
+      "CAND-272",
+      "CAND-345",
+      "CAND-150"
+    ],
+    "15": [
+      "CAND-101",
+      "CAND-294",
+      "CAND-341",
+      "CAND-386",
+      "CAND-288"
+    ],
+    "16": [
+      "CAND-180",
+      "CAND-321",
+      "CAND-235",
+      "CAND-343",
+      "CAND-223"
+    ],
+    "17": [
+      "CAND-191",
+      "CAND-307",
+      "CAND-351",
+      "CAND-067",
+      "CAND-044"
+    ],
+    "18": [
+      "CAND-088",
+      "CAND-299",
+      "CAND-370",
+      "CAND-363",
+      "CAND-166"
+    ],
+    "19": [
+      "CAND-158",
+      "CAND-148",
+      "CAND-244",
+      "CAND-387",
+      "CAND-174"
+    ],
+    "20": [
+      "CAND-109",
+      "CAND-192",
+      "CAND-116",
+      "CAND-375",
+      "CAND-370"
+    ],
+    "21": [
+      "CAND-195",
+      "CAND-160",
+      "CAND-125",
+      "CAND-324",
+      "CAND-253"
+    ],
+    "22": [
+      "CAND-275",
+      "CAND-395",
+      "CAND-083",
+      "CAND-152",
+      "CAND-320"
+    ],
+    "23": [
+      "CAND-288",
+      "CAND-268",
+      "CAND-110",
+      "CAND-176",
+      "CAND-014"
+    ],
+    "24": [
+      "CAND-328",
+      "CAND-169",
+      "CAND-137",
+      "CAND-158",
+      "CAND-313"
+    ],
+    "25": [
+      "CAND-000",
+      "CAND-209",
+      "CAND-097",
+      "CAND-356",
+      "CAND-066"
+    ],
+    "26": [
+      "CAND-164",
+      "CAND-097",
+      "CAND-231",
+      "CAND-204",
+      "CAND-357"
+    ],
+    "27": [
+      "CAND-290",
+      "CAND-131",
+      "CAND-410",
+      "CAND-088",
+      "CAND-001"
+    ],
+    "28": [
+      "CAND-354",
+      "CAND-092",
+      "CAND-276",
+      "CAND-349",
+      "CAND-369"
+    ],
+    "29": [
+      "CAND-211",
+      "CAND-020",
+      "CAND-387",
+      "CAND-096",
+      "CAND-250"
+    ],
+    "30": [
+      "CAND-179",
+      "CAND-167",
+      "CAND-098",
+      "CAND-314",
+      "CAND-043"
+    ],
+    "31": [
+      "CAND-205",
+      "CAND-239",
+      "CAND-375",
+      "CAND-227",
+      "CAND-028"
+    ],
+    "32": [
+      "CAND-358",
+      "CAND-239",
+      "CAND-364",
+      "CAND-177",
+      "CAND-066"
+    ],
+    "33": [
+      "CAND-158",
+      "CAND-237",
+      "CAND-364",
+      "CAND-184",
+      "CAND-348"
+    ],
+    "34": [
+      "CAND-049",
+      "CAND-364",
+      "CAND-047",
+      "CAND-026",
+      "CAND-001"
+    ],
+    "35": [
+      "CAND-140",
+      "CAND-191",
+      "CAND-344",
+      "CAND-042",
+      "CAND-392"
+    ],
+    "36": [
+      "CAND-159",
+      "CAND-177",
+      "CAND-075",
+      "CAND-166",
+      "CAND-183"
+    ],
+    "37": [
+      "CAND-292",
+      "CAND-109",
+      "CAND-263",
+      "CAND-276",
+      "CAND-066"
+    ],
+    "38": [
+      "CAND-134",
+      "CAND-103",
+      "CAND-163",
+      "CAND-202",
+      "CAND-104"
+    ],
+    "39": [
+      "CAND-096",
+      "CAND-225",
+      "CAND-321",
+      "CAND-208",
+      "CAND-405"
+    ],
+    "40": [
+      "CAND-303",
+      "CAND-008",
+      "CAND-289",
+      "CAND-233",
+      "CAND-183"
+    ],
+    "41": [
+      "CAND-320",
+      "CAND-296",
+      "CAND-345",
+      "CAND-396",
+      "CAND-275"
+    ],
+    "42": [
+      "CAND-321",
+      "CAND-183",
+      "CAND-272",
+      "CAND-037",
+      "CAND-181"
+    ],
+    "43": [
+      "CAND-018",
+      "CAND-241",
+      "CAND-167",
+      "CAND-271",
+      "CAND-209"
+    ],
+    "44": [
+      "CAND-107",
+      "CAND-050",
+      "CAND-279",
+      "CAND-276",
+      "CAND-341"
+    ],
+    "45": [
+      "CAND-383",
+      "CAND-238",
+      "CAND-222",
+      "CAND-305",
+      "CAND-220"
+    ],
+    "46": [
+      "CAND-091",
+      "CAND-032",
+      "CAND-230",
+      "CAND-208",
+      "CAND-376"
+    ],
+    "47": [
+      "CAND-308",
+      "CAND-180",
+      "CAND-315",
+      "CAND-040",
+      "CAND-226"
+    ],
+    "48": [
+      "CAND-249",
+      "CAND-161",
+      "CAND-282",
+      "CAND-053",
+      "CAND-208"
+    ],
+    "49": [
+      "CAND-017",
+      "CAND-247",
+      "CAND-019",
+      "CAND-355",
+      "CAND-150"
+    ],
+    "50": [
+      "CAND-348",
+      "CAND-327",
+      "CAND-345",
+      "CAND-324",
+      "CAND-297"
+    ],
+    "51": [
+      "CAND-389",
+      "CAND-128",
+      "CAND-159",
+      "CAND-143",
+      "CAND-392"
+    ],
+    "52": [
+      "CAND-256",
+      "CAND-195",
+      "CAND-400",
+      "CAND-240",
+      "CAND-107"
+    ],
+    "53": [
+      "CAND-339",
+      "CAND-313",
+      "CAND-300",
+      "CAND-282",
+      "CAND-004"
+    ],
+    "54": [
+      "CAND-212",
+      "CAND-126",
+      "CAND-092",
+      "CAND-216",
+      "CAND-128"
+    ],
+    "55": [
+      "CAND-303",
+      "CAND-092",
+      "CAND-399",
+      "CAND-363",
+      "CAND-346"
+    ],
+    "56": [
+      "CAND-302",
+      "CAND-152",
+      "CAND-007",
+      "CAND-165",
+      "CAND-398"
+    ],
+    "57": [
+      "CAND-341",
+      "CAND-027",
+      "CAND-284",
+      "CAND-195",
+      "CAND-368"
+    ],
+    "58": [
+      "CAND-367",
+      "CAND-399",
+      "CAND-211",
+      "CAND-236",
+      "CAND-128"
+    ],
+    "59": [
+      "CAND-311",
+      "CAND-265",
+      "CAND-244",
+      "CAND-345",
+      "CAND-327"
+    ],
+    "60": [
+      "CAND-407",
+      "CAND-134",
+      "CAND-164",
+      "CAND-011",
+      "CAND-072"
+    ],
+    "61": [
+      "CAND-155",
+      "CAND-175",
+      "CAND-197",
+      "CAND-314",
+      "CAND-322"
+    ],
+    "62": [
+      "CAND-253",
+      "CAND-236",
+      "CAND-337",
+      "CAND-185",
+      "CAND-312"
+    ],
+    "63": [
+      "CAND-414",
+      "CAND-389",
+      "CAND-232",
+      "CAND-382",
+      "CAND-189"
+    ],
+    "64": [
+      "CAND-358",
+      "CAND-392",
+      "CAND-218",
+      "CAND-103",
+      "CAND-211"
+    ],
+    "65": [
+      "CAND-247",
+      "CAND-127",
+      "CAND-072",
+      "CAND-216",
+      "CAND-019"
+    ],
+    "66": [
+      "CAND-270",
+      "CAND-289",
+      "CAND-384",
+      "CAND-106",
+      "CAND-390"
+    ],
+    "67": [
+      "CAND-053",
+      "CAND-172",
+      "CAND-324",
+      "CAND-186",
+      "CAND-233"
+    ],
+    "68": [
+      "CAND-201",
+      "CAND-226",
+      "CAND-415",
+      "CAND-127",
+      "CAND-354"
+    ],
+    "69": [
+      "CAND-022",
+      "CAND-220",
+      "CAND-281",
+      "CAND-241",
+      "CAND-328"
+    ],
+    "70": [
+      "CAND-302",
+      "CAND-145",
+      "CAND-133",
+      "CAND-268",
+      "CAND-158"
+    ],
+    "71": [
+      "CAND-395",
+      "CAND-196",
+      "CAND-221",
+      "CAND-105",
+      "CAND-220"
+    ],
+    "72": [
+      "CAND-162",
+      "CAND-250",
+      "CAND-002",
+      "CAND-395",
+      "CAND-348"
+    ],
+    "73": [
+      "CAND-339",
+      "CAND-012",
+      "CAND-326",
+      "CAND-126",
+      "CAND-204"
+    ],
+    "74": [
+      "CAND-372",
+      "CAND-082",
+      "CAND-155",
+      "CAND-366",
+      "CAND-217"
+    ],
+    "75": [
+      "CAND-275",
+      "CAND-395",
+      "CAND-084",
+      "CAND-088",
+      "CAND-064"
+    ],
+    "76": [
+      "CAND-234",
+      "CAND-335",
+      "CAND-196",
+      "CAND-169",
+      "CAND-411"
+    ],
+    "77": [
+      "CAND-024",
+      "CAND-264",
+      "CAND-333",
+      "CAND-230",
+      "CAND-326"
+    ],
+    "78": [
+      "CAND-174",
+      "CAND-382",
+      "CAND-036",
+      "CAND-304",
+      "CAND-079"
+    ],
+    "79": [
+      "CAND-370",
+      "CAND-029",
+      "CAND-044",
+      "CAND-382",
+      "CAND-413"
+    ],
+    "80": [
+      "CAND-000",
+      "CAND-294",
+      "CAND-007",
+      "CAND-306",
+      "CAND-376"
+    ],
+    "81": [
+      "CAND-016",
+      "CAND-023",
+      "CAND-088",
+      "CAND-180",
+      "CAND-272"
+    ],
+    "82": [
+      "CAND-297",
+      "CAND-390",
+      "CAND-272",
+      "CAND-357",
+      "CAND-415"
+    ],
+    "83": [
+      "CAND-126",
+      "CAND-230",
+      "CAND-309",
+      "CAND-131",
+      "CAND-018"
+    ],
+    "84": [
+      "CAND-304",
+      "CAND-271",
+      "CAND-225",
+      "CAND-071",
+      "CAND-376"
+    ],
+    "85": [
+      "CAND-197",
+      "CAND-295",
+      "CAND-018",
+      "CAND-213",
+      "CAND-387"
+    ],
+    "86": [
+      "CAND-076",
+      "CAND-059",
+      "CAND-256",
+      "CAND-397",
+      "CAND-073"
+    ],
+    "87": [
+      "CAND-327",
+      "CAND-251",
+      "CAND-237",
+      "CAND-007",
+      "CAND-255"
+    ],
+    "88": [
+      "CAND-085",
+      "CAND-207",
+      "CAND-391",
+      "CAND-287",
+      "CAND-293"
+    ],
+    "89": [
+      "CAND-104",
+      "CAND-239",
+      "CAND-004",
+      "CAND-356",
+      "CAND-321"
+    ],
+    "90": [
+      "CAND-272",
+      "CAND-096",
+      "CAND-285",
+      "CAND-154",
+      "CAND-040"
+    ],
+    "91": [
+      "CAND-148",
+      "CAND-117",
+      "CAND-305",
+      "CAND-380",
+      "CAND-044"
+    ],
+    "92": [
+      "CAND-186",
+      "CAND-400",
+      "CAND-031",
+      "CAND-205",
+      "CAND-249"
+    ],
+    "93": [
+      "CAND-396",
+      "CAND-113",
+      "CAND-227",
+      "CAND-409",
+      "CAND-260"
+    ],
+    "94": [
+      "CAND-137",
+      "CAND-405",
+      "CAND-018",
+      "CAND-099",
+      "CAND-329"
+    ],
+    "95": [
+      "CAND-024",
+      "CAND-186",
+      "CAND-381",
+      "CAND-203",
+      "CAND-225"
+    ],
+    "96": [
+      "CAND-343",
+      "CAND-085",
+      "CAND-303",
+      "CAND-306",
+      "CAND-339"
+    ],
+    "97": [
+      "CAND-057",
+      "CAND-280",
+      "CAND-180",
+      "CAND-238",
+      "CAND-039"
+    ],
+    "98": [
+      "CAND-306",
+      "CAND-392",
+      "CAND-355",
+      "CAND-215",
+      "CAND-138"
+    ],
+    "99": [
+      "CAND-397",
+      "CAND-210",
+      "CAND-074",
+      "CAND-236",
+      "CAND-315"
     ]
+  },
+  "paired_t_tests": {
+    "m5_hybrid_minus_m3_ucb": {
+      "performer": "m5_hybrid",
+      "baseline": "m3_ucb",
+      "metrics": {
+        "aubqc": {
+          "metric": "aubqc",
+          "n": 100,
+          "mean_diff": 0.0036152637484550064,
+          "se": 0.00442050761346881,
+          "t_stat": 0.8178390503026592,
+          "p_value": 0.41541312453939216,
+          "seeds_won": 51
+        },
+        "normalized_aubqc": {
+          "metric": "normalized_aubqc",
+          "n": 100,
+          "mean_diff": 0.0005110597980835191,
+          "se": 0.0038515898570514683,
+          "t_stat": 0.13268801119825202,
+          "p_value": 0.8947094461308639,
+          "seeds_won": 50
+        },
+        "panel_aubqc": {
+          "metric": "panel_aubqc",
+          "n": 100,
+          "mean_diff": 0.018776468896210215,
+          "se": 0.0027620092826486815,
+          "t_stat": 6.7981194032064085,
+          "p_value": 8.078380241358722e-10,
+          "seeds_won": 74
+        },
+        "top_decile_hit_rate": {
+          "metric": "top_decile_hit_rate",
+          "n": 100,
+          "mean_diff": 0.06833333333333332,
+          "se": 0.008360225967443199,
+          "t_stat": 8.173622770417968,
+          "p_value": 1.0179177439695156e-12,
+          "seeds_won": 71
+        },
+        "spearman_rho_at_q35": {
+          "metric": "spearman_rho_at_q35",
+          "n": 100,
+          "mean_diff": 0.18049403618312623,
+          "se": 0.019237332263825496,
+          "t_stat": 9.382487847472131,
+          "p_value": 2.4331232154885773e-15,
+          "seeds_won": 82
+        }
+      }
+    },
+    "m5_hybrid_minus_m2_greedy": {
+      "performer": "m5_hybrid",
+      "baseline": "m2_greedy",
+      "metrics": {
+        "aubqc": {
+          "metric": "aubqc",
+          "n": 100,
+          "mean_diff": 0.004264479358475466,
+          "se": 0.003112209860515787,
+          "t_stat": 1.3702415806139479,
+          "p_value": 0.17371078851952762,
+          "seeds_won": 55
+        },
+        "normalized_aubqc": {
+          "metric": "normalized_aubqc",
+          "n": 100,
+          "mean_diff": 0.00402428234358403,
+          "se": 0.002363696857424106,
+          "t_stat": 1.702537417581367,
+          "p_value": 0.09179263311107376,
+          "seeds_won": 54
+        },
+        "panel_aubqc": {
+          "metric": "panel_aubqc",
+          "n": 100,
+          "mean_diff": 0.001302819516885878,
+          "se": 0.001427924672469097,
+          "t_stat": 0.9123867259980225,
+          "p_value": 0.3637816469994643,
+          "seeds_won": 57
+        },
+        "top_decile_hit_rate": {
+          "metric": "top_decile_hit_rate",
+          "n": 100,
+          "mean_diff": 0.004333333333333333,
+          "se": 0.005456799010713341,
+          "t_stat": 0.794116353713174,
+          "p_value": 0.4290271242430697,
+          "seeds_won": 44
+        },
+        "spearman_rho_at_q35": {
+          "metric": "spearman_rho_at_q35",
+          "n": 100,
+          "mean_diff": 0.016617226672337466,
+          "se": 0.015950246052410806,
+          "t_stat": 1.0418163216877678,
+          "p_value": 0.30003434361771997,
+          "seeds_won": 53
+        }
+      }
+    },
+    "m5_warm_start_minus_m5_hybrid": {
+      "performer": "m5_warm_start",
+      "baseline": "m5_hybrid",
+      "metrics": {
+        "aubqc": {
+          "metric": "aubqc",
+          "n": 100,
+          "mean_diff": 0.04415078098516054,
+          "se": 0.006566088524958193,
+          "t_stat": 6.724061184575889,
+          "p_value": 1.1459313970099874e-09,
+          "seeds_won": 82
+        },
+        "normalized_aubqc": {
+          "metric": "normalized_aubqc",
+          "n": 100,
+          "mean_diff": 0.02569122512080246,
+          "se": 0.0033109220622704453,
+          "t_stat": 7.759537868186741,
+          "p_value": 7.829237587516708e-12,
+          "seeds_won": 80
+        },
+        "panel_aubqc": {
+          "metric": "panel_aubqc",
+          "n": 100,
+          "mean_diff": 0.008411950418111517,
+          "se": 0.0052293216269117294,
+          "t_stat": 1.6086121715713528,
+          "p_value": 0.11088566116107294,
+          "seeds_won": 53
+        },
+        "top_decile_hit_rate": {
+          "metric": "top_decile_hit_rate",
+          "n": 100,
+          "mean_diff": 0.016999999999999998,
+          "se": 0.009422076899965657,
+          "t_stat": 1.8042731109594279,
+          "p_value": 0.07422924922454735,
+          "seeds_won": 47
+        },
+        "spearman_rho_at_q35": {
+          "metric": "spearman_rho_at_q35",
+          "n": 100,
+          "mean_diff": 0.044193311046052876,
+          "se": 0.016856195500182455,
+          "t_stat": 2.6217844379874755,
+          "p_value": 0.010127479866083743,
+          "seeds_won": 63
+        }
+      }
+    }
+  },
+  "m5_warm_start": {
+    "definition": "m5_hybrid with Round 0 (q=5) chosen by the Virtual Lab cold-start prior instead of five matched random draws: qualified (y_dev >= tau_dev), liability-free, >=2 non-WT substitutions, and greedy maximin sequence diversity with anchor coverage.",
+    "curves": [
+      {
+        "query_count": 5,
+        "m5_warm_start": 8.399
+      },
+      {
+        "query_count": 10,
+        "m5_warm_start": 8.399
+      },
+      {
+        "query_count": 15,
+        "m5_warm_start": 8.399
+      },
+      {
+        "query_count": 20,
+        "m5_warm_start": 8.399
+      },
+      {
+        "query_count": 25,
+        "m5_warm_start": 8.495
+      },
+      {
+        "query_count": 30,
+        "m5_warm_start": 8.524
+      },
+      {
+        "query_count": 35,
+        "m5_warm_start": 8.524
+      }
+    ],
+    "top5_panel_curves": [
+      {
+        "query_count": 5,
+        "m5_warm_start": 7.148
+      },
+      {
+        "query_count": 10,
+        "m5_warm_start": 7.633
+      },
+      {
+        "query_count": 15,
+        "m5_warm_start": 8.024
+      },
+      {
+        "query_count": 20,
+        "m5_warm_start": 8.195
+      },
+      {
+        "query_count": 25,
+        "m5_warm_start": 8.244
+      },
+      {
+        "query_count": 30,
+        "m5_warm_start": 8.277
+      },
+      {
+        "query_count": 35,
+        "m5_warm_start": 8.312
+      }
+    ],
+    "summary": {
+      "aubqc": 1.972369000122404,
+      "normalized_aubqc": 0.12909497794140254,
+      "top5_panel_aubqc": 1.8593161091098411,
+      "top_decile_hit_rate": 0.219,
+      "spearman_rho_at_q35": 0.5689089947614803
+    },
+    "initial_ids": {
+      "0": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "1": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "2": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "3": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "4": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "5": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "6": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "7": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "8": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "9": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "10": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "11": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "12": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "13": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "14": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "15": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "16": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "17": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "18": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "19": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "20": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "21": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "22": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "23": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "24": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "25": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "26": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "27": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "28": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "29": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "30": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "31": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "32": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "33": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "34": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "35": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "36": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "37": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "38": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "39": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "40": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "41": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "42": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "43": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "44": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "45": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "46": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "47": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "48": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "49": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "50": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "51": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "52": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "53": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "54": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "55": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "56": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "57": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "58": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "59": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "60": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "61": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "62": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "63": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "64": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "65": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "66": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "67": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "68": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "69": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "70": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "71": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "72": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "73": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "74": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "75": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "76": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "77": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "78": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "79": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "80": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "81": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "82": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "83": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "84": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "85": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "86": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "87": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "88": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "89": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "90": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "91": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "92": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "93": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "94": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "95": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "96": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "97": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "98": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ],
+      "99": [
+        "CAND-327",
+        "CAND-015",
+        "CAND-360",
+        "CAND-354",
+        "CAND-166"
+      ]
+    }
   }
 }
