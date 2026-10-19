@@ -18,6 +18,37 @@ uvicorn app.server:app --reload --port 8000
 Frontend clients on localhost:3000/5173 may call `GET /api/state`, `GET /api/candidates`,
 `GET /api/benchmark`, and subscribe to `GET /api/stream-round`. CORS permits all origins.
 
+### Stage operations: golden ledger, rewind, time travel
+
+`results/golden_seed21.sqlite3` is a frozen copy of the verified Seed-21 run (6 rounds,
+`8.580` best qualified binding, `1.963` AUBQC). It is **read-only on the stage path**:
+`restore` and `rewind` copy *from* it and can never write to it.
+
+| Endpoint | Does |
+| --- | --- |
+| `POST /api/restore-golden` | Copies the golden ledger over `results/campaign.sqlite3` and re-hydrates the campaign (~12 ms). |
+| `POST /api/rewind` `{"round": k}` | Truncates the live ledger to the end of round `k` (`0` = seed batch only), restoring from golden first if the live file is shorter. `{"round": 5}` leaves `30/35` queries spent so Round 6 can be run live. |
+| `GET /api/state?round=k` | The complete contract state *as of* round `k` — KPIs, VoI/`sar_maturity`, ribbon, declared priors, council memos, 5 slots, Pareto scatter, and deterministic `tool_outputs`. Read-only; never mutates the database. |
+| `GET /api/rounds` | One compact entry per round `0..current` for the `[Seed] -> [R1] -> ... -> [R6]` stepper. |
+
+Rewind is *structural*, not a read-time filter: the file on disk becomes the shorter one, and
+`entries_no_delete` is honoured rather than defeated — the surviving prefix is rewritten into a
+staging file and swapped in atomically, so the hash chain that results is the chain that already
+verified. `GET /api/benchmark` additionally serves `zero_shot_references` (AF3 `-0.16`,
+ProteinMPNN `-0.17`, ESM-2 `-0.13`) and `same_seed_comparison` (live M5 vs M1-M5 re-run on Seed
+21's identical five initial queries, at `q=5` / `q=35` / AUBQC).
+
+To re-freeze the golden file deliberately after a new verified run:
+
+```bash
+python scripts/promote_golden.py --expect-best 8.580 --expect-aubqc 1.963
+```
+
+It refuses to overwrite unless the hash chain verifies, the run is complete, the spend matches the
+budget and the quoted numbers still hold.
+
+The end-to-end staging contract is covered by `tests/test_stage_readiness.py`.
+
 The full race is `python scripts/run_benchmark.py --seeds 100`; ExtraTrees use all CPU cores.
 Set `M5_POLICY_MODE=live_agent` to transparently stamp live-agent M5 runs, or leave the default
 `adaptive_tool`. Set `HITL=1` for the human approval gate.

@@ -1,6 +1,12 @@
 """Exact API-contract state builders."""
 from __future__ import annotations
-from .constants import WT_SEQUENCE
+from .constants import ANCHOR_POSITIONS, WT_SEQUENCE
+
+#: Positions the ribbon renders, in display order. A subset of the 13 HCDR3
+#: positions: the four structural anchors (3/11/12/13) plus the positions the
+#: council has historically argued about (1, 6, 8).
+RIBBON_POSITIONS: tuple[int, ...] = (1, 3, 6, 8, 11, 12, 13)
+
 
 def empty_voi_diagnostics() -> dict:
     """Batch-level view of the VoI-annealed objective, before any round has run.
@@ -24,6 +30,64 @@ def empty_voi_diagnostics() -> dict:
     }
 
 
+def hcdr3_ribbon(
+    priors: list[dict] | list | None = None,
+    falsified_positions: set[int] | frozenset[int] = frozenset(),
+) -> list[dict]:
+    """Per-position ribbon: declared prior weight plus its evidentiary status.
+
+    The contract key ``hcdr3_ribbon`` used to be a constant — every weight was
+    ``0.0`` and every non-anchor status ``neutral`` — so the UI could not show
+    that a position had actually been argued about or refuted. It is derived here
+    from the round's **positional priors** (what the council declared or what the
+    data-derived set reached the selector) and the audit's ``falsified_positions``
+    (the self-correction signal), which makes it a pure function of the ledger.
+
+    ``status`` is one of the contract's four values: a structural anchor stays
+    ``anchor_conserved``; a position the paired audit refuted is
+    ``epistasis_alert``; a position a prior actively prefers is
+    ``low_risk_swap``; anything else is ``neutral``.
+    """
+    declared: dict[int, float] = {}
+    for prior in priors or []:
+        if hasattr(prior, "model_dump"):
+            prior = prior.model_dump()
+        if not isinstance(prior, dict):
+            continue
+        position = prior.get("position")
+        if not position:
+            continue
+        position = int(position)
+        weight = float(prior.get("weight_delta") or 0.0)
+        # One number per position. A position declared twice keeps its *strongest*
+        # claim rather than their sum: summing would let a planner inflate a
+        # position simply by restating the same rule.
+        if abs(weight) > abs(declared.get(position, 0.0)):
+            declared[position] = weight
+    inverted = {int(p) for p in falsified_positions or ()}
+    ribbon = []
+    for position in RIBBON_POSITIONS:
+        declared_weight = declared.get(position, 0.0)
+        # An inverted rule is shown *with the sign it now carries*, because the
+        # selector really does push those residues down.
+        weight = -declared_weight if position in inverted else declared_weight
+        if position in ANCHOR_POSITIONS:
+            status = "anchor_conserved"
+        elif position in inverted:
+            status = "epistasis_alert"
+        elif declared_weight != 0.0:
+            status = "low_risk_swap"
+        else:
+            status = "neutral"
+        ribbon.append({
+            "position": position,
+            "wt_residue": WT_SEQUENCE[position - 1],
+            "soft_prior_weight": round(weight, 3),
+            "status": status,
+        })
+    return ribbon
+
+
 def empty_state(benchmark: dict | None = None) -> dict:
     # SPEC §7: the contract's required trio (m1/m3/m5) plus m2/m4 for the UI.
     # Missing keys degrade to None rather than raising, so a partially written
@@ -35,6 +99,6 @@ def empty_state(benchmark: dict | None = None) -> dict:
             for key in ("query_count", "m1_random", "m2_greedy", "m3_ucb", "m4_fixed_prior", "m5_hybrid")
         })
     return {"current_round": 0, "phase": "Cold-Start Tuition", "kpis": {"best_qualified_binding": 0.0, "delta_vs_wt": 0.0, "query_budget_spent": 0, "total_budget": 35, "wet_lab_cost_saved_usd": 0, "hypotheses_supported": 0, "hypotheses_falsified": 0},
-            "hcdr3_ribbon": [{"position": p, "wt_residue": WT_SEQUENCE[p-1], "soft_prior_weight": 0.0, "status": "anchor_conserved" if p in (3,11,12,13) else "neutral"} for p in (1,3,6,8,11,12,13)],
+            "hcdr3_ribbon": hcdr3_ribbon(),
             "agent_council": [], "batch_slots": [], "pareto_data": [], "benchmark_curves": curves,
             "voi_diagnostics": empty_voi_diagnostics()}

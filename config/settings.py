@@ -37,6 +37,10 @@ class Settings:
     development_csv: Path = ROOT / "data/raw/dev_hcdr3.csv"
     protocol_path: Path = ROOT / "config/frozen_protocol.json"
     ledger_path: Path = ROOT / "results/campaign.sqlite3"
+    #: Frozen copy of the verified Seed-21 run (6 rounds, ``8.580`` best /
+    #: ``1.963`` AUBQC). Stage recovery reads *from* this file and never writes to
+    #: it, so a bad live round can never cost the demo its campaign.
+    golden_ledger_path: Path = ROOT / "results/golden_seed21.sqlite3"
     benchmark_path: Path = ROOT / "results/benchmark_10seeds.json"
     pool_size: int = 419
     initial_queries: int = 5

@@ -1,25 +1,235 @@
 """Stateful closed-loop campaign: surrogates -> agents -> quota -> oracles."""
 from __future__ import annotations
 import json
+import shutil
+from dataclasses import dataclass
+from pathlib import Path
 import numpy as np
 import pandas as pd
 from .developability import RiskNormalizer
-from .state import empty_state
+from .state import empty_state, hcdr3_ribbon
 from .features import encode_sequences
-from .ledger import ImmutableLedger
+from .ledger import ImmutableLedger, is_ledger, read_entries
 from .oracle import BindingOracle, DevelopabilityOracle
 from .surrogate import BindingSurrogate, DevelopabilitySurrogate, link_predictions
 from .acquisition import sar_effect_table, select_five_slots
-from .tool_arsenal import H1_ARM_KEY, H1_EXPLOIT_SLOT_IDS, audit_past_hypotheses
-from .constants import WT_SEQUENCE
+from .tool_arsenal import (
+    H1_ARM_KEY,
+    H1_EXPLOIT_SLOT_IDS,
+    audit_past_hypotheses,
+    compute_cost_and_effort_saved,
+    detect_epistasis_clashes,
+    inspect_joint_uncertainty_hotspots,
+    profile_developability_liabilities,
+    scan_positional_sar,
+)
+from .constants import CHECKPOINT_QUERIES, WT_SEQUENCE
 from .virtual_lab_runner import VirtualLabRunner
 from config.settings import SETTINGS
+
+#: The revealed-batch schema, in column order. ``revealed`` and every time-travel
+#: reconstruction share it, so a round-``k`` frame is column-compatible with the
+#: live one by construction.
+REVEAL_COLUMNS = ("candidate_id", "sequence", "y_bind", "y_dev", "round_number")
+
+
+def revealed_from_entries(entries: list[dict]) -> pd.DataFrame:
+    """``oracle_reveal`` entries -> revealed batches in **query order**.
+
+    The single implementation behind both :meth:`Campaign.revealed` and the
+    round-``k`` reconstruction. Query order matters scientifically — the
+    surrogate is an ensemble of bootstrapped trees, so permuting the training
+    rows yields different forests — which is why grouping preserves first
+    appearance in ledger order (i.e. first reveal) instead of sorting.
+    """
+    grouped: dict[str, dict] = {}
+    for entry in entries:
+        if entry.get("event_type") != "oracle_reveal":
+            continue
+        payload = entry.get("payload") or {}
+        objective = payload.get("objective")
+        if objective not in {"y_bind", "y_dev"}:
+            continue
+        candidate_id = str(entry.get("candidate_id") or "")
+        if not candidate_id:
+            continue
+        record = grouped.get(candidate_id)
+        if record is None:
+            record = grouped[candidate_id] = {
+                "candidate_id": candidate_id,
+                "sequence": payload.get("sequence"),
+                "round_number": int(entry.get("round_number") or 0),
+            }
+        # Last write wins per objective, matching ``dict(zip(...))`` over the
+        # candidate's rows in ledger order.
+        record[objective] = payload.get("value")
+        record["round_number"] = max(
+            record["round_number"], int(entry.get("round_number") or 0)
+        )
+    rows = [
+        record
+        for record in grouped.values()
+        if record.get("y_bind") is not None and record.get("y_dev") is not None
+    ]
+    if not rows:
+        return pd.DataFrame(columns=list(REVEAL_COLUMNS))
+    return pd.DataFrame(rows)[list(REVEAL_COLUMNS)]
+
+
+def quality_curve_from_revealed(revealed: pd.DataFrame, tau_dev: float) -> list[dict]:
+    """One ``query_count -> best qualified binding`` point per completed round.
+
+    Replayed round by round rather than recorded as a single final point: a
+    single point would backfill every checkpoint and overstate AUBQC. Counts come
+    from the reveals themselves, not ``initial + batch*round``, so a short batch
+    cannot shift the curve.
+    """
+    if revealed.empty:
+        return []
+    points = []
+    for round_index in range(int(revealed.round_number.max()) + 1):
+        prefix = revealed[revealed.round_number <= round_index]
+        if prefix.empty:
+            continue
+        qualified = prefix[prefix.y_dev >= tau_dev]
+        best = float(qualified.y_bind.max()) if len(qualified) else 0.0
+        points.append({"query_count": int(len(prefix)), "best_qualified_binding": round(best, 3)})
+    return points
+
+
+def resolve_reference_binding(revealed: pd.DataFrame, tau_dev: float) -> float | None:
+    """The WT anchor ``delta_vs_wt`` is measured against — a pure function.
+
+    Split out of :meth:`Campaign.reference_binding` so a round-``k``
+    reconstruction can compute *that round's* reference without touching the live
+    campaign's frozen value. Resolution order: the measured wild type when the
+    ledger holds one, otherwise the best qualified binding among the round-0 seed
+    queries (the same q=5 checkpoint the matched M1-M4 curves start from).
+    """
+    if revealed.empty:
+        return None
+    wt = revealed.loc[revealed.sequence == WT_SEQUENCE, "y_bind"]
+    if len(wt):
+        return float(wt.iloc[0])
+    seed = revealed.loc[revealed.round_number == 0] if "round_number" in revealed else revealed
+    if seed.empty:
+        return None
+    qualified = seed[seed.y_dev >= tau_dev]
+    pool = qualified if len(qualified) else seed
+    return float(pool.y_bind.max())
+
+
+def curve_value_at(curve: list[dict], checkpoint: int) -> float:
+    """``y*(q)`` at one checkpoint, carrying the last observed value forward.
+
+    Mirrors :func:`core.baselines.run_method`'s ``1/30`` normalisation: a
+    checkpoint that was never measured inherits the most recent one, and a
+    checkpoint *below* the first measurement inherits the first one backward —
+    otherwise a campaign whose first record is at q=10 would score 0.0 for q=5
+    and understate its own AUBQC.
+    """
+    recorded = {
+        int(point["query_count"]): float(point["best_qualified_binding"])
+        for point in curve
+        if point.get("best_qualified_binding") is not None
+    }
+    if not recorded:
+        return float("nan")
+    counts = sorted(recorded)
+    value = recorded[counts[0]]
+    for count in counts:
+        if count <= checkpoint:
+            value = recorded[count]
+    return value
+
+
+def aubqc_from_curve(curve: list[dict]) -> float:
+    """``AUBQC`` over :data:`CHECKPOINT_QUERIES`, scaled by the frozen ``1/30``."""
+    if not curve:
+        return float("nan")
+    return float(sum(curve_value_at(curve, q) for q in CHECKPOINT_QUERIES) / 30.0)
+
+
+@dataclass(frozen=True)
+class LedgerSnapshot:
+    """Every ledger entry, parsed once, with round-scoped views over it.
+
+    Time travel is a *read* over this snapshot, never a mutation of the database:
+    inspecting round 3 while the ledger holds round 6 must not disturb the
+    campaign. It is also the reason ``GET /api/rounds`` is cheap — the file is
+    read once per ledger version and every round is then derived in memory.
+    """
+
+    entries: tuple[dict, ...]
+    version: tuple[int, int]
+
+    @classmethod
+    def from_ledger(cls, ledger: ImmutableLedger) -> "LedgerSnapshot":
+        version = ledger.version()
+        entries = []
+        for row in read_entries(ledger.path):
+            parsed = dict(row)
+            try:
+                parsed["payload"] = json.loads(row.get("payload") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                parsed["payload"] = {}
+            entries.append(parsed)
+        return cls(entries=tuple(entries), version=version)
+
+    # ── Views ────────────────────────────────────────────────────────────────
+    def cutoff_for_round(self, round_number: int) -> int:
+        """Highest ``sequence_no`` written at or before the end of a round."""
+        cutoff = 0
+        for entry in self.entries:
+            tagged = entry.get("round_number")
+            if tagged is None or int(tagged) <= round_number:
+                cutoff = max(cutoff, int(entry.get("sequence_no") or 0))
+        return cutoff
+
+    def up_to_round(self, round_number: int | None) -> list[dict]:
+        if round_number is None:
+            return list(self.entries)
+        cutoff = self.cutoff_for_round(round_number)
+        return [entry for entry in self.entries if int(entry.get("sequence_no") or 0) <= cutoff]
+
+    def revealed(self, round_number: int | None = None) -> pd.DataFrame:
+        return revealed_from_entries(self.up_to_round(round_number))
+
+    def decisions(self, round_number: int | None = None) -> list[dict]:
+        """``round_decision`` payloads, latest per round, in round order.
+
+        A re-executed round writes a second decision; the newest one is what the
+        campaign reports, so a replayed history has to make the same choice.
+        """
+        latest: dict[int, dict] = {}
+        for entry in self.up_to_round(round_number):
+            if entry.get("event_type") != "round_decision":
+                continue
+            payload = entry.get("payload") or {}
+            if not payload.get("decision"):
+                continue
+            latest[int(entry.get("round_number") or 0)] = {
+                "round_number": int(entry.get("round_number") or 0), **payload
+            }
+        return [latest[key] for key in sorted(latest)]
+
+    def last_payload(self, event_type: str, round_number: int | None = None) -> dict | None:
+        latest = None
+        for entry in self.up_to_round(round_number):
+            if entry.get("event_type") == event_type:
+                latest = entry.get("payload") or {}
+        return latest
 
 
 class Campaign:
     def __init__(self, private: pd.DataFrame, normalizer: RiskNormalizer, protocol: dict, benchmark: dict | None = None,
-                 ledger_path=None):
+                 ledger_path=None, golden_ledger_path=None):
         self.private, self.normalizer, self.protocol, self.benchmark = private, normalizer, protocol, benchmark or {}
+        #: Where the frozen, never-written reference run lives. A campaign owns
+        #: this path instead of re-reading the global setting on every restore, so
+        #: a rehearsal (a test, a scratch sandbox) can point at its own copy and
+        #: still be structurally unable to overwrite the stage's only good ledger.
+        self.golden_ledger_path = Path(golden_ledger_path or SETTINGS.golden_ledger_path)
         self.state = empty_state(self.benchmark)
         self.hypotheses: list[dict] = []
         #: Query-count -> best qualified binding, so AUBQC can be computed for the
@@ -27,54 +237,119 @@ class Campaign:
         self.quality_curve: list[dict] = []
         #: Frozen reference for ``delta_vs_wt``; resolved once, then reused.
         self._seed_reference: float | None = None
+        #: Parsed ledger, memoized on its version; ``None`` until first read.
+        self._snapshot: LedgerSnapshot | None = None
+        #: ``(ledger version, round, include_tool_outputs)`` -> contract state, so a
+        #: UI timeline that steps back and forth pays for each round once and can
+        #: never show a memoized state from a *different* ledger.
+        self._state_cache: dict[tuple, dict] = {}
+        #: ``(ledger version, round)`` -> surrogate-scored unqueried pool, which is
+        #: the expensive half of a round's ``tool_outputs`` (~30 ms per round).
+        self._scored_cache: dict[tuple, pd.DataFrame] = {}
         self.ledger = ImmutableLedger(ledger_path or SETTINGS.ledger_path, metadata={"m5_policy_mode": SETTINGS.m5_policy_mode, "is_synthetic": protocol["is_synthetic"]})
         self.binding_oracle = BindingOracle(private, self.ledger)
         self.dev_oracle = DevelopabilityOracle(private, self.ledger, normalizer)
         self.runner = VirtualLabRunner(hitl=SETTINGS.hitl)
         self._hydrate_from_ledger()
 
-    # ── Restart safety ────────────────────────────────────────────────────────
-    def _decision_events(self) -> list[dict]:
-        """Read ``round_decision`` payloads verbatim (payloads are nested JSON)."""
-        with self.ledger.connect() as con:
-            rows = con.execute(
-                "SELECT round_number, payload FROM entries WHERE event_type='round_decision' "
-                "ORDER BY sequence_no"
-            ).fetchall()
-        events = []
-        for row in rows:
-            payload = json.loads(row["payload"])
-            if payload.get("decision"):
-                events.append({"round_number": int(row["round_number"]), **payload})
-        return events
+    # ── Ledger location ───────────────────────────────────────────────────────
+    def rebind_ledger(self, path=None) -> None:
+        """Point every oracle and the runner at a freshly written ledger file.
 
-    def _latest_slots(self) -> list[dict]:
+        Used by rewind/restore, both of which *replace* the file rather than edit
+        it. Rebuilding the oracles is cheap (they hold no state beyond the path and
+        the private frame) and it removes the chance that a stale
+        ``sqlite3.Connection`` or a stale ``find_reveal`` cache keeps serving the
+        pre-rewind history.
+        """
+        self.ledger = ImmutableLedger(path or self.ledger.path, metadata={"m5_policy_mode": SETTINGS.m5_policy_mode, "is_synthetic": self.protocol["is_synthetic"]})
+        self.binding_oracle = BindingOracle(self.private, self.ledger)
+        self.dev_oracle = DevelopabilityOracle(self.private, self.ledger, self.normalizer)
+        self._rehydrate()
+        return None
+
+    def _rehydrate(self) -> None:
+        """Rebuild every in-memory round view from the (new) ledger."""
+        self.state = empty_state(self.benchmark)
+        self.hypotheses = []
+        self.quality_curve = []
+        self._seed_reference = None
+        self._snapshot = None
+        self._state_cache = {}
+        self._scored_cache = {}
+        self.runner.previous_decisions = []
+        self.runner.declared_priors_by_round = {}
+        self._hydrate_from_ledger()
+
+    # ── Ledger snapshot ───────────────────────────────────────────────────────
+    def snapshot(self) -> LedgerSnapshot:
+        """The whole ledger, parsed once per version.
+
+        Every historical view is derived from this object, so a single round's
+        inspection costs one pass over 88 rows instead of one query per event
+        type — and it can never see a half-appended round, because the snapshot is
+        keyed on ``(max sequence_no, count)``.
+        """
+        version = self.ledger.version()
+        snapshot = self._snapshot
+        if snapshot is None or snapshot.version != version:
+            snapshot = self._snapshot = LedgerSnapshot.from_ledger(self.ledger)
+        return snapshot
+
+    def current_round(self) -> int:
+        """The last round with a reveal — decisions alone do not complete a round."""
+        revealed = self.snapshot().revealed()
+        return 0 if revealed.empty else int(revealed.round_number.max())
+
+    # ── Restart safety ────────────────────────────────────────────────────────
+    def _decision_events(self, round_number: int | None = None) -> list[dict]:
+        """``round_decision`` payloads verbatim (payloads are nested JSON)."""
+        return self.snapshot().decisions(round_number)
+
+    def _latest_slots(self, round_number: int | None = None) -> list[dict]:
         """The most recently persisted batch design, or ``[]``.
 
         ``round_slots`` events are written just before the batch is measured, so
-        the newest one is the last batch the loop actually designed.
+        the newest one at or before ``round_number`` is the last batch the loop
+        had actually designed by then.
         """
-        with self.ledger.connect() as con:
-            row = con.execute(
-                "SELECT payload FROM entries WHERE event_type='round_slots' "
-                "ORDER BY sequence_no DESC LIMIT 1"
-            ).fetchone()
-        if row is None:
-            return []
-        payload = json.loads(row["payload"])
-        return list(payload.get("slots") or [])
+        payload = self.snapshot().last_payload("round_slots", round_number)
+        return list((payload or {}).get("slots") or [])
 
-    def _latest_council(self) -> list[dict]:
+    def _latest_council(self, round_number: int | None = None) -> list[dict]:
         """The council memos of the most recent round, or ``[]`` on a fresh ledger."""
-        with self.ledger.connect() as con:
-            row = con.execute(
-                "SELECT payload FROM entries WHERE event_type='round_council' "
-                "ORDER BY sequence_no DESC LIMIT 1"
-            ).fetchone()
-        if row is None:
-            return []
-        payload = json.loads(row["payload"])
-        return list(payload.get("memos") or [])
+        payload = self.snapshot().last_payload("round_council", round_number)
+        return list((payload or {}).get("memos") or [])
+
+    def _decision_records(self, round_number: int | None = None) -> list[dict]:
+        """Decisions in the shape the paired audit consumes, latest per round.
+
+        Shared by the live restart path and the round-``k`` reconstruction, so a
+        historical audit cannot grade a round differently from the live one: both
+        hand :func:`core.tool_arsenal.audit_past_hypotheses` the *measured* ids,
+        the whole H1 arm, and the pre-query expectation recorded before the assay.
+        """
+        records = []
+        for event in self._decision_events(round_number):
+            decision = event["decision"]
+            records.append({
+                **decision,
+                "round_number": int(event["round_number"]),
+                "slot4_measured_id": event.get("slot4_measured_id"),
+                "slot5_measured_id": event.get("slot5_measured_id"),
+                "declared_h1_id": event.get("declared_h1_id"),
+                "declared_h0_id": event.get("declared_h0_id"),
+                # The whole H1 exploitation arm (slots 1/2/4 with Δ_agent >= 0),
+                # not just slot 4. A restarted process re-audits from this list; if
+                # the arm were dropped here it would silently fall back to the
+                # slot-4-only comparison this design exists to replace.
+                H1_ARM_KEY: event.get(H1_ARM_KEY) or [],
+                "pre_query_expectation": event.get("pre_query_expectation") or {},
+                # What the council *declared*, kept distinct from the scoring
+                # priors the selector was actually driven by.
+                "declared_priors": event.get("declared_priors") or [],
+            })
+        return records
 
     def _hydrate_from_ledger(self) -> None:
         """Rebuild round history so a resumed process keeps its KPI counters.
@@ -87,37 +362,21 @@ class Campaign:
         Decisions are ledger events now, and the quality curve is replayed from
         the reveal rounds, so every KPI survives a restart.
         """
-        # A re-executed round writes a second decision; keep the latest per round.
-        latest: dict[int, dict] = {}
-        for event in self._decision_events():
-            latest[int(event["round_number"])] = event
-        for round_number in sorted(latest):
-            event = latest[round_number]
-            decision = event["decision"]
-            self.runner.previous_decisions.append({
-                **decision,
-                "slot4_measured_id": event.get("slot4_measured_id"),
-                "slot5_measured_id": event.get("slot5_measured_id"),
-                "declared_h1_id": event.get("declared_h1_id"),
-                "declared_h0_id": event.get("declared_h0_id"),
-                # The whole H1 exploitation arm (slots 1/2/4 with Δ_agent >= 0),
-                # not just slot 4. A restarted process re-audits from this list; if
-                # the arm were dropped here it would silently fall back to the
-                # slot-4-only comparison this design exists to replace.
-                H1_ARM_KEY: event.get(H1_ARM_KEY) or [],
-                "pre_query_expectation": event.get("pre_query_expectation") or {},
-            })
+        for record in self._decision_records():
+            round_number = record["round_number"]
+            self.runner.previous_decisions.append(record)
             # What the council *declared*, restored so the audit trail survives a
             # restart. The selector is scored on data-derived priors, so this is
             # pure provenance — but it is the provenance a UI needs to show that a
             # planner actually argued something before the arithmetic overruled it.
-            declared = event.get("declared_priors") or []
-            if declared:
-                self.runner.declared_priors_by_round[round_number] = list(declared)
+            if record["declared_priors"]:
+                self.runner.declared_priors_by_round[round_number] = list(
+                    record["declared_priors"]
+                )
             self.hypotheses.append({
-                "hypothesis_id": decision["hypothesis_id"],
+                "hypothesis_id": record["hypothesis_id"],
                 "round_number": round_number,
-                "statement": decision.get("hypothesis_statement", ""),
+                "statement": record.get("hypothesis_statement", ""),
                 "verdict": "INCONCLUSIVE",
             })
 
@@ -142,17 +401,7 @@ class Campaign:
         # ledger rather than ``initial + batch*round`` so a short batch cannot
         # shift the curve.
         last_round = int(revealed.round_number.max())
-        self.quality_curve = []
-        for round_index in range(last_round + 1):
-            prefix = revealed[revealed.round_number <= round_index]
-            if prefix.empty:
-                continue
-            qualified = prefix[prefix.y_dev >= self.protocol["tau_dev"]]
-            best = float(qualified.y_bind.max()) if len(qualified) else 0.0
-            self.quality_curve.append({
-                "query_count": int(len(prefix)),
-                "best_qualified_binding": round(best, 3),
-            })
+        self.quality_curve = quality_curve_from_revealed(revealed, self.protocol["tau_dev"])
 
         # Reveals, not decisions, define a completed round: a decision is written
         # before its batch is measured, so trusting it would mark an interrupted
@@ -173,6 +422,18 @@ class Campaign:
         # campaign whose final batch genuinely had ``voi == 0`` for a *different*
         # reason, and the UI could not distinguish the two.
         self.state["voi_diagnostics"] = self._voi_diagnostics(last_round, self.state["batch_slots"], revealed)
+        # ``pareto_data`` was the one contract field this replay left empty, so a
+        # restarted API served an empty risk/binding scatter for a campaign that
+        # had queried 35 candidates. It is a pure function of the revealed ledger.
+        self.state["pareto_data"] = self._pareto_data(revealed)
+        # The ribbon is provenance the campaign has already put in the ledger;
+        # leaving it at the ``empty_state`` default made a restarted API serve an
+        # all-neutral ribbon for a campaign that had argued about — and inverted —
+        # real positions. ``declared_priors`` is not added here: the top-level
+        # ``/api/state`` contract is frozen (``api_contract.json``) and addition-
+        # only is checked by a test, so the richer round view lives behind
+        # ``GET /api/state?round=k``.
+        self.state["hcdr3_ribbon"] = self._ribbon_for(last_round)
         self.state["kpis"].update({
             "best_qualified_binding": round(best, 2),
             "delta_vs_wt": round(best - reference, 3) if reference is not None else 0.0,
@@ -189,7 +450,7 @@ class Campaign:
             rows.append({"candidate_id":row.candidate_id,"sequence":row.sequence,"risk_score":score["risk"],"y_dev":score["y_dev"],"risk_passed":score["y_dev"]>=self.protocol["tau_dev"],"developability_components_raw":score["raw"],"developability_components_normalized":score["normalized"]})
         return rows
 
-    def revealed(self) -> pd.DataFrame:
+    def revealed(self, round_number: int | None = None) -> pd.DataFrame:
         """Revealed batches, in **query order** (first reveal first).
 
         Order is not cosmetic here. The surrogate is an ensemble of bootstrapped
@@ -200,18 +461,12 @@ class Campaign:
         so the live campaign and its own same-seed benchmark twin were training on
         the same rows *in different orders* and silently diverging. Iterating in
         first-reveal order makes the two paths construct identical forests.
+
+        ``round_number`` is an optional *ceiling*: the same rows the live loop
+        would have held at the end of that round. It never mutates the ledger, so
+        the timeline stepper can show round 2 while the file holds round 6.
         """
-        events = self.ledger.dataframe("oracle_reveal")
-        if events.empty:
-            return pd.DataFrame(columns=["candidate_id", "sequence", "y_bind", "y_dev", "round_number"])
-        rows = []
-        # ``events`` arrives ordered by ledger ``sequence_no`` (see
-        # ``ImmutableLedger.dataframe``), so first appearance here is query order.
-        for cid, group in events.groupby("candidate_id", sort=False):
-            values = dict(zip(group.objective, group.value))
-            if {"y_bind", "y_dev"} <= values.keys():
-                rows.append({"candidate_id": cid, "sequence": group.sequence.iloc[0], "y_bind": values["y_bind"], "y_dev": values["y_dev"], "round_number": int(group.round_number.max())})
-        return pd.DataFrame(rows)
+        return self.snapshot().revealed(round_number)
 
     # ── Reference binding for delta_vs_wt ─────────────────────────────────────
     def reference_binding(self, revealed: pd.DataFrame) -> float | None:
@@ -236,19 +491,10 @@ class Campaign:
         """
         if self._seed_reference is not None:
             return self._seed_reference
-        if revealed.empty:
-            return None
-        wt = revealed.loc[revealed.sequence == WT_SEQUENCE, "y_bind"]
-        if len(wt):
-            self._seed_reference = float(wt.iloc[0])
-            return self._seed_reference
-        seed = revealed.loc[revealed.round_number == 0] if "round_number" in revealed else revealed
-        if seed.empty:
-            return None
-        qualified = seed[seed.y_dev >= self.protocol["tau_dev"]]
-        pool = qualified if len(qualified) else seed
-        self._seed_reference = float(pool.y_bind.max())
-        return self._seed_reference
+        resolved = resolve_reference_binding(revealed, self.protocol["tau_dev"])
+        if resolved is not None:
+            self._seed_reference = resolved
+        return resolved
 
     @property
     def falsified_positions(self) -> set[int]:
@@ -265,6 +511,361 @@ class Campaign:
             return set()
         audit = audit_past_hypotheses(self.revealed(), self.runner.previous_decisions)
         return set(audit.get("falsified_positions") or ())
+
+    # ── Round-by-round time travel (read-only) ───────────────────────────────
+    def _round_reveals(self, round_number: int) -> pd.DataFrame:
+        """Reveals at the end of ``round_number`` (``round_number == -1``: none)."""
+        return self.snapshot().revealed(max(-1, round_number))
+
+    def _round_verdicts(self, round_number: int) -> tuple[list[dict], set[int]]:
+        """Hypothesis verdicts and inverted positions **as of** ``round_number``.
+
+        The audit is a pure function of (reveals, decisions), so replaying it over
+        the round-``k`` prefix reproduces exactly the verdict the live loop showed
+        at the time — including a verdict that later flipped.
+        """
+        decisions = self._decision_records(round_number)
+        if not decisions:
+            return [], set()
+        revealed = self._round_reveals(round_number)
+        audit = audit_past_hypotheses(revealed, decisions)
+        by_round = {v.get("round_number"): v for v in audit.get("verdicts", [])}
+        hypotheses = []
+        for round_index in sorted(by_round):
+            record = by_round[round_index]
+            hypotheses.append({
+                "hypothesis_id": record.get("hypothesis_id"),
+                "round_number": round_index,
+                "statement": record.get("statement", ""),
+                "verdict": record.get("verdict"),
+                "evidence": record,
+            })
+        return hypotheses, set(audit.get("falsified_positions") or ())
+
+    def _pareto_data(self, revealed: pd.DataFrame) -> list[dict]:
+        """Risk/binding scatter with the top-10 frontier flagged."""
+        if revealed.empty:
+            return []
+        frontier = set(revealed.sort_values("y_bind", ascending=False).head(10).candidate_id)
+        return [
+            {
+                "candidate_id": row.candidate_id,
+                "risk": round(1 - float(row.y_dev), 2),
+                "binding": round(float(row.y_bind), 2),
+                "status": (
+                    "wild_type" if row.candidate_id == "WT"
+                    else "pareto_frontier" if row.candidate_id in frontier
+                    else f"queried_round_{int(row.round_number)}"
+                ),
+            }
+            for row in revealed.itertuples()
+        ]
+
+    def scored_unqueried(self, revealed: pd.DataFrame, *, round_number: int | None = None) -> pd.DataFrame:
+        """The unqueried pool with surrogate predictions, fitted on ``revealed``.
+
+        The same construction :meth:`execute_round` performs before the council
+        runs, extracted so a historical round can be *re-asked* the questions the
+        council was asked: which candidates carry the most joint uncertainty, and
+        what does their developability profile look like? Deterministic given the
+        revealed rows and the campaign seed, which is what makes the reconstructed
+        ``tool_outputs`` evidence rather than decoration.
+
+        Two forests per call is ~30 ms, so the result is memoized per round; a UI
+        that flips between timeline entries pays for each round once. ``n_jobs=1``
+        is deliberate: the fit is far too small for joblib's process pool, whose
+        startup cost is three times the fit itself. Trees are seeded, so the
+        predictions are identical either way.
+        """
+        if round_number is not None:
+            key = (self.snapshot().version, round_number)
+            cached = self._scored_cache.get(key)
+            if cached is not None:
+                return cached
+        X = encode_sequences(self.private.sequence)
+        index = {cid: i for i, cid in enumerate(self.private.candidate_id)}
+        train = np.asarray([index[x] for x in revealed.candidate_id])
+        unqueried = self.private[~self.private.candidate_id.isin(revealed.candidate_id)].copy()
+        pred = np.asarray([index[x] for x in unqueried.candidate_id])
+        bs = BindingSurrogate(SETTINGS.random_seed, n_jobs=1).fit(
+            X[train], revealed.y_bind.to_numpy()
+        )
+        ds = DevelopabilitySurrogate(SETTINGS.random_seed + 1, n_jobs=1).fit(
+            X[train], revealed.y_dev.to_numpy()
+        )
+        mb, sb = bs.predict(X[pred])
+        md, sd = ds.predict(X[pred])
+        linked = link_predictions(mb, sb, md, sd, self.protocol["tau_dev"])
+        scored = unqueried.assign(
+            y_dev=[self.normalizer.score(s)["y_dev"] for s in unqueried.sequence],
+            mu_bind=mb, sigma_bind=sb, mu_dev=md, sigma_dev=sd,
+            a_base=linked.a_base, sigma_joint=linked.sigma_joint,
+        )
+        if round_number is not None:
+            self._scored_cache[(self.snapshot().version, round_number)] = scored
+        return scored
+
+    def tool_outputs_at(self, round_number: int) -> dict[str, dict]:
+        """The deterministic tool tables the council saw when planning ``round``.
+
+        Round ``k``'s debate ran on the ledger **before** that round's own batch
+        was measured, so the frame is the reveal prefix through ``k - 1``. That
+        distinction is the whole point of the pill: clicking ``tool_outputs`` on
+        the round-3 timeline entry must show round 3's *inputs*, not the answer
+        the batch later produced.
+        """
+        inputs = self._round_reveals(round_number - 1)
+        decisions = self._decision_records(round_number - 1)
+        outputs: dict[str, dict] = {
+            "scan_positional_sar": scan_positional_sar(inputs),
+            "detect_epistasis_clashes": detect_epistasis_clashes(inputs),
+            "audit_past_hypotheses": audit_past_hypotheses(inputs, decisions),
+            "compute_cost_and_effort_saved": compute_cost_and_effort_saved(
+                inputs, assay_cost_usd=SETTINGS.assay_cost_usd
+            ),
+        }
+        if inputs.empty:
+            # The cold start has no surrogate yet, so the two pool-level tools have
+            # nothing to inspect. Say so rather than omitting the pill.
+            empty = {"tool": "", "rows": []}
+            outputs["inspect_joint_uncertainty_hotspots"] = {
+                **empty, "tool": "inspect_joint_uncertainty_hotspots",
+            }
+            outputs["profile_developability_liabilities"] = {
+                **empty, "tool": "profile_developability_liabilities",
+            }
+            return outputs
+        try:
+            scored = self.scored_unqueried(inputs, round_number=round_number)
+            outputs["inspect_joint_uncertainty_hotspots"] = inspect_joint_uncertainty_hotspots(scored)
+        except (KeyError, ValueError, IndexError) as exc:
+            outputs["inspect_joint_uncertainty_hotspots"] = {
+                "tool": "inspect_joint_uncertainty_hotspots", "rows": [], "error": str(exc),
+            }
+            scored = None
+        try:
+            ids = (
+                list(scored.sort_values(["sigma_joint", "candidate_id"], ascending=[False, True])
+                     .candidate_id.head(15))
+                if scored is not None
+                else list(self.private.candidate_id.head(15))
+            )
+            outputs["profile_developability_liabilities"] = profile_developability_liabilities(ids)
+        except (KeyError, TypeError) as exc:
+            outputs["profile_developability_liabilities"] = {
+                "tool": "profile_developability_liabilities", "rows": [], "error": str(exc),
+            }
+        return outputs
+
+    def _ribbon_for(self, round_number: int) -> list[dict]:
+        """The per-position ribbon as of ``round_number``.
+
+        Declared priors come from that round's decision payload (what the council
+        *argued*), and the inverted set from replaying the paired audit over the
+        same prefix — so the live ``/api/state`` and ``/api/state?round=k`` cannot
+        disagree about a position's status.
+        """
+        declared = self._declared_priors_for(round_number)
+        _, falsified = self._round_verdicts(round_number)
+        return hcdr3_ribbon(declared, falsified)
+
+    def _declared_priors_for(self, round_number: int) -> list[dict]:
+        """The priors the council declared for ``round_number``, or ``[]``.
+
+        Falls back to the scoring priors on the decision record for a ledger
+        written before ``declared_priors`` was stamped, so an older run still
+        renders a meaningful ribbon instead of an all-neutral one.
+        """
+        decisions = self.snapshot().decisions(round_number)
+        if not decisions:
+            return []
+        latest = decisions[-1]
+        declared = latest.get("declared_priors") or []
+        if declared:
+            return list(declared)
+        decision = latest.get("decision") or {}
+        return list(decision.get("positional_priors") or [])
+
+    def state_at(self, round_number: int, *, include_tool_outputs: bool = True) -> dict:
+        """The complete contract state **as of the end of** ``round_number``.
+
+        Read-only: the database is never touched, so the timeline stepper can
+        inspect round 2 while the ledger holds round 6. Every field is rebuilt
+        from the ledger prefix through that round — KPIs, VoI/``sar_maturity``
+        (read off that round's persisted batch design), the ribbon from that
+        round's declared priors and refuted positions, the council memos, the five
+        slots, the Pareto scatter, and the deterministic tool tables the council
+        was looking at.
+        """
+        total_rounds = SETTINGS.rounds
+        if round_number < 0 or round_number > total_rounds:
+            raise ValueError(f"round must be in 0..{total_rounds}")
+        current = self.current_round()
+        if round_number > current:
+            raise ValueError(
+                f"round {round_number} has not run yet (ledger holds {current})"
+            )
+        version = self.snapshot().version
+        cache_key = (version, round_number, include_tool_outputs)
+        cached = self._state_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        state = empty_state(self.benchmark)
+        state["current_round"] = round_number
+        state["round_number"] = round_number
+        state["phase"] = "Cold-Start Tuition" if round_number <= 2 else "Self-Accelerating Payoff"
+        revealed = self._round_reveals(round_number)
+        qualified = revealed[revealed.y_dev >= self.protocol["tau_dev"]] if not revealed.empty else revealed
+        best = float(qualified.y_bind.max()) if len(qualified) else 0.0
+        reference = resolve_reference_binding(revealed, self.protocol["tau_dev"])
+        curve = quality_curve_from_revealed(revealed, self.protocol["tau_dev"])
+        hypotheses, _falsified = self._round_verdicts(round_number)
+        slots = self._latest_slots(round_number)
+        memos = self._latest_council(round_number)
+        declared = self._declared_priors_for(round_number)
+
+        state["kpis"] = {
+            "best_qualified_binding": round(best, 2),
+            "delta_vs_wt": round(best - reference, 3) if reference is not None else 0.0,
+            "query_budget_spent": int(len(revealed)),
+            "total_budget": SETTINGS.total_budget,
+            "wet_lab_cost_saved_usd": max(
+                0, (SETTINGS.total_budget - len(revealed)) * SETTINGS.assay_cost_usd
+            ),
+            "hypotheses_supported": sum(h["verdict"] == "SUPPORTED" for h in hypotheses),
+            "hypotheses_falsified": sum(h["verdict"] == "FALSIFIED" for h in hypotheses),
+        }
+        state["voi_diagnostics"] = self._voi_diagnostics(round_number, slots, revealed)
+        state["hcdr3_ribbon"] = self._ribbon_for(round_number)
+        state["declared_priors"] = declared
+        state["agent_council"] = memos
+        state["batch_slots"] = slots
+        state["pareto_data"] = self._pareto_data(revealed)
+        state["hypotheses"] = hypotheses
+        state["quality_curve"] = curve
+        state["aubqc"] = aubqc_from_curve(curve)
+        if include_tool_outputs:
+            state["tool_outputs"] = self.tool_outputs_at(round_number)
+        self._state_cache[cache_key] = state
+        return state
+
+    def timeline(self) -> list[dict]:
+        """One compact entry per round ``0..current`` for the UI stepper.
+
+        Deliberately cheap (no tool tables, no surrogate refit): it is the payload
+        that draws ``[Seed] -> [R1] -> ...``, and the tool pills are fetched for
+        whichever round the operator actually clicks.
+        """
+        current = self.current_round()
+        entries = []
+        for round_number in range(current + 1):
+            state = self.state_at(round_number, include_tool_outputs=False)
+            hypotheses = state.get("hypotheses") or []
+            last = hypotheses[-1] if hypotheses else {}
+            slots = state.get("batch_slots") or []
+            kpis = state["kpis"]
+            entries.append({
+                "round": round_number,
+                "label": "Seed" if round_number == 0 else f"R{round_number}",
+                "phase": state["phase"],
+                "query_count": kpis["query_budget_spent"],
+                "best_qualified_binding": kpis["best_qualified_binding"],
+                "delta_vs_wt": kpis["delta_vs_wt"],
+                "voi": state["voi_diagnostics"]["voi"],
+                "sar_maturity": state["voi_diagnostics"]["sar_maturity"],
+                "exploit_weight": state["voi_diagnostics"]["exploit_weight"],
+                "hypotheses_supported": kpis["hypotheses_supported"],
+                "hypotheses_falsified": kpis["hypotheses_falsified"],
+                "hypothesis_id": last.get("hypothesis_id"),
+                "verdict": last.get("verdict"),
+                "statement": last.get("statement"),
+                "council_seats": len(state.get("agent_council") or []),
+                "slots": len(slots),
+                "slot_candidate_ids": [slot.get("candidate_id") for slot in slots],
+            })
+        return entries
+
+    # ── Rewind / restore ─────────────────────────────────────────────────────
+    def restore_golden(self) -> dict:
+        """Replace ``results/campaign.sqlite3`` with the frozen Seed-21 ledger.
+
+        The golden file is **read**, never written: it is the only copy of the
+        verified run, and everything here is designed so that no live round and no
+        rewind can cost the stage its campaign. The restore is a single atomic
+        ``os.replace`` of a byte copy, so a crash mid-restore cannot leave a
+        half-file behind.
+        """
+        golden = self.golden_ledger_path
+        if not golden.exists():
+            raise FileNotFoundError(
+                f"golden ledger {golden} is missing; restore it from the verified run first"
+            )
+        if not is_ledger(golden):
+            raise ValueError(f"golden ledger {golden} is not a readable ledger")
+        destination = Path(self.ledger.path)
+        staging = destination.with_name(f"{destination.name}.restore.tmp")
+        shutil.copyfile(golden, staging)
+        if not is_ledger(staging):
+            staging.unlink(missing_ok=True)
+            raise ValueError(f"staging copy of {golden} did not open as a ledger")
+        shutil.move(str(staging), str(destination))
+        self.rebind_ledger(destination)
+        return {
+            "restored": True,
+            "source": str(golden),
+            "ledger": str(destination),
+            "current_round": self.current_round(),
+            "entries": self.snapshot().version[1],
+            "verified": self.ledger.verify(),
+        }
+
+    def rewind_to(self, round_number: int) -> dict:
+        """Truncate the live ledger to the end of ``round_number``.
+
+        If the live ledger is shorter than the requested round (typical after a
+        botched live round), the golden ledger is restored first — otherwise
+        "rewind to R5" would silently do nothing on a ledger that only holds R2.
+
+        The truncation itself is structural, not a read-time filter: the file on
+        disk becomes the shorter one, so the next :meth:`execute_round` appends to
+        the truncated chain exactly as if the later rounds had never happened.
+        """
+        total_rounds = SETTINGS.rounds
+        if round_number < 0 or round_number > total_rounds:
+            raise ValueError(f"round must be in 0..{total_rounds}")
+        restored_from_golden = False
+        if self.current_round() < round_number:
+            golden = self.golden_ledger_path
+            if not golden.exists():
+                raise ValueError(
+                    f"ledger holds round {self.current_round()}, cannot rewind forward to "
+                    f"{round_number} and no golden ledger is available"
+                )
+            self.restore_golden()
+            restored_from_golden = True
+            if self.current_round() < round_number:
+                raise ValueError(
+                    f"golden ledger only holds round {self.current_round()}, "
+                    f"cannot rewind to {round_number}"
+                )
+        truncation = self.ledger.truncate_to_round(round_number)
+        self.rebind_ledger(self.ledger.path)
+        state = self.state_at(round_number, include_tool_outputs=False)
+        return {
+            "rewound": True,
+            "round": round_number,
+            "restored_from_golden": restored_from_golden,
+            "ledger": str(self.ledger.path),
+            "verified": self.ledger.verify(),
+            "entries_dropped": truncation["entries_dropped"],
+            "entries_remaining": truncation["entries_after"],
+            "current_round": self.current_round(),
+            "queries_spent": state["kpis"]["query_budget_spent"],
+            "best_qualified_binding": state["kpis"]["best_qualified_binding"],
+            "voi": state["voi_diagnostics"]["voi"],
+            "state": state,
+        }
 
     def _record_quality(self, revealed: pd.DataFrame) -> None:
         """Record one ``query_count -> best qualified binding`` point per budget level.
@@ -283,23 +884,11 @@ class Campaign:
         """Live AUBQC over ``q = 5, 10, ..., 35``, scaled by the frozen ``1/30``.
 
         Mirrors :func:`core.baselines.run_method` (which uses the identical
-        ``1/30`` normalisation over seven checkpoints): unmeasured checkpoints
-        carry the last observed value forward, and a checkpoint *below* the first
-        measurement carries the first one **backward** — otherwise a campaign
-        whose first record is at q=10 would score 0.0 for q=5 and understate its
-        own AUBQC.
+        ``1/30`` normalisation over seven checkpoints) through the shared
+        :func:`aubqc_from_curve`, so the live number and the same-seed benchmark
+        row are computed by one function rather than two that must agree.
         """
-        if not self.quality_curve:
-            return float("nan")
-        recorded = {int(point["query_count"]): float(point["best_qualified_binding"]) for point in self.quality_curve}
-        counts = sorted(recorded)
-        values, last = [], recorded[counts[0]]
-        for checkpoint in range(5, 36, 5):
-            for count in counts:
-                if count <= checkpoint:
-                    last = recorded[count]
-            values.append(last)
-        return float(sum(values) / 30.0)
+        return aubqc_from_curve(self.quality_curve)
 
     async def execute_round(self) -> dict:
         # Reset rather than replace: replacing the bus would silently drop the
@@ -561,13 +1150,28 @@ class Campaign:
         # visible movement away; 3 dp keeps ``delta_vs_wt`` tracking it.
         delta = round(best - reference, 3) if reference is not None else 0.0
         self._record_quality(revealed)
-        frontier = revealed.sort_values("y_bind", ascending=False).head(10)
-        self.state.update({"current_round": round_number, "phase": "Cold-Start Tuition" if round_number <= 2 else "Self-Accelerating Payoff",
+        self.state.update({
+            "current_round": round_number,
+            "phase": "Cold-Start Tuition" if round_number <= 2 else "Self-Accelerating Payoff",
             "voi_diagnostics": self._voi_diagnostics(round_number, slots, revealed),
-            "kpis": {"best_qualified_binding": round(best,2), "delta_vs_wt": delta, "query_budget_spent": int(len(revealed)), "total_budget": SETTINGS.total_budget, "wet_lab_cost_saved_usd": max(0,(SETTINGS.total_budget-len(revealed))*SETTINGS.assay_cost_usd), "hypotheses_supported": sum(h["verdict"]=="SUPPORTED" for h in self.hypotheses), "hypotheses_falsified": sum(h["verdict"]=="FALSIFIED" for h in self.hypotheses)},
+            # The ribbon is the *declared* provenance of this batch's priors and
+            # the audit's refuted positions, read back from the ledger entry
+            # ``_annotate_decision`` has just written. Built by the same helper as
+            # ``state_at``, so the live view and the timeline entry cannot drift.
+            "hcdr3_ribbon": self._ribbon_for(round_number),
+            "kpis": {
+                "best_qualified_binding": round(best, 2),
+                "delta_vs_wt": delta,
+                "query_budget_spent": int(len(revealed)),
+                "total_budget": SETTINGS.total_budget,
+                "wet_lab_cost_saved_usd": max(0, (SETTINGS.total_budget - len(revealed)) * SETTINGS.assay_cost_usd),
+                "hypotheses_supported": sum(h["verdict"] == "SUPPORTED" for h in self.hypotheses),
+                "hypotheses_falsified": sum(h["verdict"] == "FALSIFIED" for h in self.hypotheses),
+            },
             "agent_council": [m.model_dump() for m in memos],
             "batch_slots": [self._slot_diagnostics(s) for s in slots],
-            "pareto_data": [{"candidate_id":r.candidate_id,"risk":round(1-float(r.y_dev),2),"binding":round(float(r.y_bind),2),"status":"wild_type" if r.candidate_id=="WT" else ("pareto_frontier" if r.candidate_id in set(frontier.candidate_id) else f"queried_round_{int(r.round_number)}")} for r in revealed.itertuples()]})
+            "pareto_data": self._pareto_data(revealed),
+        })
 
     def _slot_diagnostics(self, slot: dict) -> dict:
         """One batch slot as the API reports it, including the VoI/SAR diagnostics.

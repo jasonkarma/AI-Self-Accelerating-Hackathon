@@ -231,6 +231,29 @@ def _shrink(n: int, k: float = SAR_SHRINKAGE_K) -> float:
     return n / (n + k)
 
 
+#: Residue standing in for "no residue" when a sequence is shorter than the WT.
+#: pandas' ``Series.str[p]`` yields ``NaN`` there, and a NaN compares *unequal* to
+#: every WT residue, so it counted as a mutation at the position level and was
+#: dropped from the cell level (``groupby`` skips NaN keys). This sentinel keeps
+#: both behaviours without the per-position string slicing that produced it.
+_PAD_RESIDUE = "\x00"
+
+
+def _residue_matrix(sequences: np.ndarray) -> np.ndarray:
+    """``(n_rows, len(WT_SEQUENCE))`` character matrix, padded with a sentinel.
+
+    One ``np.asarray`` over the sequences, instead of 13 ``Series.str[p]`` passes
+    per call site. The matrix is only ever compared position-wise, so the sentinel
+    never has to be a real amino acid.
+    """
+    width = len(WT_SEQUENCE)
+    matrix = np.full((len(sequences), width), _PAD_RESIDUE, dtype="<U1")
+    for index, sequence in enumerate(sequences):
+        text = str(sequence)
+        matrix[index, : min(len(text), width)] = np.asarray(list(text[:width]), dtype="<U1")
+    return matrix
+
+
 def sar_effect_table(
     ledger_df: pd.DataFrame | None,
     *,
@@ -266,7 +289,7 @@ def sar_effect_table(
         return SarTable()
     if not {"sequence", "y_bind"} <= set(ledger_df.columns):
         return SarTable()
-    frame = ledger_df.loc[ledger_df.y_bind.notna()].copy()
+    frame = ledger_df.loc[ledger_df.y_bind.notna()]
     if tau_dev is not None and "y_dev" in frame.columns:
         # An unqualified high binder teaches the wrong substitution: it can never
         # contribute to best_qualified_binding, so it must not steer the prior.
@@ -287,37 +310,49 @@ def sar_effect_table(
     else:
         signal = frame.y_bind.astype(float) - float(frame.y_bind.median())
 
-    frame = frame.assign(_signal=signal.to_numpy())
     effects = SarTable(support=len(frame), basis=basis)
-    sequences = frame.sequence.astype(str)
-    
-    # Level 1: Position-level mutation tolerance (13 positions)
-    for position in range(13):
-        column = sequences.str[position]
+    chars = _residue_matrix(frame.sequence.to_numpy())
+    signal_values = signal.to_numpy(dtype=float)
+    # Level 1 (position tolerance) and level 2 (exact cell) both read the same
+    # per-row signal, so they are two views of one grouping rather than two
+    # passes over the frame. This used to slice ``sequences.str[position]`` twice
+    # per position — 26 pandas string passes — which cost ~6 ms on a 33-row
+    # ledger and dominated every campaign rehydration and every
+    # ``GET /api/state?round=k``. The residue matrix is built once instead, and
+    # the arithmetic is unchanged to the last bit: same mutated mask, same
+    # sorted group order, same ``mean``.
+    for position in range(len(WT_SEQUENCE)):
+        column = chars[:, position]
         mutated = column != WT_SEQUENCE[position]
         if not mutated.any():
             continue
-        mutated_rows = frame.loc[mutated]
-        n_pos = int(len(mutated_rows))
+        mutated_residues = column[mutated]
+        mutated_signal = signal_values[mutated]
+
+        # Level 1: Position-level mutation tolerance.
+        n_pos = int(mutated_residues.size)
         if n_pos >= SAR_MIN_OBSERVATIONS:
-            raw_mean = float(mutated_rows._signal.mean())
+            raw_mean = float(mutated_signal.mean())
             magnitude = min(1.0, abs(raw_mean) / SAR_DELTA_SCALE)
             effects.position_effects[position + 1] = (
                 n_pos,
                 float(np.sign(raw_mean)) * magnitude * _shrink(n_pos, SAR_SHRINKAGE_K),
             )
-    
-    # Level 2: Exact (position, residue) cell effects (260 cells)
-    for position in range(13):
-        column = sequences.str[position]
-        mutated = column != WT_SEQUENCE[position]
-        if not mutated.any():
-            continue
-        for residue, group in frame.loc[mutated].groupby(column[mutated]):
-            n = int(len(group))
+
+        # Level 2: Exact (position, residue) cell effects (260 cells).
+        # ``np.unique`` sorts exactly as pandas' ``groupby`` default does, so the
+        # table is built in the same order. A row that stops before this position
+        # carries the pad residue, which is mutated-by-definition (it is not the
+        # WT residue) but is not a substitution — keep it in the position count
+        # and out of the cells, matching the old NaN semantics.
+        for residue in np.unique(mutated_residues):
+            if residue == _PAD_RESIDUE:
+                continue
+            cell = mutated_residues == residue
+            n = int(cell.sum())
             if n < max(min_n, SAR_MIN_OBSERVATIONS):
                 continue
-            raw = float(group._signal.mean())
+            raw = float(mutated_signal[cell].mean())
             # Bound the *saturated* contribution, then shrink toward zero.
             magnitude = min(1.0, abs(raw) / SAR_DELTA_SCALE)
             effects[(position + 1, str(residue))] = (

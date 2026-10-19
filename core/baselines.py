@@ -43,7 +43,7 @@ from .acquisition import (
     sar_effect_table,
     select_five_slots,
 )
-from .constants import ANCHOR_POSITIONS, WT_SEQUENCE
+from .constants import ANCHOR_POSITIONS, CHECKPOINT_QUERIES, WT_SEQUENCE
 from .developability import RiskNormalizer, raw_components
 from .features import encode_sequences
 from .surrogate import BindingSurrogate, DevelopabilitySurrogate, link_predictions
@@ -58,6 +58,22 @@ from .tool_arsenal import (
 #: random seeds, so a difference between two rows is attributable to post-seed
 #: feedback learning rather than to a luckier seed batch.
 METHODS = ("m1_random", "m2_greedy", "m3_ucb", "m4_fixed_prior", "m5_hybrid")
+
+#: Published zero-shot affinity predictors on 1N8Z, as Spearman ``rho`` against
+#: measured binding (AbBiBench). They are the only external reference points on
+#: this panel, and they answer a different question from AUBQC: *how well does a
+#: model rank the pool without ever querying it*, versus *how well does a search
+#: process spend a budget*. Reported side by side, never merged.
+ZERO_SHOT_REFERENCES: dict[str, float] = {
+    "alphafold3": -0.16,
+    "proteinmpnn": -0.17,
+    "esm2": -0.13,
+}
+
+#: Key of the live trajectory inside ``same_seed_comparison``. It is *not* a
+#: method and is never averaged into the seed medians; it is the recorded campaign,
+#: shown on its own seed next to the five matched baselines.
+LIVE_LABEL = "live_m5"
 
 #: Optional sixth row: identical to ``m5_hybrid`` except that Round 0's five
 #: queries are chosen by the cold-start prior instead of at random. Reported
@@ -720,6 +736,123 @@ PAIRED_METRICS: tuple[str, ...] = (
 )
 
 
+def _curve_summary(curve: list[dict], aubqc: float) -> dict:
+    """``q=5`` / ``q=35`` / AUBQC triple for one curve, carrying ``y*(q)`` forward."""
+    recorded = {
+        int(point["query_count"]): float(point["best_qualified_binding"])
+        for point in curve
+        if point.get("best_qualified_binding") is not None
+    }
+
+    def at(checkpoint: int) -> float:
+        if not recorded:
+            return float("nan")
+        value = recorded[sorted(recorded)[0]]
+        for count in sorted(recorded):
+            if count <= checkpoint:
+                value = recorded[count]
+        return value
+
+    return {"q": 5, "q5": at(5), "q35": at(35), "aubqc": float(aubqc)}
+
+
+def same_seed_comparison(
+    frame: pd.DataFrame,
+    normalizer: RiskNormalizer,
+    tau_dev: float,
+    *,
+    seed: int,
+    initial_ids: list[str] | None = None,
+    live_curve: list[dict] | None = None,
+    live_aubqc: float | None = None,
+    m5_policy_mode: str = "adaptive_tool",
+) -> dict:
+    """The live campaign against M1-M5 **on its own seed**, at ``q=5 / q=35 / AUBQC``.
+
+    A 100-seed median answers "does the design work on average?" and cannot
+    attribute one campaign's result: a seed whose five random probes happen to
+    contain no qualified binder starts from a lower ``y*(5)`` and therefore has
+    more headroom. Re-running the five matched baselines on the identical five
+    initial queries costs a few hundred milliseconds and makes the comparison
+    like-for-like instead of seed-median-against-one-draw.
+
+    The live row is labelled :data:`LIVE_LABEL` and is **not** a benchmark method:
+    its curve is passed in rather than re-derived, because the point of the row is
+    what the recorded campaign actually did. It is never folded into a seed median.
+
+    Returns ``{"seed", "methods", "trajectory", "summary", "ranking", "live"}``:
+    ``trajectory`` is the per-checkpoint comparison the UI plots on one axis, and
+    ``summary``/``ranking`` answer ``q=5``, ``q=35`` and AUBQC per method.
+    """
+    if initial_ids is None:
+        initial_ids = (
+            np.random.default_rng(seed)
+            .choice(frame.candidate_id.to_numpy(), SLOT_COUNT, replace=False)
+            .tolist()
+        )
+    initial_ids = [str(candidate_id) for candidate_id in initial_ids]
+    results = {
+        method: run_method(
+            frame, normalizer, tau_dev, method, int(seed), initial_ids,
+            LiveAgentPolicy() if m5_policy_mode == "live_agent" else AdaptiveToolPolicy(),
+        )
+        for method in METHODS
+    }
+    summary = {
+        method: _curve_summary(result.curve, result.aubqc)
+        for method, result in results.items()
+    }
+
+    live_curve = list(live_curve or [])
+    live_aubqc = float("nan") if live_aubqc is None else float(live_aubqc)
+    if live_curve:
+        summary[LIVE_LABEL] = _curve_summary(live_curve, live_aubqc)
+    live_points = {int(point["query_count"]): point.get("best_qualified_binding") for point in live_curve}
+
+    trajectory = []
+    for checkpoint in CHECKPOINT_QUERIES:
+        row: dict = {"query_count": checkpoint}
+        for method, result in results.items():
+            row[method] = next(
+                (point["best_qualified_binding"] for point in result.curve
+                 if point["query_count"] == checkpoint),
+                None,
+            )
+        # The live campaign only has a point at a checkpoint it has actually spent
+        # through; ``None`` is the honest value before that, and it keeps the plot
+        # from drawing a live line into rounds that never happened.
+        row[LIVE_LABEL] = live_points.get(checkpoint)
+        trajectory.append(row)
+
+    ranked = sorted(
+        ((name, block["aubqc"]) for name, block in summary.items() if name != LIVE_LABEL),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    best_baseline_name, best_baseline_aubqc = ranked[0] if ranked else (None, float("nan"))
+    gap = live_aubqc - best_baseline_aubqc
+    return {
+        "seed": int(seed),
+        "initial_ids": initial_ids,
+        "methods": list(METHODS),
+        "trajectory": trajectory,
+        "summary": summary,
+        "ranking": [
+            {"rank": index + 1, "method": name, "aubqc": float(value)}
+            for index, (name, value) in enumerate(ranked)
+        ],
+        "live": {
+            "label": LIVE_LABEL,
+            "q5": summary.get(LIVE_LABEL, {}).get("q5"),
+            "q35": summary.get(LIVE_LABEL, {}).get("q35"),
+            "aubqc": None if np.isnan(live_aubqc) else live_aubqc,
+            "best_baseline": best_baseline_name,
+            "best_baseline_aubqc": None if np.isnan(best_baseline_aubqc) else best_baseline_aubqc,
+            "aubqc_gap_vs_best_baseline": None if np.isnan(gap) else round(gap, 4),
+        },
+    }
+
+
 def _seed_floor(frame: pd.DataFrame, normalizer: RiskNormalizer, tau_dev: float,
                 initial_ids: list[str]) -> float:
     """Best qualified binding among a seed's five initial queries.
@@ -832,6 +965,17 @@ def run_benchmark(frame: pd.DataFrame, normalizer: RiskNormalizer, tau_dev: floa
             str(s): next(r.initial_ids for r in results if r.seed == s) for s in range(seeds)
         },
         "paired_t_tests": paired,
+        # Published zero-shot affinity predictors on 1N8Z (AbBiBench), as Spearman
+        # rho against measured binding. They measure a *model's ranking of the
+        # pool it never queried*, which is the one axis comparable to our
+        # ``spearman_rho_curves`` — AUBQC measures a search process instead. Shipped
+        # in the artifact so the API can never serve a benchmark that omits them.
+        "zero_shot_references": dict(ZERO_SHOT_REFERENCES),
+        "zero_shot_definition": (
+            "Spearman rho of a zero-shot affinity predictor's ranking of the 1N8Z "
+            "HCDR3 pool against measured binding (AbBiBench); compare with "
+            "spearman_rho_curves, not with AUBQC."
+        ),
     }
     if warm_results:
         # The optional cold-start ablation lives under its own key. It is never

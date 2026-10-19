@@ -25,3 +25,9 @@ BETA_0 = 1.0
 QUALIFICATION_PENALTY = 2.0
 N_BOOTSTRAPS = 50
 SOFT_PRIOR_BOUND = 0.15
+
+#: The budget checkpoints every method is scored on and plotted at.
+#: ``AUBQC`` is the area under ``y*(q)`` over these seven points, scaled by the
+#: frozen ``1/30``; the live campaign, the benchmark and the same-seed comparison
+#: all read them from here so a curve can never be scored at the wrong abscissae.
+CHECKPOINT_QUERIES: tuple[int, ...] = tuple(range(5, 36, 5))
