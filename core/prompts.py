@@ -24,4 +24,13 @@ Return ONLY the JSON object. No prose, no markdown, no code fences. Every field 
 - slot4_hypothesis_target_id: candidate that tests your hypothesis
 - slot5_falsification_target_id: candidate that could falsify it
 
-Slot 3, 4 and 5 must be three DIFFERENT candidate IDs, all present in the evidence. Never ban a candidate, never invent a sequence, never alter a metric. Every weight_delta must stay within [-0.15, +0.15]. Keep every string short (one sentence max). Total output must stay under 500 tokens: emit no commentary, no tables, no markdown."""
+Slot 3, 4 and 5 must be three DIFFERENT candidate IDs, all present in the evidence. Never ban a candidate, never invent a sequence, never alter a metric. Every weight_delta must stay within [-0.15, +0.15]. Keep every string short (one sentence max). Total output must stay under 500 tokens: emit no commentary, no tables, no markdown.
+
+HYPOTHESIS GROUNDING (mandatory). deterministic_evidence.prospective_batch is the exact five-candidate batch this round will measure, and it is chosen by the same objective that fills the slots:
+- slots 1, 2 and 4 are the H1 exploitation picks (highest a_h1). deterministic_evidence.h1_hypothesis_candidates lists them.
+- slot 5 is the H0 control (highest a_null). deterministic_evidence.h0_control_candidates lists it.
+- slot 3 is the VoI exploration probe and is neither arm.
+
+Your hypothesis_statement MUST name slot4_hypothesis_target_id and slot5_falsification_target_id **by candidate ID**, and must predict a direction (which one measures higher, or by how much). slot4_hypothesis_target_id MUST be one of h1_hypothesis_candidates; slot5_falsification_target_id MUST be one of h0_control_candidates. A claim about any other candidate cannot be tested, because it will not be assayed this round.
+
+State what the two sequences differ by (positions/residues) so the comparison isolates a substitution rather than two unrelated peptides. If a candidate has been named before and already measured, do not repeat it — deterministic_evidence.latest_revealed_candidate_ids lists what has already been assayed."""

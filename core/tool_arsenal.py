@@ -83,6 +83,20 @@ SUPPORTED = "SUPPORTED"
 FALSIFIED = "FALSIFIED"
 INCONCLUSIVE = "INCONCLUSIVE"
 
+#: How far the H1 arm's mean residual may sit below the **control's** residual
+#: before the round counts as refuted. The check is relative because the surrogate
+#: is fitted on the revealed rows: a fresh batch it has not seen can be uniformly
+#: over-predicted, which pushes every measured residual negative at once. Reading
+#: that level shift as evidence against the rule refuted a hypothesis the paired
+#: arms had just confirmed (seed 21, R5: arm +0.748 over control, stamped
+#: FALSIFIED). Comparing arm to control cancels the shared shift.
+RESIDUAL_LEVEL_TOLERANCE = 0.05
+
+#: A paired lift this large is decisive on its own: the arm beat the control by
+#: more than any plausible batch-level drift, so the hypothesis stands even if the
+#: whole batch measured below its prediction.
+DECISIVE_LIFT = 0.10
+
 
 def _measured_bindings(frame: pd.DataFrame | None) -> dict[str, float]:
     """candidate_id -> revealed y_bind, tolerating an empty or partial ledger."""
@@ -292,11 +306,19 @@ def audit_past_hypotheses(ledger_df: pd.DataFrame, previous_decisions: list[dict
 
     1. No arm candidate measured ⇒ ``INCONCLUSIVE``.
     2. The control beats the **best** arm measurement ⇒ ``FALSIFIED``.
-    3. The best arm measurement beats the control ⇒ ``SUPPORTED``, provided the
-       arm's mean residual ``y_bind - mu_bind`` is non-negative. A positive lift
-       bought by candidates the surrogate already predicted well is not
-       evidence for the hypothesis.
-    4. Tie (or no control) ⇒ fall back to the round median, then to the stored
+    3. The best arm measurement beats the control by at least
+       :data:`DECISIVE_LIFT` ⇒ ``SUPPORTED``, whatever the residuals say.
+    4. The best arm measurement beats the control, but the arm's mean residual
+       ``y_bind - mu_bind`` trails the **control's** residual by more than
+       :data:`RESIDUAL_LEVEL_TOLERANCE` ⇒ ``FALSIFIED``. A positive lift bought by
+       candidates the surrogate already predicted well is not evidence.
+       Comparing against the control — not against zero — is what makes this a
+       positional claim rather than a measurement of where the batch happened to
+       land relative to the surrogate: a freshly fitted model can over-predict a
+       whole batch, which drives every residual negative at once without saying
+       anything about the rule.
+    5. Otherwise the arm's lift stands ⇒ ``SUPPORTED``.
+    6. Tie (or no control) ⇒ fall back to the round median, then to the stored
        pre-query surrogate expectation, so a round stays decidable.
 
     The returned ``falsified_positions`` is the self-correction signal, and it is
@@ -350,40 +372,103 @@ def audit_past_hypotheses(ledger_df: pd.DataFrame, previous_decisions: list[dict
         ]
         mean_residual = float(np.mean(arm_residuals)) if arm_residuals else None
 
-        control = measured.get(slot5) if slot5 else None
+        # The planner's *named* pair, when it survives in this ledger. Both members
+        # were snapped into the prospective batch, so grading them is grading the
+        # claim the planner actually made rather than the selector's leftover.
+        declared_h1 = decision.get("declared_h1_id")
+        declared_h0 = decision.get("declared_h0_id")
+        declared_pair_measured = (
+            bool(declared_h1)
+            and bool(declared_h0)
+            and str(declared_h1) in measured
+            and str(declared_h0) in measured
+            and str(declared_h1) != str(declared_h0)
+        )
+        if declared_pair_measured:
+            h1_id, h0_id = str(declared_h1), str(declared_h0)
+            observed = measured[h1_id]
+            arm_mean = float(np.mean(list(arm_measured.values()))) if arm_measured else observed
+            arm_residuals = [
+                residual
+                for cid in ({h1_id} | set(arm_measured))
+                if (residual := _residual_of(cid, measured, expectations)) is not None
+            ]
+            mean_residual = float(np.mean(arm_residuals)) if arm_residuals else None
+            best_id = h1_id
+            control = measured[h0_id]
+        else:
+            h1_id, h0_id = None, None
+            control = measured.get(slot5) if slot5 else None
+        control_residual = _residual_of(h0_id or slot5, measured, expectations) if (h0_id or slot5) else None
+        # The residual check below is **relative to the control**, not absolute.
+        # The surrogate fits on the revealed rows, so a batch it has not seen yet
+        # can be uniformly over-predicted: every measured residual goes negative
+        # together, and an absolute `mean_residual >= 0` gate then refutes a
+        # hypothesis the paired arms just confirmed. That is a level shift in the
+        # model, not evidence against the rule — and it is exactly what happened
+        # in R5 of the seed-21 run, where the arm beat the control by +0.748 and
+        # was still stamped FALSIFIED.
+        residual_tolerance = max(0.0, float(control_residual)) + RESIDUAL_LEVEL_TOLERANCE if control_residual is not None else None
+        # A decisive win also overrides any residual doubt: if the arm beat the
+        # control by a margin the assay's own noise cannot produce, the lift is
+        # real regardless of where the batch sat relative to the surrogate.
+        decisive_lift = control is not None and observed is not None and observed > control + DECISIVE_LIFT
         median = float(np.median(list(measured.values()))) if measured else float("nan")
         expected = expectations.get(best_id) if best_id else None
         paired = observed is not None and control is not None
         arm_label = "/".join(arm_ids) if arm_ids else "unrecorded"
+
+        # How the round is described, so a UI never has to guess which comparison
+        # produced the verdict. ``claimed_pair`` = the planner's own named
+        # comparison was measured and graded; ``arm_vs_control`` = the fallback.
+        design = "claimed pair (planner slot 4 vs slot 5)" if declared_pair_measured else "paired H1 (slots 1/2/4) vs H0 control (slot 5)"
+        h1_label = "H1 candidate" if declared_pair_measured else "best H1 arm pick"
+        h0_label = "H0 candidate" if declared_pair_measured else "H0 control"
+        control_id = h0_id or slot5
 
         if observed is None:
             verdict = INCONCLUSIVE
             reason = f"no H1 arm candidate ({arm_label!r}) was measured this round"
         elif paired and control > observed:
             verdict = FALSIFIED
-            reason = (f"H0 control {slot5} ({control:.3f}) beat the best H1 arm pick "
+            reason = (f"{h0_label} {control_id} ({control:.3f}) beat {h1_label} "
                       f"{best_id} ({observed:.3f})")
-        elif paired and observed > control and mean_residual is not None and mean_residual < 0:
+        elif paired and observed > control and decisive_lift:
+            verdict = SUPPORTED
+            reason = (f"{h1_label} {best_id} ({observed:.3f}) beat {h0_label} "
+                      f"{control_id} ({control:.3f}) by {observed - control:+.3f} — decisive "
+                      f"(>= {DECISIVE_LIFT:.2f}), overriding residual doubt")
+        elif (
+            paired
+            and observed > control
+            and mean_residual is not None
+            and residual_tolerance is not None
+            and mean_residual < residual_tolerance
+        ):
             verdict = FALSIFIED
-            reason = (f"best H1 arm pick {best_id} ({observed:.3f}) beat H0 control {slot5} "
-                      f"({control:.3f}) but the arm's mean residual was negative "
-                      f"({mean_residual:+.3f}): the lift was already predicted")
+            reason = (f"{h1_label} {best_id} ({observed:.3f}) beat {h0_label} {control_id} "
+                      f"({control:.3f}) but the arm's mean residual ({mean_residual:+.3f}) "
+                      f"trailed the control's ({control_residual:+.3f}) by more than "
+                      f"{RESIDUAL_LEVEL_TOLERANCE:.2f}: the lift was already predicted")
         elif paired and observed > control:
             verdict = SUPPORTED
-            reason = (f"best H1 arm pick {best_id} ({observed:.3f}) beat H0 control "
-                      f"{slot5} ({control:.3f})")
+            reason = (f"{h1_label} {best_id} ({observed:.3f}) beat {h0_label} "
+                      f"{control_id} ({control:.3f}); arm residual {mean_residual:+.3f} is "
+                      f"level with the batch" if mean_residual is not None else
+                      f"{h1_label} {best_id} ({observed:.3f}) beat {h0_label} "
+                      f"{control_id} ({control:.3f})")
         elif not np.isnan(median) and observed >= median:
             verdict = SUPPORTED
-            reason = (f"paired arms tied; best H1 arm pick {best_id} ({observed:.3f}) reached "
+            reason = (f"paired arms tied; {h1_label} {best_id} ({observed:.3f}) reached "
                       f"the round median ({median:.3f})")
         elif not np.isnan(median):
             verdict = FALSIFIED
-            reason = (f"paired arms tied; best H1 arm pick {best_id} ({observed:.3f}) fell "
+            reason = (f"paired arms tied; {h1_label} {best_id} ({observed:.3f}) fell "
                       f"below the round median ({median:.3f})")
         elif expected is not None:
             hit = observed >= float(expected)
             verdict = SUPPORTED if hit else FALSIFIED
-            reason = (f"best H1 arm pick {best_id} ({observed:.3f}) "
+            reason = (f"{h1_label} {best_id} ({observed:.3f}) "
                       f"{'met' if hit else 'missed'} its pre-query expectation ({float(expected):.3f})")
         else:
             verdict = INCONCLUSIVE
@@ -418,19 +503,34 @@ def audit_past_hypotheses(ledger_df: pd.DataFrame, previous_decisions: list[dict
             "round_number": round_no,
             "verdict": verdict,
             "reason": reason,
-            "design": "paired H1 (slots 1/2/4) vs H0 control (slot 5)",
+            "design": design,
+            "compared": "claimed_pair" if declared_pair_measured else "arm_vs_control",
+            "statement": decision.get("hypothesis_statement", ""),
             "h1_arm_ids": [str(cid) for cid in arm_ids],
             "h1_target_id": best_id if best_id is not None else slot4,
-            "h0_control_id": slot5,
+            "h0_control_id": control_id,
             "round_median": None if np.isnan(median) else round(median, 3),
             "h1_binding": None if observed is None else round(observed, 3),
             "h1_arm_mean_binding": None if arm_mean is None else round(arm_mean, 3),
             "h1_mean_residual": None if mean_residual is None else round(mean_residual, 3),
             "h0_binding": None if control is None else round(control, 3),
+            # The residual comparison the verdict actually used: the arm's mean
+            # residual against the control's, so a UI can show *why* a round with
+            # a positive paired lift was still graded on residual grounds.
+            "h0_residual": None if control_residual is None else round(control_residual, 3),
+            "residual_tolerance": (
+                None if residual_tolerance is None else round(residual_tolerance, 3)
+            ),
+            "decisive_lift": bool(decisive_lift),
             "paired_lift": (
                 None if observed is None or control is None else round(observed - control, 3)
             ),
             "expected_binding": None if expected is None else round(float(expected), 3),
+            # The ids the *hypothesis statement* names, and the ids this verdict
+            # actually graded. The UI shows both so an ungradeable claim is visible
+            # rather than implied.
+            "claim_about": [cid for cid in (declared_h1, declared_h0) if cid],
+            "graded_on": sorted({str(cid) for cid in (best_id, control_id) if cid}),
             "inverted_positions": sorted(inverted),
             "position_residuals": {
                 str(position): round(value, 3)

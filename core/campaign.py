@@ -98,6 +98,8 @@ class Campaign:
                 **decision,
                 "slot4_measured_id": event.get("slot4_measured_id"),
                 "slot5_measured_id": event.get("slot5_measured_id"),
+                "declared_h1_id": event.get("declared_h1_id"),
+                "declared_h0_id": event.get("declared_h0_id"),
                 # The whole H1 exploitation arm (slots 1/2/4 with Δ_agent >= 0),
                 # not just slot 4. A restarted process re-audits from this list; if
                 # the arm were dropped here it would silently fall back to the
@@ -105,6 +107,13 @@ class Campaign:
                 H1_ARM_KEY: event.get(H1_ARM_KEY) or [],
                 "pre_query_expectation": event.get("pre_query_expectation") or {},
             })
+            # What the council *declared*, restored so the audit trail survives a
+            # restart. The selector is scored on data-derived priors, so this is
+            # pure provenance — but it is the provenance a UI needs to show that a
+            # planner actually argued something before the arithmetic overruled it.
+            declared = event.get("declared_priors") or []
+            if declared:
+                self.runner.declared_priors_by_round[round_number] = list(declared)
             self.hypotheses.append({
                 "hypothesis_id": decision["hypothesis_id"],
                 "round_number": round_number,
@@ -181,11 +190,24 @@ class Campaign:
         return rows
 
     def revealed(self) -> pd.DataFrame:
+        """Revealed batches, in **query order** (first reveal first).
+
+        Order is not cosmetic here. The surrogate is an ensemble of bootstrapped
+        trees, so permuting the training rows yields different trees and therefore
+        different predictions (measured: 0.15 log10 Kd on a ten-row fit). This
+        method used to group by ``candidate_id``, i.e. sort, while
+        ``core.baselines.run_method`` feeds its surrogate rows in query order —
+        so the live campaign and its own same-seed benchmark twin were training on
+        the same rows *in different orders* and silently diverging. Iterating in
+        first-reveal order makes the two paths construct identical forests.
+        """
         events = self.ledger.dataframe("oracle_reveal")
         if events.empty:
             return pd.DataFrame(columns=["candidate_id", "sequence", "y_bind", "y_dev", "round_number"])
         rows = []
-        for cid, group in events.groupby("candidate_id"):
+        # ``events`` arrives ordered by ledger ``sequence_no`` (see
+        # ``ImmutableLedger.dataframe``), so first appearance here is query order.
+        for cid, group in events.groupby("candidate_id", sort=False):
             values = dict(zip(group.objective, group.value))
             if {"y_bind", "y_dev"} <= values.keys():
                 rows.append({"candidate_id": cid, "sequence": group.sequence.iloc[0], "y_bind": values["y_bind"], "y_dev": values["y_dev"], "round_number": int(group.round_number.max())})
@@ -303,9 +325,29 @@ class Campaign:
         index = {cid: i for i, cid in enumerate(self.private.candidate_id)}
         train = np.asarray([index[x] for x in revealed.candidate_id])
         unqueried = self.private[~self.private.candidate_id.isin(revealed.candidate_id)].copy()
+        # ``y_dev`` is a sequence-only proxy (SPEC §2: available at t=0, no label
+        # leak) and ``select_five_slots`` gates on it through
+        # :func:`core.acquisition.qualified_pool`. That gate silently no-ops when
+        # the column is absent, so the live selector was choosing from the *whole*
+        # pool while the benchmark — whose work frame always carries ``y_dev`` —
+        # chose from the qualified 210. Same portfolio, different candidate set:
+        # that is why live M5 diverged from benchmark M5 on the same seed, and it
+        # was invisible because neither path errors when the column is missing.
+        unqueried = unqueried.assign(
+            y_dev=[self.normalizer.score(sequence)["y_dev"] for sequence in unqueried.sequence]
+        )
         pred = np.asarray([index[x] for x in unqueried.candidate_id])
-        bs = BindingSurrogate(round_number).fit(X[train], revealed.y_bind.to_numpy())
-        ds = DevelopabilitySurrogate(round_number + 100).fit(X[train], revealed.y_dev.to_numpy())
+        # Surrogate RNG keyed to the campaign seed, not the round number.
+        # ``run_benchmark`` calls ``BindingSurrogate(seed)`` /
+        # ``DevelopabilitySurrogate(seed + 1)``; keying the live loop on
+        # ``round_number`` instead built different ExtraTrees on the *same*
+        # revealed rows, so the live campaign was not the same-seed twin of the
+        # benchmark row it is reported against — it was an independent draw that
+        # merely shared five initial queries. With this key, seed 21's live run and
+        # benchmark M5 see identical forests, which is what makes the same-seed
+        # comparison in ``scripts/run_campaign.py`` meaningful.
+        bs = BindingSurrogate(SETTINGS.random_seed).fit(X[train], revealed.y_bind.to_numpy())
+        ds = DevelopabilitySurrogate(SETTINGS.random_seed + 1).fit(X[train], revealed.y_dev.to_numpy())
         mb, sb = bs.predict(X[pred]); md, sd = ds.predict(X[pred])
         linked = link_predictions(mb, sb, md, sd, self.protocol["tau_dev"])
         unqueried = unqueried.assign(mu_bind=mb, sigma_bind=sb, mu_dev=md, sigma_dev=sd,
@@ -410,6 +452,18 @@ class Campaign:
         slot3 = by_type.get("Max Joint Uncertainty")
         slot4 = by_type.get("Agent Hypothesis Test")
         slot5 = by_type.get("Skeptic Falsification Probe")
+        # The pair the planner *claimed*. It is snapped into the prospective batch
+        # by ``_reconcile_decision``, so by construction both members are measured
+        # in this round — which is what lets the audit grade the claim it was
+        # actually given rather than the selector's leftover.
+        declared_h1 = str(decision.slot4_hypothesis_target_id)
+        declared_h0 = str(decision.slot5_falsification_target_id)
+        # The council's own declaration, kept as provenance now that the selector
+        # is scored on the data-derived set. It goes into the ledger, not just
+        # memory: ``declared_priors_by_round`` is rebuilt from these payloads on
+        # restart, so ``/api/state`` can show what the planner argued for even
+        # after the process that heard it has exited.
+        declared = self.runner.declared_priors_by_round.get(decision.round_number) or []
         # The H1 arm is what the hypothesis actually bought: the exploitation
         # picks (slots 1, 2, 4) whose Δ_agent is non-negative. Slot 3 is the VoI
         # exploration probe and slot 5 is the control, so neither is in the arm.
@@ -433,7 +487,12 @@ class Campaign:
             "slot4_measured_id": slot4,
             "slot5_measured_id": slot5,
             H1_ARM_KEY: arm,
+            # The claimed comparison pair, kept distinct from the slot-4 leftover
+            # that ``_annotate_decision`` rewrites for the operator's benefit.
+            "declared_h1_id": declared_h1,
+            "declared_h0_id": declared_h0,
             "pre_query_expectation": {cid: round(float(mu), 3) for cid, mu in expectations.items()},
+            "declared_priors": declared,
         }
         for entry in reversed(self.runner.previous_decisions):
             if entry.get("round_number") == decision.round_number:

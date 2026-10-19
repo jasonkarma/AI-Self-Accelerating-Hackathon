@@ -8,7 +8,13 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 import pandas as pd
 
-from .acquisition import qualified_pool
+from .acquisition import (
+    prospective_slots,
+    qualified_pool,
+    sar_effect_table,
+    score_pool,
+)
+from config.settings import SETTINGS
 from .agents import (
     AGENT_DEFINITIONS,
     adaptive_prior_evidence,
@@ -74,29 +80,55 @@ class RoundEventBus:
 def _deterministic_decision(
     round_number: int, ledger: pd.DataFrame, ranked: list[str], tools: list[str],
     *, priors: list[PositionalSoftPrior] | None = None,
+    prospective: list[dict] | None = None,
 ) -> RoundDecisionRecord:
     """Frozen contract-satisfying decision, used when the planner is offline.
 
     The priors are derived from the revealed ledger (top-``k`` consensus
     substitutions) instead of a hardcoded ``W3`` rule, so the offline fallback
     speaks the same language as :func:`core.acquisition.adaptive_prior_score`.
-    ``ranked`` is ordered by ``sigma_joint``; slots 4 and 5 are only a starting
-    point because the selector re-derives them from ``Δ_agent``.
+
+    When a ``prospective`` batch is supplied, the statement names the *actual*
+    H1/H0 pair from it. That matters even offline: the fallback used to say
+    "conserve W3" — a claim about a position, not about the two candidates being
+    measured — so the audit could never check it. Now the fallback states the
+    comparison the batch will run, which is the only claim the data can settle.
+    ``ranked`` (ordered by ``sigma_joint``) remains the ordering for slots 3-5 when
+    no prospective batch is available.
     """
+    if prospective:
+        by_slot = {int(slot["slot_id"]): str(slot["candidate_id"]) for slot in prospective}
+        h1 = by_slot.get(4) or by_slot.get(1) or ranked[1]
+        h0 = by_slot.get(5) or ranked[2]
+        statement = (
+            f"H1 candidate {h1} will out-measure the H0 control {h0} on this batch's "
+            f"binding assay."
+        )
+        supporting = [str(slot["candidate_id"]) for slot in prospective]
+    else:
+        h1, h0 = ranked[1], ranked[2]
+        statement = "Conserve W3 while exploring lower-liability substitutions."
+        supporting = ledger.candidate_id.astype(str).head(3).tolist() if not ledger.empty else []
+
     return RoundDecisionRecord(
         round_number=round_number,
         phase="Cold-Start Tuition (Exploration)" if round_number <= 2 else "Self-Accelerating Payoff (Exploitation)",
         tools_invoked=list(tools),
         hypothesis_id=f"HYP-R{round_number}-01",
-        hypothesis_statement="Conserve W3 while exploring lower-liability substitutions.",
+        hypothesis_statement=statement,
         previous_hypothesis_verdict="N/A (Round 1)" if round_number == 1 else "INCONCLUSIVE",
-        supporting_candidate_ids=ledger.candidate_id.astype(str).head(3).tolist() if not ledger.empty else [],
+        supporting_candidate_ids=supporting,
         agent_disagreement_summary="Skeptic reserves a direct falsification slot.",
         confidence_rating="Low" if len(ledger) < 15 else "Medium",
         positional_priors=priors or [PositionalSoftPrior(position=3, preferred_residues=["W"], discouraged_residues=[], weight_delta=.15)],
+        # Slot 3 is the contract's max-joint-uncertainty probe on *every* path —
+        # ``_reconcile_decision`` enforces the same invariant for the live planner.
+        # The selector's VoI-exploration pick is a different, later decision, and
+        # ``Campaign._annotate_decision`` rewrites the recorded target to whatever
+        # the quota actually measured.
         slot3_uncertainty_target_id=ranked[0],
-        slot4_hypothesis_target_id=ranked[1],
-        slot5_falsification_target_id=ranked[2],
+        slot4_hypothesis_target_id=h1,
+        slot5_falsification_target_id=h0,
     )
 
 
@@ -182,26 +214,38 @@ def _reconcile_decision(
     phase: str,
     ranked: list[str],
     tools: list[str],
+    h1_candidates: list[str] | None = None,
+    h0_candidates: list[str] | None = None,
 ) -> RoundDecisionRecord:
     """Force the model's output onto the frozen contract's hard invariants.
 
     Slot 3 must be the max joint-uncertainty candidate and slots 3-5 must be
-    distinct; everything else the planner decided is preserved.
+    distinct; everything else the planner decided is preserved — *except* the
+    comparison pair, which is snapped into the prospective batch.
+
+    Why the pair is constrained at all: the audit grades whatever the round
+    measured, so a planner naming candidates outside this batch produced a
+    hypothesis that could never be tested. Its claim and its grade then referred
+    to disjoint candidate sets, and the verdict was arithmetically correct and
+    scientifically empty. ``h1_candidates`` / ``h0_candidates`` are the slots the
+    selector is about to fill; the planner still chooses *which* of them its
+    hypothesis contrasts, and still writes the statement.
     """
     if len(ranked) < 3:
         raise ValueError("Planner requires at least three unqueried candidates")
 
-    def next_unused(used: set[str], preferred: str) -> str:
+    def next_unused(used: set[str], preferred: str, pool: list[str] | None = None) -> str:
+        candidates = pool or ranked
         # Only candidates the acquisition step can actually score are eligible.
-        if preferred in ranked and preferred not in used:
+        if preferred in candidates and preferred not in used:
             return preferred
-        return next(cid for cid in ranked if cid not in used)
+        return next(cid for cid in candidates if cid not in used)
 
     slot3 = ranked[0]
     used = {slot3}
-    slot4 = next_unused(used, decision.slot4_hypothesis_target_id)
+    slot4 = next_unused(used, decision.slot4_hypothesis_target_id, h1_candidates)
     used.add(slot4)
-    slot5 = next_unused(used, decision.slot5_falsification_target_id)
+    slot5 = next_unused(used, decision.slot5_falsification_target_id, h0_candidates)
 
     # Re-validate instead of ``model_copy(update=...)``: the latter skips
     # validation, so a bad reconciliation would reach the acquisition step.
@@ -223,6 +267,9 @@ class VirtualLabRunner:
         self.router, self.hitl, self.events = router or ModelRouter(), hitl, RoundEventBus()
         self._approval = asyncio.Event()
         self.previous_decisions: list[dict] = []
+        #: What each round's council *declared*, kept for provenance now that the
+        #: selector is scored on data-derived priors. Keyed by round number.
+        self.declared_priors_by_round: dict[int, list[dict]] = {}
 
     def approve(self) -> None: self._approval.set()
 
@@ -253,16 +300,44 @@ class VirtualLabRunner:
         for name, output in tools.items():
             await self.events.emit("tool_output", {"tool": name, "output": output})
 
-        # Slots are only ever filled from the qualified pool: an unqualified
-        # candidate cannot count toward best_qualified_binding, so a planner
-        # naming one would waste oracle budget. ``y_dev`` is sequence-derived and
-        # therefore free at t=0 (SPEC §2), so gating on it leaks nothing.
+        # Score the pool with the *selector's own* objective before the council
+        # sees it. The shortlist used to be ranked by ``sigma_joint`` (the
+        # exploration axis) while ``select_five_slots`` ranked by ``A_H1`` and
+        # ``A_null``, so the planner could name a comparison pair that the
+        # selector would never measure — and its hypothesis was then graded on
+        # candidates it had never mentioned. Feeding the planner the prospective
+        # batch instead of a differently-ranked list is the fix: the claim is
+        # written about candidates that are actually entering this round.
+        base_priors = deterministic_priors(ledger, tau_dev, falsified_positions=falsified_positions)
+        scored, voi = score_pool(
+            unqueried,
+            sar_effects=sar_effect_table(ledger, tau_dev=tau_dev, residuals=residuals),
+            priors=base_priors,
+            ledger=ledger,
+            tau_dev=tau_dev,
+            residuals=residuals,
+            falsified_positions=falsified_positions,
+            queries_spent=int(len(ledger)) or 5,
+            total_budget=SETTINGS.total_budget,
+            batch_size=SETTINGS.batch_size,
+        )
+        prospective = prospective_slots(scored)
         eligible = qualified_pool(unqueried, tau_dev)
         ranked = eligible.sort_values(["sigma_joint", "candidate_id"], ascending=[False, True]).candidate_id.tolist()
         if len(ranked) < 3:
             # Never let the gate starve the quota: fall back to the full pool.
             eligible = unqueried
             ranked = unqueried.sort_values(["sigma_joint", "candidate_id"], ascending=[False, True]).candidate_id.tolist()
+        # A planner may only name candidates the quota can actually measure: the
+        # prospective batch first, then the rest of the scored pool ordered by the
+        # same objective, then the raw uncertainty ranking as a last resort.
+        allowed = [str(slot["candidate_id"]) for slot in prospective]
+        for cid in scored.sort_values(["a_h1", "candidate_id"], ascending=[False, True]).candidate_id.astype(str):
+            if cid not in allowed:
+                allowed.append(cid)
+        for cid in ranked:
+            if str(cid) not in allowed:
+                allowed.append(str(cid))
 
         async def stream_memo(memo: AgentMemo) -> None:
             await self.events.emit("agent_memo", memo.model_dump())
@@ -293,7 +368,23 @@ class VirtualLabRunner:
         decision = _deterministic_decision(
             round_number, ledger, ranked, list(tools),
             priors=derived_priors,
+            prospective=prospective,
         )
+
+        # The comparison pair the planner must grade itself against: the H1
+        # hypothesis candidate and the H0 control it will be tested against. Both
+        # come from the prospective batch, so a claim written about them is a claim
+        # about candidates this round actually measures.
+        h1_candidates = [
+            str(slot["candidate_id"])
+            for slot in prospective
+            if int(slot["slot_id"]) in (1, 2, 4)
+        ]
+        h0_candidates = [
+            str(slot["candidate_id"])
+            for slot in prospective
+            if int(slot["slot_id"]) == 5
+        ]
 
         if self.router.is_live(AGENT_DEFINITIONS["planner"].role):
             await self.events.emit("planner_started", {"role": AGENT_DEFINITIONS["planner"].role})
@@ -310,6 +401,24 @@ class VirtualLabRunner:
                             {str(row.candidate_id): str(row.sequence) for row in eligible.head(12).itertuples()}
                             if "sequence" in eligible.columns else {}
                         ),
+                        # The batch this round will actually measure, with the role
+                        # each slot plays. The planner's claim must be about these.
+                        "prospective_batch": [
+                            {
+                                "slot_id": int(slot["slot_id"]),
+                                "slot_type": slot["slot_type"],
+                                "candidate_id": str(slot["candidate_id"]),
+                                "sequence": str(slot.get("sequence", "")),
+                                "a_null": round(float(slot.get("a_null", 0.0)), 4),
+                                "a_h1": round(float(slot.get("a_h1", 0.0)), 4),
+                                "delta_agent": round(float(slot.get("delta_agent", 0.0)), 4),
+                                "mu_bind": round(float(slot.get("mu_bind", 0.0)), 3),
+                            }
+                            for slot in prospective
+                        ],
+                        "h1_hypothesis_candidates": h1_candidates,
+                        "h0_control_candidates": h0_candidates,
+                        "voi_context": {key: round(float(value), 4) for key, value in voi.items()},
                         "surrogate_residuals": {
                             cid: round(value, 3) for cid, value in (residuals or {}).items()
                         },
@@ -322,14 +431,41 @@ class VirtualLabRunner:
                     memos=memos,
                 )
                 parsed = _reconcile_decision(
-                    _parse_decision(raw, ranked),
+                    _parse_decision(raw, allowed),
                     round_number=round_number,
                     phase=phase_exact,
                     ranked=ranked,
                     tools=list(tools),
+                    h1_candidates=h1_candidates,
+                    h0_candidates=h0_candidates,
                 )
-                decision = parsed
-                await self.events.emit("planner_reconciled", {"note": "slot 3 pinned to max joint uncertainty"})
+                # Anchor the *scoring* priors on the same data-derived set the
+                # benchmark's M5 uses, and keep the council's own declaration as
+                # provenance.
+                #
+                # Without this, `live_llm` M5 and benchmark M5 score the same pool
+                # with different `Δ_agent`: the benchmark derives its priors from
+                # the revealed ledger (so they agree with the empirical SAR term by
+                # construction), while a live council invents six free-form rules
+                # from prose. That difference is not a scientific disagreement, it
+                # is a different scoring function reaching `select_five_slots`, and
+                # it is why a live run could trail its own deterministic twin on the
+                # same seed. The council's memos, thinking traces, tool citations
+                # and hypothesis statements are all still recorded verbatim in
+                # `agent_council` / `hypotheses` — only the numeric weights that
+                # reach the selector are anchored.
+                self.declared_priors_by_round[round_number] = [
+                    prior.model_dump() for prior in parsed.positional_priors
+                ]
+                decision = type(parsed).model_validate({
+                    **parsed.model_dump(),
+                    "positional_priors": [prior.model_dump() for prior in derived_priors],
+                })
+                await self.events.emit("planner_reconciled", {
+                    "note": "slot 3 pinned to max joint uncertainty; scoring priors anchored on data-derived set",
+                    "declared_priors": self.declared_priors_by_round[round_number],
+                    "scoring_priors": [prior.model_dump() for prior in derived_priors],
+                })
             except Exception as exc:  # noqa: BLE001 - never lose a round to a bad generation
                 await self.events.emit(
                     "planner_error",

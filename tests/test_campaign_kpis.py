@@ -201,16 +201,66 @@ def test_audit_still_falsifies_when_the_whole_arm_loses_to_the_control():
     assert verdict["h0_binding"] > verdict["h1_binding"]
 
 
-def test_supported_verdict_requires_a_non_negative_arm_residual():
-    """A lift the surrogate already predicted is not evidence for the hypothesis."""
-    ledger, decision = _arm_round_ledger(slot4_beats_control=False)
-    # Arm measures above the control but *below* what the surrogate expected.
+def test_a_small_lift_over_an_under_predicted_arm_is_not_evidence():
+    """A lift the surrogate already predicted is not evidence for the hypothesis.
+
+    This is the residual rule in its narrow, defensible form: the arm won by a
+    margin *below* :data:`core.tool_arsenal.DECISIVE_LIFT`, and its carriers
+    measured well below what the surrogate predicted **relative to the control**.
+    The control then carries the comparison, and the round is refuted.
+    """
+    ledger = _ledger([
+        {"candidate_id": "S1", "sequence": "ARWGGDGFYAMDY", "y_bind": 8.15, "round_number": 3},
+        {"candidate_id": "S2", "sequence": "ARWGGDGFYAMDY", "y_bind": 8.12, "round_number": 3},
+        {"candidate_id": "S4", "sequence": "VRWGGDGFYAMDY", "y_bind": 8.11, "round_number": 3},
+        {"candidate_id": "S5", "sequence": WT_SEQUENCE, "y_bind": 8.10, "round_number": 3},
+    ])
     verdict = audit_past_hypotheses(ledger, [{
-        **decision,
-        "pre_query_expectation": {"S1": 9.5, "S2": 9.5, "S4": 9.5, "S5": 8.0},
+        "hypothesis_id": "HYP-R3-01", "round_number": 3,
+        "slot4_measured_id": "S4", "slot5_measured_id": "S5",
+        "h1_arm_measured_ids": ["S1", "S2", "S4"],
+        "positional_priors": [
+            {"position": 1, "preferred_residues": ["A"], "weight_delta": 0.04},
+        ],
+        # The arm was predicted far higher than the control, and missed by more.
+        "pre_query_expectation": {"S1": 9.2, "S2": 9.2, "S4": 9.2, "S5": 8.0},
     }])["verdicts"][0]
     assert verdict["verdict"] == "FALSIFIED"
-    assert verdict["h1_mean_residual"] < 0
+    assert verdict["paired_lift"] < 0.10
+    assert verdict["decisive_lift"] is False
+    assert verdict["h1_mean_residual"] < verdict["h0_residual"]
+
+
+def test_a_decisive_lift_survives_batch_wide_negative_surrogate_drift():
+    """Regression (seed 21, R5): a +0.75 win was refuted by an absolute residual.
+
+    The surrogate fits on the revealed rows, so a fresh batch can be uniformly
+    over-predicted and every measured residual goes negative at once. Reading that
+    level shift as evidence against the rule refuted a hypothesis the paired arms
+    had just confirmed. A lift above ``DECISIVE_LIFT`` now stands on its own, and
+    the comparison for smaller lifts is against the *control's* residual, which
+    cancels the shared shift.
+    """
+    ledger = _ledger([
+        {"candidate_id": "S1", "sequence": "ARWGGDGFYAMDY", "y_bind": 8.159, "round_number": 5},
+        {"candidate_id": "S2", "sequence": "ARWGGDGFYAMDY", "y_bind": 7.900, "round_number": 5},
+        {"candidate_id": "S4", "sequence": "VRWGGDGFYAMDY", "y_bind": 7.800, "round_number": 5},
+        {"candidate_id": "S5", "sequence": WT_SEQUENCE, "y_bind": 7.412, "round_number": 5},
+    ])
+    verdict = audit_past_hypotheses(ledger, [{
+        "hypothesis_id": "HYP-R5-01", "round_number": 5,
+        "slot4_measured_id": "S4", "slot5_measured_id": "S5",
+        "h1_arm_measured_ids": ["S1", "S2", "S4"],
+        "positional_priors": [
+            {"position": 1, "preferred_residues": ["A"], "weight_delta": 0.04},
+        ],
+        # Whole batch over-predicted: arm and control residual are both negative.
+        "pre_query_expectation": {"S1": 8.2, "S2": 8.2, "S4": 8.2, "S5": 7.5},
+    }])["verdicts"][0]
+    assert verdict["h1_mean_residual"] < 0, "the batch really was under-predicted"
+    assert verdict["paired_lift"] > 0.10
+    assert verdict["decisive_lift"] is True
+    assert verdict["verdict"] == "SUPPORTED"
 
 
 def _gated_round(residuals: dict[int, float]) -> dict:

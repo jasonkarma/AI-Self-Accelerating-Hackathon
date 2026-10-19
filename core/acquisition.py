@@ -780,6 +780,143 @@ def voi_annealed_null_objective(pool: pd.DataFrame, voi: float) -> pd.Series:
 
 
 # ── The 5-slot portfolio ─────────────────────────────────────────────────────
+def score_pool(
+    unqueried: pd.DataFrame,
+    *,
+    sar_effects: dict | None = None,
+    priors: list[PositionalSoftPrior] | tuple[PositionalSoftPrior, ...] = (),
+    ledger: pd.DataFrame | None = None,
+    tau_dev: float | None = None,
+    residuals: dict[str, float] | None = None,
+    falsified_positions: set[int] | frozenset[int] = frozenset(),
+    queries_spent: int,
+    total_budget: int,
+    batch_size: int = SLOT_COUNT,
+) -> tuple[pd.DataFrame, dict]:
+    """Score a pool with the exact objective :func:`select_five_slots` will use.
+
+    Returns ``(pool, voi_context)`` where ``pool`` is the qualified frame carrying
+    ``delta_agent``, ``a_null``, ``a_h1``, ``optimistic``, ``agent_promoted``,
+    ``voi``, ``horizon`` and ``sar_maturity``.
+
+    This exists so the *planner* can be shown the candidates the *selector* is
+    about to pick from. Previously the planner's shortlist was ranked by
+    ``sigma_joint`` (the exploration axis) while selection ranked by ``A_H1`` and
+    ``A_null`` — so a planner could name a comparison pair that never entered the
+    batch, and a hypothesis could be graded on candidates it never mentioned. One
+    scoring function, called by both, is the only way that stays true.
+    """
+    frame = unqueried.copy()
+    if sar_effects is None:
+        sar_effects = sar_effect_table(ledger, tau_dev=tau_dev, residuals=residuals)
+    if len(priors) == 0:
+        priors = positional_priors_from_revealed(ledger, falsified_positions=falsified_positions)
+
+    # Diagnostic only: M4's static anchor rule is reported so the UI and the
+    # ledger can show what M4 would have scored, but it is **not** an additive
+    # term in either arm. Chaining M5 to it would import M4's bad prior.
+    #
+    # A frame with no ``sequence`` column cannot be scored positionally. That only
+    # happens on a hand-built test frame (the real paths always carry sequences),
+    # and the honest answer there is a zero agent prior rather than a crash: the
+    # objective then reduces to the surrogate term, which is exactly what the arm
+    # means when no rule is declared.
+    if "sequence" in frame.columns:
+        frame["loop_prior"] = [loop_prior_score(s) for s in frame.sequence]
+        frame["delta_agent"] = [
+            adaptive_prior_score(
+                s, priors=list(priors), sar_effects=sar_effects, falsified_positions=falsified_positions
+            )
+            for s in frame.sequence
+        ]
+    else:
+        frame["loop_prior"] = 0.0
+        frame["delta_agent"] = 0.0
+    pool = qualified_pool(frame, tau_dev)
+    if "a_base" not in pool.columns:
+        # Degenerate frame (test fixture): fall back to whatever surrogate signal
+        # exists so the objective stays defined instead of raising KeyError.
+        if "mu_bind" in pool.columns:
+            pool = pool.assign(a_base=pool["mu_bind"].astype(float))
+        elif "sigma_joint" in pool.columns:
+            pool = pool.assign(a_base=pool["sigma_joint"].astype(float))
+        else:
+            pool = pool.assign(a_base=0.0)
+
+    # ``C`` is measured from the **corroborated SAR table** (exact cells plus
+    # position-tolerance effects), i.e. from evidence the loop has actually
+    # accumulated — not from ``max(Δ_agent)`` over the pool, which a single
+    # saturated candidate clears in Round 1 and which therefore pinned
+    # ``sar_maturity`` at 1.000 for every round. Computed *before* ``a_null``
+    # because the VoI-annealed objective below depends on it.
+    context = voi_context(
+        sar_effects,
+        queries_spent=int(queries_spent),
+        total_budget=int(total_budget),
+        batch_size=int(batch_size),
+    )
+
+    pool = pool.assign(a_null=voi_annealed_null_objective(pool, float(context["voi"])))
+    pool = pool.assign(a_h1=pool.a_null + pool.delta_agent)
+    pool = pool.assign(
+        horizon=context["horizon"],
+        sar_maturity=context["sar_maturity"],
+        voi=context["voi"],
+        optimistic=pool.a_h1 + SLOT3_OPTIMISM * context["voi"] * pool.sigma_joint,
+        agent_promoted=pool.a_h1 + SLOT4_AGENT_BOOST * pool.delta_agent.clip(lower=0.0),
+    )
+    return pool, context
+
+
+def prospective_slots(pool: pd.DataFrame) -> list[dict]:
+    """The five candidates :func:`select_five_slots` is about to return.
+
+    A dry run of the identical rule over a fully scored pool (``score_pool``'s
+    output), so the planner can be shown *which* candidates will be measured
+    before it writes a claim about them. It calls the same helpers in the same
+    order and re-derives nothing, which is what keeps it honest: if the selector's
+    rule changes, so does this preview.
+
+    Returns a list of ``{slot_id, slot_type, candidate_id, a_null, a_h1,
+    delta_agent, mu_bind, sequence, ...}``. If the pool cannot fill five slots the
+    list is simply short; the caller is told so rather than handed a fabricated
+    batch.
+    """
+    selected: list[dict] = []
+
+    def take(row: pd.Series, slot_type: str) -> None:
+        selected.append({"slot_id": len(selected) + 1, "slot_type": slot_type, **row.to_dict()})
+
+    def remaining() -> pd.DataFrame:
+        used = {row["candidate_id"] for row in selected}
+        return pool.loc[~pool.candidate_id.isin(used)]
+
+    def best(frame_slice: pd.DataFrame, column: str) -> pd.Series | None:
+        if frame_slice.empty:
+            return None
+        return frame_slice.sort_values([column, "candidate_id"], ascending=[False, True]).iloc[0]
+
+    for _, row in pool.sort_values(["a_h1", "candidate_id"], ascending=[False, True]).head(2).iterrows():
+        take(row, "Dual-Surrogate UCB")
+    lead = best(remaining(), "optimistic")
+    if lead is None:
+        return selected
+    take(lead, SLOT3_LABEL)
+    rest = remaining()
+    if rest.empty:
+        return selected
+    take(
+        rest.sort_values(
+            ["a_h1", "delta_agent", "candidate_id"], ascending=[False, False, True]
+        ).iloc[0],
+        SLOT4_LABEL,
+    )
+    control = best(remaining(), "a_null")
+    if control is not None:
+        take(control, SLOT5_FALSIFY_LABEL)
+    return selected
+
+
 def select_five_slots(
     unqueried: pd.DataFrame,
     decision: RoundDecisionRecord | None = None,
@@ -861,48 +998,22 @@ def select_five_slots(
             revealed = 0 if ledger is None else int(len(ledger))
             queries_spent = revealed or int(SETTINGS.initial_queries)
 
-    frame = unqueried.copy()
-    if sar_effects is None:
-        sar_effects = sar_effect_table(ledger, tau_dev=tau_dev, residuals=residuals)
     priors = (
         list(decision.positional_priors)
         if decision
         else positional_priors_from_revealed(ledger, falsified_positions=falsified_positions)
     )
-
-    # Diagnostic only: M4's static anchor rule is reported so the UI and the
-    # ledger can show what M4 would have scored, but it is **not** an additive
-    # term in either arm. Chaining M5 to it would import M4's bad prior.
-    frame["loop_prior"] = [loop_prior_score(s) for s in frame.sequence]
-    frame["delta_agent"] = [
-        adaptive_prior_score(
-            s, priors=priors, sar_effects=sar_effects, falsified_positions=falsified_positions
-        )
-        for s in frame.sequence
-    ]
-    pool = qualified_pool(frame, tau_dev)
-
-    # ``C`` is measured from the **corroborated SAR table** (exact cells plus
-    # position-tolerance effects), i.e. from evidence the loop has actually
-    # accumulated — not from ``max(Δ_agent)`` over the pool, which a single
-    # saturated candidate clears in Round 1 and which therefore pinned
-    # ``sar_maturity`` at 1.000 for every round. Computed *before* ``a_null``
-    # because the VoI-annealed objective below depends on it.
-    context = voi_context(
-        sar_effects,
+    pool, _ = score_pool(
+        unqueried,
+        sar_effects=sar_effects,
+        priors=priors,
+        ledger=ledger,
+        tau_dev=tau_dev,
+        residuals=residuals,
+        falsified_positions=falsified_positions,
         queries_spent=int(queries_spent),
         total_budget=int(total_budget),
         batch_size=int(batch_size),
-    )
-
-    pool = pool.assign(a_null=voi_annealed_null_objective(pool, float(context["voi"])))
-    pool = pool.assign(a_h1=pool.a_null + pool.delta_agent)
-    pool = pool.assign(
-        horizon=context["horizon"],
-        sar_maturity=context["sar_maturity"],
-        voi=context["voi"],
-        optimistic=pool.a_h1 + SLOT3_OPTIMISM * context["voi"] * pool.sigma_joint,
-        agent_promoted=pool.a_h1 + SLOT4_AGENT_BOOST * pool.delta_agent.clip(lower=0.0),
     )
 
     selected: list[dict] = []
