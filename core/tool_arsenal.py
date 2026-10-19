@@ -95,6 +95,19 @@ def _measured_bindings(frame: pd.DataFrame | None) -> dict[str, float]:
     }
 
 
+#: Slot ids that make up the **H1 exploitation arm**. Slot 3 is the VoI
+#: exploration probe and belongs to neither arm; slot 5 is the H0 control. The
+#: batch is a 3-exploit / 2-experimental design, so "the H1 arm" is a *set* of
+#: three measurements, not the single fourth-choice candidate slot 4 happens to
+#: be left with.
+H1_EXPLOIT_SLOT_IDS: tuple[int, ...] = (1, 2, 4)
+
+#: Decision key carrying the measured ids of that arm. The campaign stamps it
+#: once the batch is actually queried; the benchmark's M5 policy stamps the same
+#: key through :func:`audit_past_hypotheses`, so both paths grade identically.
+H1_ARM_KEY = "h1_arm_measured_ids"
+
+
 def _tested_positions(decision: dict, sequence: str | None) -> set[int]:
     """Positions whose declared rule the *hypothesis candidate actually exercised*.
 
@@ -102,9 +115,9 @@ def _tested_positions(decision: dict, sequence: str | None) -> set[int]:
     prior list would blacklist most of the CDR3 after two or three rounds (the
     deterministic fallback declares a rule at nearly every mutated position),
     which is not self-correction — it is self-destruction. A position counts as
-    tested only when the Slot 4 candidate carries the exact residue that rule
-    preferred, because that is the substitution whose effect the paired arms
-    actually measure.
+    tested only when the candidate carries the exact residue that rule preferred,
+    because that is the substitution whose effect the paired arms actually
+    measure.
     """
     if not sequence:
         return set()
@@ -121,43 +134,195 @@ def _tested_positions(decision: dict, sequence: str | None) -> set[int]:
     return tested
 
 
+def _h1_arm_ids(decision: dict) -> list[str]:
+    """Measured ids of the H1 exploitation arm (slots 1, 2 and 4).
+
+    ``h1_arm_measured_ids`` is written by the campaign's
+    :meth:`core.campaign.Campaign._annotate_decision` and by the benchmark's M5
+    policy, and already excludes the exploitation slots whose ``Δ_agent`` was
+    negative (those are not exercising the hypothesis).
+
+    Ledgers written before the arm was recorded only carry ``slot4_measured_id``.
+    That single id is the arm's *narrowest* representative, which is exactly the
+    4th-choice bias this function exists to remove — but it is the only evidence
+    a historical ledger has, so it is used as the fallback rather than declaring
+    every older round untestable.
+    """
+    explicit = decision.get(H1_ARM_KEY)
+    if explicit:
+        return [str(cid) for cid in explicit if cid]
+    slot4 = decision.get("slot4_measured_id") or decision.get("slot4_hypothesis_target_id")
+    return [str(slot4)] if slot4 else []
+
+
+def _residual_of(
+    candidate_id: str | None,
+    measured: dict[str, float],
+    expectations: dict[str, float],
+) -> float | None:
+    """``y_bind - mu_bind`` for one measured candidate, or ``None`` without a μ.
+
+    ``mu_bind`` comes from the decision's ``pre_query_expectation`` — the
+    surrogate mean recorded **before** the assay was run. Using the pre-query
+    value rather than a refit is what makes this a genuine out-of-sample
+    surprise; a post-hoc refit would absorb the very signal being tested.
+    """
+    if not candidate_id:
+        return None
+    key = str(candidate_id)
+    if key not in measured or not expectations:
+        return None
+    mu = expectations.get(key)
+    if mu is None:
+        return None
+    try:
+        return float(measured[key]) - float(mu)
+    except (TypeError, ValueError):
+        return None
+
+
+def _residual_gated_positions(
+    positions: Iterable[int],
+    *,
+    priors: Iterable[dict],
+    arm_ids: Iterable[str],
+    sequences: dict[str, str],
+    measured: dict[str, float],
+    expectations: dict[str, float],
+) -> tuple[set[int], dict[int, float]]:
+    """Keep only tested positions whose **measured** residual was negative.
+
+    The old rule inverted every position a losing hypothesis touched, which
+    produced a ``SUPPORTED -> FALSIFIED -> SUPPORTED`` oscillation: a position
+    whose variants measured *better* than the surrogate predicted was pushed
+    down anyway, the next round's arm therefore lost, and its inversion flipped
+    back. A position is now penalised only when the wet lab measured it
+    **worse than the surrogate expected** (``y_bind - mu_bind < 0``).
+
+    Positions with no residual evidence (no ``mu_bind`` on record, e.g. a
+    hand-built fixture ledger) are **not** inverted: absence of evidence is not
+    evidence against the rule, and the conservative branch is the one that
+    cannot produce an oscillation.
+
+    Returns ``(positions_to_invert, {position: mean_residual})``; the second
+    element is the audit trail the skeptic agent reads.
+    """
+    preferred_by_position: dict[int, set[str]] = {}
+    for prior in priors:
+        if not isinstance(prior, dict):
+            continue
+        position = prior.get("position")
+        if not position:
+            continue
+        preferred_by_position.setdefault(int(position), set()).update(
+            str(residue) for residue in (prior.get("preferred_residues") or [])
+        )
+
+    residual_by_position: dict[int, float] = {}
+    for position in sorted({int(p) for p in positions}):
+        preferred = preferred_by_position.get(position, set())
+        values: list[float] = []
+        for candidate_id in arm_ids:
+            sequence = sequences.get(str(candidate_id))
+            if not sequence or len(sequence) < position:
+                continue
+            if preferred and sequence[position - 1] not in preferred:
+                continue
+            residual = _residual_of(candidate_id, measured, expectations)
+            if residual is not None:
+                values.append(residual)
+        if values:
+            residual_by_position[position] = float(np.mean(values))
+    if not residual_by_position:
+        return set(), {}
+
+    # Absolute gate (the campaign's rule): a position may only be inverted if its
+    # measured residual was negative. A position whose carriers beat the
+    # surrogate is never touched, however the round was graded.
+    #
+    # Relative gate: it must also be negative *relative to the rest of the batch*.
+    # A surrogate that systematically over-predicted one batch makes every
+    # measured residual negative at once — that is a level shift in the model,
+    # not positional evidence. On the live ledger the absolute gate alone inverted
+    # 8 of 13 positions after a single batch, which is the same self-destruction
+    # the tested-positions rule exists to stop.
+    #
+    # The reference is the **median**, not the mean. Arm candidates often carry
+    # the same residue at several positions, so their residuals form a tight
+    # cluster of near-identical values; comparing against the mean of that cluster
+    # leaves half of it technically "below average" and re-creates the same
+    # multi-position inversion (measured: 6 of 7 positions on one batch). The
+    # median splits the cluster at the middle and is what makes "worse than the
+    # typical measured substitution" mean something. With fewer than three
+    # observed positions no median is meaningful and nothing is inverted.
+    observed = np.asarray(list(residual_by_position.values()), dtype=float)
+    if observed.size < 3:
+        return set(), residual_by_position
+    threshold = float(np.median(observed))
+    return (
+        {
+            position
+            for position, value in residual_by_position.items()
+            if value < 0.0 and value < threshold
+        },
+        residual_by_position,
+    )
+
+
 def audit_past_hypotheses(ledger_df: pd.DataFrame, previous_decisions: list[dict]) -> dict:
     """Grade each completed round as a paired H1-vs-H0 experiment.
 
-    Each batch is a designed experiment: Slot 4 is the **H1 arm** (a candidate
-    the agents' hypothesis actively boosts) and Slot 5 is the **H0 null control**
-    (the best candidate the hypothesis does *not* boost). Grading those two
-    against each other is what makes the verdict causal rather than descriptive
-    — no cross-round median is needed, and the comparison is inside the batch.
+    The batch is a **3-exploit / 2-experimental** design, so the H1 arm is a set
+    of three measurements — slots 1, 2 and 4 — not the single candidate slot 4
+    happens to be left with. Slot 5 is the **H0 null control** (the best
+    candidate the hypothesis does not boost); slot 3 is the VoI exploration probe
+    and belongs to neither arm.
+
+    Why the arm and not just slot 4: with ``SLOT4_AGENT_BOOST = 0.0``, slots 1, 2
+    and 4 all rank by ``A_H1``, so slots 1-2 take the two strongest candidates,
+    slot 3 takes the best VoI exploration pick, and slot 4 inherits the *fourth*
+    choice. Grading only that leftover against slot 5 therefore stamped
+    ``FALSIFIED`` in rounds where slot 1 or slot 2 found an elite binder, and the
+    resulting weight inversion flipped the verdict back the next round — a
+    ``SUPPORTED -> FALSIFIED -> SUPPORTED`` oscillation at the batch frequency.
+    The arm's **best** measurement is what the hypothesis actually bought; its
+    **mean** is reported alongside for depth.
 
     Rule order (deterministic):
 
-    1. Slot 5 beats Slot 4 ⇒ ``FALSIFIED``. The null arm out-performed the
-       hypothesis arm, so the prior is not earning its keep.
-    2. Slot 4 beats Slot 5 ⇒ ``SUPPORTED``.
-    3. Equal (or Slot 5 unmeasurable) ⇒ fall back to the round median, then to
-       the stored pre-query surrogate expectation. This keeps a round decidable
-       even when the paired arms happen to tie.
+    1. No arm candidate measured ⇒ ``INCONCLUSIVE``.
+    2. The control beats the **best** arm measurement ⇒ ``FALSIFIED``.
+    3. The best arm measurement beats the control ⇒ ``SUPPORTED``, provided the
+       arm's mean residual ``y_bind - mu_bind`` is non-negative. A positive lift
+       bought by candidates the surrogate already predicted well is not
+       evidence for the hypothesis.
+    4. Tie (or no control) ⇒ fall back to the round median, then to the stored
+       pre-query surrogate expectation, so a round stays decidable.
 
-    The returned ``falsified_positions`` is the self-correction signal: the
-    positions of the round's hypothesis that lost, which
-    :func:`core.acquisition.select_five_slots` inverts next round so a wrong rule
-    cannot persist for the rest of the campaign.
+    The returned ``falsified_positions`` is the self-correction signal, and it is
+    **residual-gated**: a position is inverted only if the wet lab measured its
+    carriers *worse than the surrogate expected* (``y_bind - mu_bind < 0``). A
+    position whose measured residual was positive is never inverted, however the
+    round was graded — that inversion was the negative-feedback half of the
+    oscillation. A legacy round with no ``pre_query_expectation`` has no residual
+    to read, so it falls back to the tested-positions rule rather than declaring
+    nothing falsifiable.
 
-    ``slot4_measured_id`` / ``slot5_measured_id`` are the ids the quota actually
-    queried (stamped by the campaign), not the planner's declared targets —
-    which Slots 1-3 of the same batch routinely consume.
+    ``h1_arm_measured_ids`` / ``slot5_measured_id`` are the ids the quota actually
+    queried (stamped by the campaign), not the planner's declared targets — which
+    Slots 1-3 of the same batch routinely consume.
     """
     verdicts, falsified_positions = [], set()
     has_rounds = ledger_df is not None and "round_number" in getattr(ledger_df, "columns", ())
-    # candidate_id -> sequence, used to decide which declared rules the Slot 4
-    # candidate actually exercised. Sequences are free at t=0 (SPEC §2), so this
+    # candidate_id -> sequence, used to decide which declared rules the arm's
+    # candidates actually exercised. Sequences are free at t=0 (SPEC §2), so this
     # is not a label read.
     sequences: dict[str, str] = {}
     if ledger_df is not None and "sequence" in getattr(ledger_df, "columns", ()):
         sequences = dict(zip(ledger_df.candidate_id.astype(str), ledger_df.sequence.astype(str)))
     for decision in previous_decisions:
         round_no = decision.get("round_number")
+        arm_ids = _h1_arm_ids(decision)
         slot4 = decision.get("slot4_measured_id") or decision.get("slot4_hypothesis_target_id")
         slot5 = decision.get("slot5_measured_id") or decision.get("slot5_falsification_target_id")
 
@@ -169,63 +334,112 @@ def audit_past_hypotheses(ledger_df: pd.DataFrame, previous_decisions: list[dict
             # declaring the round untestable.
             measured = _measured_bindings(ledger_df)
 
-        observed = measured.get(slot4) if slot4 else None
+        expectations = decision.get("pre_query_expectation") or {}
+
+        # The arm is every measured exploitation pick, so a round where slot 1
+        # found the elite binder is graded on that find rather than on slot 4's
+        # leftover.
+        arm_measured = {cid: measured[cid] for cid in arm_ids if cid in measured}
+        best_id = max(arm_measured, key=lambda cid: arm_measured[cid]) if arm_measured else None
+        observed = arm_measured.get(best_id) if best_id else None
+        arm_mean = float(np.mean(list(arm_measured.values()))) if arm_measured else None
+        arm_residuals = [
+            residual
+            for cid in arm_measured
+            if (residual := _residual_of(cid, measured, expectations)) is not None
+        ]
+        mean_residual = float(np.mean(arm_residuals)) if arm_residuals else None
+
         control = measured.get(slot5) if slot5 else None
         median = float(np.median(list(measured.values()))) if measured else float("nan")
-        expectations = decision.get("pre_query_expectation") or {}
-        expected = expectations.get(slot4) if slot4 else None
-
+        expected = expectations.get(best_id) if best_id else None
         paired = observed is not None and control is not None
+        arm_label = "/".join(arm_ids) if arm_ids else "unrecorded"
+
         if observed is None:
             verdict = INCONCLUSIVE
-            reason = f"hypothesis candidate {slot4!r} was not measured this round"
+            reason = f"no H1 arm candidate ({arm_label!r}) was measured this round"
         elif paired and control > observed:
             verdict = FALSIFIED
-            reason = (f"H0 control {slot5} ({control:.3f}) beat H1 pick "
-                      f"{slot4} ({observed:.3f})")
+            reason = (f"H0 control {slot5} ({control:.3f}) beat the best H1 arm pick "
+                      f"{best_id} ({observed:.3f})")
+        elif paired and observed > control and mean_residual is not None and mean_residual < 0:
+            verdict = FALSIFIED
+            reason = (f"best H1 arm pick {best_id} ({observed:.3f}) beat H0 control {slot5} "
+                      f"({control:.3f}) but the arm's mean residual was negative "
+                      f"({mean_residual:+.3f}): the lift was already predicted")
         elif paired and observed > control:
             verdict = SUPPORTED
-            reason = (f"H1 pick {slot4} ({observed:.3f}) beat H0 control "
+            reason = (f"best H1 arm pick {best_id} ({observed:.3f}) beat H0 control "
                       f"{slot5} ({control:.3f})")
         elif not np.isnan(median) and observed >= median:
             verdict = SUPPORTED
-            reason = (f"paired arms tied; H1 pick {slot4} ({observed:.3f}) reached the "
-                      f"round median ({median:.3f})")
+            reason = (f"paired arms tied; best H1 arm pick {best_id} ({observed:.3f}) reached "
+                      f"the round median ({median:.3f})")
         elif not np.isnan(median):
             verdict = FALSIFIED
-            reason = (f"paired arms tied; H1 pick {slot4} ({observed:.3f}) fell below the "
-                      f"round median ({median:.3f})")
+            reason = (f"paired arms tied; best H1 arm pick {best_id} ({observed:.3f}) fell "
+                      f"below the round median ({median:.3f})")
         elif expected is not None:
             hit = observed >= float(expected)
             verdict = SUPPORTED if hit else FALSIFIED
-            reason = (f"H1 pick {slot4} ({observed:.3f}) "
+            reason = (f"best H1 arm pick {best_id} ({observed:.3f}) "
                       f"{'met' if hit else 'missed'} its pre-query expectation ({float(expected):.3f})")
         else:
             verdict = INCONCLUSIVE
             reason = "no control, median or pre-query expectation available"
 
+        inverted: set[int] = set()
+        residual_by_position: dict[int, float] = {}
         if verdict == FALSIFIED:
-            falsified_positions |= _tested_positions(decision, sequences.get(slot4) if slot4 else None)
+            tested: set[int] = set()
+            for cid in (arm_ids or [slot4]):
+                tested |= _tested_positions(decision, sequences.get(str(cid)) if cid else None)
+            if expectations:
+                # Residual gate: the wet lab is the arbiter, and a position whose
+                # carriers measured *better* than predicted is never inverted.
+                inverted, residual_by_position = _residual_gated_positions(
+                    tested,
+                    priors=decision.get("positional_priors") or [],
+                    arm_ids=[cid for cid in (arm_ids or [slot4]) if cid],
+                    sequences=sequences,
+                    measured=measured,
+                    expectations=expectations,
+                )
+            else:
+                # Legacy ledger with no pre-query expectation: no residual exists,
+                # so fall back to the tested-positions rule rather than silently
+                # making the round uninvertable.
+                inverted = tested
+            falsified_positions |= inverted
 
         verdicts.append({
             "hypothesis_id": decision.get("hypothesis_id"),
             "round_number": round_no,
             "verdict": verdict,
             "reason": reason,
-            "design": "paired H1 (slot 4) vs H0 control (slot 5)",
-            "h1_target_id": slot4,
+            "design": "paired H1 (slots 1/2/4) vs H0 control (slot 5)",
+            "h1_arm_ids": [str(cid) for cid in arm_ids],
+            "h1_target_id": best_id if best_id is not None else slot4,
             "h0_control_id": slot5,
             "round_median": None if np.isnan(median) else round(median, 3),
             "h1_binding": None if observed is None else round(observed, 3),
+            "h1_arm_mean_binding": None if arm_mean is None else round(arm_mean, 3),
+            "h1_mean_residual": None if mean_residual is None else round(mean_residual, 3),
             "h0_binding": None if control is None else round(control, 3),
             "paired_lift": (
                 None if observed is None or control is None else round(observed - control, 3)
             ),
             "expected_binding": None if expected is None else round(float(expected), 3),
+            "inverted_positions": sorted(inverted),
+            "position_residuals": {
+                str(position): round(value, 3)
+                for position, value in sorted(residual_by_position.items())
+            },
         })
     return {
         "tool": "audit_past_hypotheses",
-        "design": "paired H1 / H0",
+        "design": "paired H1 (slots 1/2/4) / H0 (slot 5)",
         "verdicts": verdicts,
         "falsified_positions": sorted(falsified_positions),
     }

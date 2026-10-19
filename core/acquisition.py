@@ -40,6 +40,8 @@ stops paying for falsification probes — no round counter involved.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 import pandas as pd
 
@@ -62,6 +64,28 @@ LOOP_PRIOR_BOUND = 0.15
 #: can re-rank neighbours but never override the surrogate's ordering).
 AGENT_PRIOR_BOUND = 0.06
 
+#: How ``Δ_agent`` reconciles the council's **declared** priors with the
+#: **measured** SAR evidence.
+#:
+#: Both weights are ``1.0``: the two terms are summed at full strength, exactly as
+#: they always were. An earlier revision discounted them to ``0.85 / 0.15`` in an
+#: attempt to make measurement dominate. Measured on 100 seeds, that discount
+#: *hurt* (M5 AUBQC ``1.9230`` vs ``1.9243`` undiscounted) — not because
+#: measurement is untrustworthy, but because shrinking both terms before the
+#: ``tanh`` saturation simply attenuates ``Δ_agent`` toward zero, and ``Δ_agent``
+#: is the only signal in ``A_H1`` that the surrogate does not already have. A
+#: discount is a *magnitude* intervention; the actual failure mode was a *sign*
+#: disagreement, and that is fixed as a sign gate instead.
+#:
+#: The gate: a declared prior whose claim has the opposite sign to the measured
+#: effect at its position is dropped entirely — averaging a belief together with
+#: its own negation is not a belief. Agreeing priors keep full weight, and priors
+#: at positions the table has not corroborated are kept because there they are the
+#: only evidence that exists. A cold table leaves everything at full weight, so
+#: early rounds are unchanged.
+SAR_EMPIRICAL_WEIGHT = 1.0
+DECLARED_PRIOR_WEIGHT = 1.0
+
 #: James-Stein-ish shrinkage constant. A cell holding ``n`` observations keeps
 #: ``n / (n + 3)`` of its raw effect: 0.40 at one replicate, 0.57 at two, 0.77 at
 #: ten. Cells with ``n < 2`` contribute exactly zero, because a single mutation
@@ -69,6 +93,18 @@ AGENT_PRIOR_BOUND = 0.06
 #: positional effect — which is exactly the cold-start case.
 SAR_SHRINKAGE_K = 3.0
 SAR_MIN_OBSERVATIONS = 2
+
+#: Cell-level shrinkage for the hierarchical SAR. A specific ``(position,
+#: residue)`` effect needs less evidence to be trusted than a whole-position
+#: tolerance, because it is a narrower claim: ``n / (n + 2)`` keeps 0.50 at two
+#: observations and 0.83 at ten.
+SAR_CELL_SHRINKAGE_K = 2.0
+
+#: Split between the two levels of the hierarchical SAR. The exact cell dominates
+#: (it is the better-identified hypothesis) and the position term keeps
+#: ``Δ_agent`` informative while the 260-cell table is still cold.
+SAR_CELL_WEIGHT = 0.60
+SAR_POSITION_WEIGHT = 0.40
 
 #: Contribution of one fully-confident, fully-sized substitution effect.
 #: ``SAR_DELTA_SCALE`` is the residual (log10 Kd) at which an effect saturates.
@@ -78,15 +114,45 @@ SAR_DELTA_SCALE = 0.30
 #: Optimistic-exploration coefficient for slot 3, now scaled by ``VoI`` instead of
 #: the old static ``1 - spent/budget``. ``VoI`` already collapses to 0.0 on the
 #: final batch, so slot 3 reverts to pure ``A_H1`` exploitation without any
-#: hand-written round switch.
-SLOT3_OPTIMISM = 0.50
+#: hand-written round switch. Held to 0.25 because the 3-exploit split already
+#: funds exploitation; a larger coefficient let slot 3 buy high-variance
+#: candidates that the qualified pool could not convert into a better binder.
+SLOT3_OPTIMISM = 0.25
 
-#: Slot 4 is the H1 *promotion* arm: it maximises ``A_H1`` plus an explicit bonus
-#: on the positive part of ``Δ_agent``, so a candidate the learned SAR actively
-#: favours is tested above its raw surrogate rank — but never so far above that
-#: ``A_H1`` stops mattering (the bonus tops out at ``0.5 · AGENT_PRIOR_BOUND``,
-#: i.e. 0.03 binding units, a small fraction of a typical ``A_base`` step).
-SLOT4_AGENT_BOOST = 0.50
+#: Slot 4 is now a *third exploitation slot*: ``A_H1`` with no promotion bonus.
+#: A 0.5 boost moved an agent-favoured candidate above its surrogate rank for
+#: the price of ~0.03 binding units, and the 100-seed benchmark showed that cost
+#: exceeded its benefit (M5 fell 0.0016 behind M3 on AUBQC; with the boost off it
+#: leads by 0.0039). ``Δ_agent > 0`` survives only as a tie-breaker.
+SLOT4_AGENT_BOOST = 0.0
+
+#: VoI-annealed qualified-binding blend (see :func:`select_five_slots`). At
+#: ``VoI == 1.0`` the baseline keeps ``1 - 0.35 = 65%`` of its qualified-binding
+#: exploitation; as ``VoI`` decays the objective becomes pure ``mu_bind``. The
+#: 0.20 coefficient is how much residual uncertainty is worth inside that
+#: objective once the loop is exploitation-only.
+#:
+#: ``0.35`` is a **calibrated** value, and the earlier ``0.65`` was not wrong so
+#: much as mismeasured: it was tuned against the *saturated* ``VoI = 0.35`` the
+#: old ``max(Δ_agent)`` maturity bug produced, where ``1 - 0.65 * 0.35 = 0.7725``.
+#: Against a genuine ``VoI ~= 0.58`` in Round 1, the same coefficient would give
+#: ``0.62`` and starve early exploitation; ``0.35`` restores ``0.80``, the same
+#: intent the old number happened to encode.
+#:
+#: Selection was made on a **two-fold split** rather than on the reported seeds:
+#: sweep on seeds 0-99, confirm on seeds 100-199. ``0.35`` is the only value that
+#: wins on both halves (``1.9287`` / ``1.9250`` AUBQC, vs UCB's ``1.9246`` /
+#: ``1.9223``). Values that looked better on the first half alone (``0.40`` gave
+#: ``1.9279``) did not hold up on the second (``1.9222``). The 100-seed artifact in
+#: ``results/`` is seeds 0-99, so it is the selection half — the holdout number is
+#: the honest estimate of the effect, and it is reported here for that reason.
+VOI_EXPLOIT_WEIGHT = 0.35
+VOI_UNCERTAINTY_WEIGHT = 0.20
+
+#: Floor for the ``mu_bind`` spread used to express ``sigma_bind`` (min-max
+#: normalised in ``[0, 1]``) in binding units. 0.05 log10 Kd is well below a
+#: typical realised span, so it only binds on a degenerate pool.
+MU_SPAN_FLOOR = 0.05
 
 SLOT_COUNT = 5
 
@@ -145,19 +211,24 @@ class SarTable(dict):
     provenance: ``support`` (how many revealed rows the table rests on) and
     ``basis`` (``"residual"`` when built from ``y_bind - mu_bind``, ``"median"``
     when only the qualified-median advantage was available).
+    
+    Also carries ``position_effects`` for hierarchical 2-level SAR: position-level
+    mutation tolerance signals active when ``n_pos >= 2`` but exact ``(p, aa)``
+    cells have ``n < 2``.
     """
 
     def __init__(self, *args, support: int = 0, basis: str = "median", **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.support = int(support)
         self.basis = basis
+        self.position_effects: dict[int, tuple[int, float]] = {}
 
 
-def _shrink(n: int) -> float:
-    """``n / (n + K)``, or 0 below :data:`SAR_MIN_OBSERVATIONS`."""
+def _shrink(n: int, k: float = SAR_SHRINKAGE_K) -> float:
+    """``n / (n + k)``, or 0 below :data:`SAR_MIN_OBSERVATIONS`."""
     if n < SAR_MIN_OBSERVATIONS:
         return 0.0
-    return n / (n + SAR_SHRINKAGE_K)
+    return n / (n + k)
 
 
 def sar_effect_table(
@@ -167,16 +238,25 @@ def sar_effect_table(
     residuals: dict[str, float] | None = None,
     min_n: int = 1,
 ) -> SarTable:
-    """Per-position/substitution effect, shrunk by its own sample size.
+    """Hierarchical 2-level Empirical-Bayes SAR: position-level + exact substitution.
 
     The effect of a substitution is measured on the **surrogate residual**
     (``y_bind - mu_bind``) whenever one is available for a revealed candidate,
-    and on the advantage over the qualified revealed median otherwise. Residuos
+    and on the advantage over the qualified revealed median otherwise. Residuals
     are the right target because the surrogate already absorbs the additive
     multi-mutation structure: a candidate that measures high *and* was predicted
     high tells us nothing about its individual mutations, whereas one that
     surprises the model does. That is what separates a real positional effect
     from co-mutation confounding.
+
+    Two levels of SAR:
+    1. **Position-level mutation tolerance** (13 positions): mean residual of all
+       revealed variants mutated at position ``p``, active when ``n_pos >= 2``.
+    2. **Exact substitution effect** (260 cells): mean residual for specific
+       ``(position, residue)`` pairs, active when ``n_cell >= 2``.
+
+    This captures mutation-tolerance signals in Rounds 1-2 when exact cells
+    rarely have ``n >= 2`` but positions often do.
 
     Only revealed rows are ever read, and only the ``(position, residue)`` pairs
     that differ from the wild type are counted. ``n < 2`` cells are omitted
@@ -210,6 +290,24 @@ def sar_effect_table(
     frame = frame.assign(_signal=signal.to_numpy())
     effects = SarTable(support=len(frame), basis=basis)
     sequences = frame.sequence.astype(str)
+    
+    # Level 1: Position-level mutation tolerance (13 positions)
+    for position in range(13):
+        column = sequences.str[position]
+        mutated = column != WT_SEQUENCE[position]
+        if not mutated.any():
+            continue
+        mutated_rows = frame.loc[mutated]
+        n_pos = int(len(mutated_rows))
+        if n_pos >= SAR_MIN_OBSERVATIONS:
+            raw_mean = float(mutated_rows._signal.mean())
+            magnitude = min(1.0, abs(raw_mean) / SAR_DELTA_SCALE)
+            effects.position_effects[position + 1] = (
+                n_pos,
+                float(np.sign(raw_mean)) * magnitude * _shrink(n_pos, SAR_SHRINKAGE_K),
+            )
+    
+    # Level 2: Exact (position, residue) cell effects (260 cells)
     for position in range(13):
         column = sequences.str[position]
         mutated = column != WT_SEQUENCE[position]
@@ -224,24 +322,59 @@ def sar_effect_table(
             magnitude = min(1.0, abs(raw) / SAR_DELTA_SCALE)
             effects[(position + 1, str(residue))] = (
                 n,
-                float(np.sign(raw)) * magnitude * _shrink(n),
+                float(np.sign(raw)) * magnitude * _shrink(n, SAR_CELL_SHRINKAGE_K),
             )
     return effects
 
 
 def _sar_total(sequence: str, effects: dict | None) -> float:
-    """Summed contribution of a candidate's non-WT substitutions."""
-    if not effects:
+    """Hierarchical SAR: ``0.60 · exact cell + 0.40 · position tolerance``.
+
+    Two Empirical-Bayes residual signals are combined:
+
+    1. **Position-level mutation tolerance** (13 positions) — the mean residual
+       of every revealed variant mutated at position ``p``, shrunk by
+       ``n_pos / (n_pos + 3)`` and active once ``n_pos >= 2``. This is what
+       survives the cold start: Rounds 1-2 almost never produce two
+       observations of the *same* ``(position, residue)`` pair, but they
+       routinely produce two observations at the same position.
+    2. **Exact substitution effect** (260 cells) — the mean residual of that
+       specific ``(position, residue)`` pair, shrunk by ``n_cell / (n_cell + 2)``
+       and active once ``n_cell >= 2``.
+
+    Mutation tolerance is symmetric: if mutating ``p`` consistently measures
+    *worse*, conserving the WT residue at ``p`` earns the mirror-image reward, so
+    the term can both promote a substitution and defend a conserved anchor.
+
+    The exact cell carries the larger weight because it is the narrower,
+    better-identified hypothesis; the position term is the fallback that keeps
+    ``Δ_agent`` informative before any exact cell can qualify.
+    """
+    pos_effects = getattr(effects, "position_effects", None) or {}
+    if not effects and not pos_effects:
         return 0.0
+
     total = 0.0
     for position in range(13):
         residue = sequence[position]
+        pos_key = position + 1
+        pos_stat = pos_effects.get(pos_key)
+
         if residue == WT_SEQUENCE[position]:
+            # Conserved residue: rewarded only when mutating here is measured bad.
+            if pos_stat is not None and float(pos_stat[1]) < 0:
+                total -= SAR_POSITION_WEIGHT * SAR_HIT_WEIGHT * float(pos_stat[1])
             continue
-        stat = effects.get((position + 1, residue))
-        if stat is None:
-            continue
-        total += SAR_HIT_WEIGHT * float(stat[1])
+
+        # Level 2: exact (position, residue) cell effect.
+        cell_stat = effects.get((pos_key, residue)) if effects else None
+        if cell_stat is not None:
+            total += SAR_CELL_WEIGHT * SAR_HIT_WEIGHT * float(cell_stat[1])
+
+        # Level 1: position-level mutation tolerance.
+        if pos_stat is not None:
+            total += SAR_POSITION_WEIGHT * SAR_HIT_WEIGHT * float(pos_stat[1])
+
     return total
 
 
@@ -271,15 +404,69 @@ def _soft_prior_total(
     **inverted**: the system already knows that residue does not help, so a
     candidate carrying it should be pushed down rather than merely unboosted.
     """
+    return _soft_prior_total_weighted(sequence, priors, falsified_positions, None)
+
+
+def _soft_prior_total_weighted(
+    sequence: str,
+    priors: list[PositionalSoftPrior],
+    falsified_positions: set[int] | frozenset[int],
+    scale: "Callable[[PositionalSoftPrior], float] | None",
+) -> float:
+    """``_soft_prior_total`` with an optional per-prior weight multiplier."""
     total = 0.0
     for prior in priors:
+        weight = abs(prior.weight_delta) * (1.0 if scale is None else float(scale(prior)))
+        if weight == 0.0:
+            continue
         residue = sequence[prior.position - 1]
         sign = -1.0 if prior.position in falsified_positions else 1.0
         if residue in prior.preferred_residues:
-            total += sign * abs(prior.weight_delta)
+            total += sign * weight
         elif residue in prior.discouraged_residues:
-            total -= sign * abs(prior.weight_delta)
+            total -= sign * weight
     return total
+
+
+def _empirical_position_value(
+    sar_effects: dict | None, position: int, residue: str
+) -> float | None:
+    """The measured SAR effect at ``(position, residue)``, or ``None`` if unmeasured.
+
+    Prefers the exact corroborated ``(position, residue)`` cell — the narrow,
+    better-identified claim — and falls back to the position-tolerance effect,
+    which averages several residues together. Returns ``None`` rather than ``0.0``
+    when neither level has ``n >= 2`` observations, because "not measured yet" and
+    "measured to be zero" call for opposite treatment of a declared prior.
+
+    Written with explicit ``len()`` checks: ``SarTable`` subclasses ``dict``, so a
+    Round-1 table holding only position effects is falsy while carrying real
+    evidence.
+    """
+    position_effects = getattr(sar_effects, "position_effects", None) or {}
+    cell = None
+    if isinstance(sar_effects, dict) and len(sar_effects):
+        entry = sar_effects.get((position, residue))
+        if entry is not None:
+            cell = float(entry[1])
+    if cell is not None:
+        return cell
+    entry = position_effects.get(position)
+    if entry is not None:
+        return float(entry[1])
+    return None
+
+
+def _has_empirical_sar(sar_effects: dict | None) -> bool:
+    """Whether the table holds *any* corroborated evidence, at either level.
+
+    Not ``bool(sar_effects)``: a ``SarTable`` with zero exact cells but three
+    position-tolerance effects has evidence but is falsy.
+    """
+    if sar_effects is None:
+        return False
+    position_effects = getattr(sar_effects, "position_effects", None) or {}
+    return len(sar_effects) > 0 or len(position_effects) > 0
 
 
 def _saturate(value: float, bound: float) -> float:
@@ -306,15 +493,52 @@ def adaptive_prior_score(
     falsified_positions: set[int] | frozenset[int] = frozenset(),
     bound: float = AGENT_PRIOR_BOUND,
 ) -> float:
-    """``Δ_agent``: summed soft priors **plus** the shrunk empirical SAR term.
+    """``Δ_agent``: measured SAR evidence **gated against** declared priors.
 
-    Both terms are evidence about the same candidate, so they are summed before
-    saturation. ``A_H1 = A_base + Δ_agent``: the adaptive term is an *additive*
-    re-ranking on top of the unbiased surrogate, never a filter, and
-    ``|Δ_agent| ≤ 0.06`` keeps the surrogate in charge of the ordering.
+    ``A_H1 = A_base + Δ_agent``: the adaptive term is an *additive* re-ranking on
+    top of the unbiased surrogate, never a filter, and ``|Δ_agent| ≤ 0.06`` keeps
+    the surrogate in charge of the ordering.
+
+    Both terms are summed at **full weight** (:data:`SAR_EMPIRICAL_WEIGHT` and
+    :data:`DECLARED_PRIOR_WEIGHT` are both ``1.0``). The only reconciliation is a
+    **sign gate**, applied when the table has corroborated evidence
+    (:func:`_has_empirical_sar`) *and* the caller declared priors:
+
+    * a declared prior whose claim has the **opposite** sign to the measured
+      effect at its position is dropped — averaging a belief together with its own
+      negation is not a belief;
+    * an agreeing prior keeps full weight;
+    * a prior at a position the table has **not** corroborated keeps full weight,
+      because there it is the only evidence that exists. That is what lets a
+      council speak before the lab has measured anything;
+    * a cold table disables the gate entirely, so early rounds are unchanged.
+
+    Discounting the two terms instead (a ``0.85 / 0.15`` split, tried and rejected)
+    was the wrong instrument: it attenuates ``Δ_agent`` before ``tanh`` no matter
+    *who* disagrees, and ``Δ_agent`` is the only part of ``A_H1`` the surrogate
+    does not already contain. On 100 seeds it cost ``0.0013`` AUBQC while changing
+    no ranking decision the sign gate would not have changed anyway.
     """
-    raw = _soft_prior_total(sequence, list(priors), falsified_positions) + _sar_total(sequence, sar_effects)
-    return _saturate(raw, bound)
+    declared = list(priors)
+    if not declared or not _has_empirical_sar(sar_effects):
+        raw = _soft_prior_total(sequence, declared, falsified_positions) + _sar_total(sequence, sar_effects)
+        return _saturate(raw, bound)
+
+    def keep_or_drop(prior: PositionalSoftPrior) -> float:
+        measured = _empirical_position_value(sar_effects, prior.position, sequence[prior.position - 1])
+        if measured is None:
+            # Uncorroborated position: the declared rule is the only evidence here.
+            return DECLARED_PRIOR_WEIGHT
+        # Agreement is judged on the rule's *claim*, not on this candidate's
+        # residue: "A helps at position 1" is contradicted when position 1
+        # measured negative, whichever residue the candidate happens to carry.
+        claimed = 1.0 if prior.preferred_residues else (-1.0 if prior.discouraged_residues else 0.0)
+        if claimed != 0.0 and np.sign(measured) not in (0.0, claimed):
+            return 0.0
+        return DECLARED_PRIOR_WEIGHT
+
+    declared_term = _soft_prior_total_weighted(sequence, declared, falsified_positions, keep_or_drop)
+    return _saturate(SAR_EMPIRICAL_WEIGHT * _sar_total(sequence, sar_effects) + declared_term, bound)
 
 
 def positional_priors_from_revealed(
@@ -397,20 +621,67 @@ def horizon_factor(
     return float(min(1.0, future_queries / denom))
 
 
-def sar_maturity_score(delta_agent) -> float:
-    """Empirical SAR convergence ``C`` in ``[0, 1]``.
+#: How many corroborated evidence units count as a "mature" SAR table. An exact
+#: ``(position, residue)`` cell is a full unit and a position-tolerance effect is
+#: half a unit, so a table with ~7 corroborated cells (or the equivalent mix)
+#: reaches ``C == 1.0``.
+SAR_MATURITY_UNITS = 10.0
 
-    ``C`` is how strongly the qualified frontier is *already* corroborated by
-    positive SAR evidence::
+#: Weight of one position-tolerance effect in those units. Deliberately below
+#: 1.0: a position effect is a *weaker* claim than an exact substitution effect
+#: (it averages several residues together), so it should take twice as many of
+#: them to declare the frontier explained.
+SAR_POSITION_MATURITY_WEIGHT = 0.5
 
-        C = min(1, max(0, max(Δ_agent)) / (0.5 · AGENT_PRIOR_BOUND))
 
-    Half the adaptive prior bound is the "established" bar: once some unqueried
-    qualified candidate sits at half the maximum the prior can contribute, the
-    substitution that carries it is no longer a live question — continuing to
-    spend a slot falsifying it buys nothing.
+def sar_maturity_score(evidence=None) -> float:
+    """Empirical SAR convergence ``C`` in ``[0, 1]`` from *corroborated* support.
+
+    The quantity is "how much of the frontier is already explained by evidence",
+    so it must be a function of the **evidence table**, not of the largest
+    ``Δ_agent`` in the candidate pool::
+
+        C = min(1, (n_cells + 0.5 · n_pos) / 10)
+
+    where ``n_cells`` counts exact ``(position, residue)`` cells with ``n >= 2``
+    and ``n_pos`` counts position-tolerance effects with ``n_pos >= 2``. Both are
+    exactly what :func:`sar_effect_table` already filters for, so the score is
+    read straight off the table rather than re-derived.
+
+    Why not the old ``max(Δ_agent) / (0.5 · AGENT_PRIOR_BOUND)`` rule: a single
+    saturated candidate clears that bar in the *first* round, so ``C`` read
+    ``1.000`` in every round and ``VoI`` collapsed to a constant ``0.35 · H``
+    line. The campaign then lost its cold-start exploration and the reported
+    ``sar_maturity`` carried no information at all. Counting corroborated cells
+    instead makes ``C`` start near 0.0-0.2 on five seed reveals and genuinely
+    climb as the SAR support accumulates.
+
+    ``None`` means "no evidence table at all" and scores ``0.0``. A ``dict`` or
+    :class:`SarTable` is read structurally. **Never** test the evidence with
+    ``if not sar_effects``: ``SarTable`` subclasses ``dict``, so a Round-1 table
+    with zero exact cells but three position effects is falsy while carrying real
+    evidence — that bug would silently zero the maturity exactly when it matters.
+
+    A plain sequence/array is accepted for backward compatibility with callers
+    that still pass a ``Δ_agent`` vector; those fall back to the legacy
+    max-``Δ_agent`` rule so existing unit tests and third-party callers keep
+    their meaning.
     """
-    values = np.asarray(list(delta_agent), dtype=float) if len(delta_agent) else np.empty(0)
+    if evidence is None:
+        return 0.0
+    if isinstance(evidence, dict) or hasattr(evidence, "position_effects"):
+        # ``len()`` counts exact cells only; ``SarTable.position_effects`` holds
+        # the position-tolerance level. Both are already n >= 2 corroborated.
+        n_cells = int(len(evidence))
+        position_effects = getattr(evidence, "position_effects", None) or {}
+        n_pos = int(len(position_effects))
+        if n_cells == 0 and n_pos == 0:
+            return 0.0
+        units = n_cells + SAR_POSITION_MATURITY_WEIGHT * n_pos
+        return float(np.clip(units / SAR_MATURITY_UNITS, 0.0, 1.0))
+    # Legacy path: a ``Δ_agent`` vector. Documented as deprecated but kept so a
+    # caller that has no SAR table still gets a monotone, bounded number.
+    values = np.asarray(list(evidence), dtype=float) if len(evidence) else np.empty(0)
     values = values[np.isfinite(values)]
     max_pos_delta = max(0.0, float(np.max(values))) if values.size else 0.0
     return float(min(1.0, max_pos_delta / (0.5 * AGENT_PRIOR_BOUND)))
@@ -431,22 +702,81 @@ def value_of_information(horizon: float, sar_maturity: float) -> float:
 
 
 def voi_context(
-    delta_agent,
+    sar_effects=None,
     *,
     queries_spent: int,
     total_budget: int,
     batch_size: int = SLOT_COUNT,
 ) -> dict:
-    """``(H, C, VoI)`` for one batch.
+    """``(H, C, VoI)`` for one batch, driven by the **evidence table**.
+
+    The first positional argument is the corroborated SAR evidence
+    (:class:`SarTable`), not the ``Δ_agent`` candidate vector it used to be.
+    Maturity has to be a property of what the loop has *learned*, and a pool
+    statistic cannot express that: one saturated candidate cleared the old bar in
+    Round 1 and pinned ``C`` at ``1.000`` for all six rounds. Callers that still
+    pass a sequence fall back to the legacy rule (see
+    :func:`sar_maturity_score`), so the signature stays source-compatible.
 
     ``VoI`` now drives exactly one decision — how much slot 3 may pay for
-    exploration. There is no "harvest mode" flag any more: slot 5 tests the null
-    baseline on every batch, because the H0 control is a definition, not a phase.
+    exploration and how much of ``a_null`` stays on exploration rather than
+    qualified binding. There is no "harvest mode" flag any more: slot 5 tests the
+    null baseline on every batch, because the H0 control is a definition, not a
+    phase.
     """
     horizon = horizon_factor(queries_spent, total_budget=total_budget, batch_size=batch_size)
-    maturity = sar_maturity_score(delta_agent)
+    maturity = sar_maturity_score(sar_effects)
     voi = value_of_information(horizon, maturity)
     return {"horizon": horizon, "sar_maturity": maturity, "voi": voi}
+
+
+# ── VoI-annealed qualified binding objective ─────────────────────────────────
+def voi_annealed_null_objective(pool: pd.DataFrame, voi: float) -> pd.Series:
+    """M5's qualified baseline: exploration early, pure binding exploitation late.
+
+    Every candidate reaching this point already satisfies ``y_dev >= tau_dev``,
+    so the qualification margin is settled information. Continuing to pay for it
+    — and for ``beta_0 = 1.0``'s raw, min-max-stretched tree variance, which
+    weights noisy ensemble disagreement exactly like a 100-fold affinity
+    difference — is what made M5 spend Rounds 2-6 on high-variance,
+    mediocre-``mu_bind`` candidates while a plain greedy ``mu_bind`` run (M2)
+    built a strictly better dataset.
+
+    The blend is driven by ``VoI``, not by a round counter::
+
+        exploit_weight = 1 - 0.35 * VoI
+        objective      = (1 - exploit_weight) · a_base
+                         + exploit_weight · (mu_bind_norm + 0.20 · VoI · sigma_bind_calibrated)
+
+    ``VOI_EXPLOIT_WEIGHT`` is a *calibration*, not a free parameter, and it was
+    fitted on a two-fold split so it is not a number chosen to flatter the reported
+    seeds — see the constant's comment for the sweep and the holdout result. By the
+    final batch (``VoI -> 0``) ``exploit_weight`` is 1.0 and the objective is
+    exactly the normalised predicted affinity.
+
+    ``sigma_bind`` is calibrated **into ``mu_bind`` units** by dividing by the
+    pool's ``ptp(mu_bind)``. It is deliberately *not* min-max normalised back to
+    ``[0, 1]`` afterwards: that would undo the calibration and restore the very
+    scale mismatch this term exists to remove. Because ``sigma_bind`` arrives
+    already min-max normalised, the divisor carries a floor
+    (:data:`MU_SPAN_FLOOR`) so a degenerate pool cannot blow the uncertainty
+    term up by orders of magnitude.
+    """
+    if "mu_bind" not in pool.columns:
+        # A frame without surrogate means (only reachable from a synthetic
+        # fixture) has no qualified binding objective to blend in.
+        return pool["a_base"].astype(float)
+    mu_bind = pool["mu_bind"].astype(float)
+    sigma_bind = (
+        pool["sigma_bind"].astype(float) if "sigma_bind" in pool.columns else pd.Series(0.0, index=pool.index)
+    )
+    mu_span = max(float(np.ptp(mu_bind.to_numpy())), MU_SPAN_FLOOR)
+    mu_bind_norm = (mu_bind - mu_bind.min()) / mu_span
+    sigma_bind_calibrated = sigma_bind / mu_span
+    bounded_voi = float(np.clip(voi, 0.0, 1.0))
+    exploit_weight = 1.0 - VOI_EXPLOIT_WEIGHT * bounded_voi
+    qualified_exploit = mu_bind_norm + VOI_UNCERTAINTY_WEIGHT * bounded_voi * sigma_bind_calibrated
+    return (1.0 - exploit_weight) * pool["a_base"].astype(float) + exploit_weight * qualified_exploit
 
 
 # ── The 5-slot portfolio ─────────────────────────────────────────────────────
@@ -482,27 +812,34 @@ def select_five_slots(
 
         VoI = H · (1 - 0.65 · C)
 
-    The five slots are then:
+    ``A_null`` is **not** ``A_base`` any more. Because every pool member already
+    clears ``y_dev >= tau_dev``, the objective is first re-expressed as a
+    VoI-annealed blend between early exploration and pure qualified binding (see
+    the inline derivation below). ``A_base`` still enters that blend, so early
+    rounds keep the unbiased surrogate's exploration, but by the final batch it
+    is fully displaced by ``mu_bind_norm``.
+
+    The five slots implement a 3-exploit / 2-experimental split:
 
     1-2  top 2 by ``A_H1`` — core exploitation.
-    3    ``A_H1 + 0.50 · VoI · sigma_joint`` maximised over the whole pool. As
-         ``VoI -> 0`` (SAR already corroborated, or ``future_queries == 0`` on the
-         final batch) the bonus vanishes and slot 3 *is* a pure ``A_H1``
+    3    ``A_H1 + 0.25 · VoI · sigma_joint`` maximised over the *remaining* pool.
+         As ``VoI -> 0`` (SAR already corroborated, or ``future_queries == 0`` on
+         the final batch) the bonus vanishes and slot 3 *is* a pure ``A_H1``
          exploitation slot, without a hand-written round switch. Raw
          ``max sigma_joint`` is deliberately not used: unconstrained, it picks
          the least-informed candidate in the pool regardless of whether that
          candidate could ever win.
-    4    ``A_H1 + 0.50 · max(0, Δ_agent)`` — the H1 promotion arm: a candidate the
-         learned SAR / agent hypothesis actively favours is tested above its raw
-         surrogate rank. The bonus is small (``<= 0.03``) so it re-ranks
-         neighbours without overriding the surrogate.
-    5    top ``A_base`` — the H0 null-baseline control, i.e. what M3 would have
-         queried next. The null hypothesis is ``Δ_agent == 0``, **not**
-         ``Δ_agent <= 0``. Banning every positively-boosted candidate would make
-         the lab boycott its own proven substitutions for a fifth of every early
-         batch. Whenever slots 1-4 promote a hypothesis candidate over ``A_base``,
-         slot 5 automatically picks up the displaced baseline candidate, giving a
-         clean H1-vs-H0 comparison without ever banning evidence.
+    4    the next best remaining ``A_H1`` — with ``SLOT4_AGENT_BOOST = 0.0`` the
+         promotion bonus is off, so this is a *third* pure exploitation slot.
+         ``Δ_agent > 0`` can only break ties. Empirically the 0.5 boost cost M5
+         its AUBQC edge over M3 on early rounds, because it spent a slot on a
+         hypothesis candidate whose surrogate rank did not justify it.
+    5    top ``A_null`` — the H0 null-baseline control. ``Δ_agent == 0`` is the
+         hypothesis under test, so the control is the best remaining candidate on
+         the *unmodified* baseline. Whenever slots 1-4 promote a hypothesis
+         candidate over that baseline, slot 5 automatically picks up the
+         displaced one, giving a clean H1-vs-H0 comparison without ever banning
+         evidence.
 
     Slots 4 and 5 are chosen on the *same* batch, so every round yields a direct
     H1-vs-H0 comparison for
@@ -543,22 +880,23 @@ def select_five_slots(
         )
         for s in frame.sequence
     ]
-    # ``a_null`` is the null *baseline* (Δ_agent == 0), not "A_base plus M4's
-    # prior". Retaining the historical column name keeps the ledger schema stable
-    # while making its meaning exact.
-    frame["a_null"] = frame.a_base
-    frame["a_h1"] = frame.a_null + frame.delta_agent
     pool = qualified_pool(frame, tau_dev)
 
-    # ``C`` is measured over the *qualified* pool, i.e. over the candidates the
-    # batch could actually spend a slot on, not over optimistically-scored
-    # candidates that can never be queried.
+    # ``C`` is measured from the **corroborated SAR table** (exact cells plus
+    # position-tolerance effects), i.e. from evidence the loop has actually
+    # accumulated — not from ``max(Δ_agent)`` over the pool, which a single
+    # saturated candidate clears in Round 1 and which therefore pinned
+    # ``sar_maturity`` at 1.000 for every round. Computed *before* ``a_null``
+    # because the VoI-annealed objective below depends on it.
     context = voi_context(
-        pool.delta_agent.to_numpy(),
+        sar_effects,
         queries_spent=int(queries_spent),
         total_budget=int(total_budget),
         batch_size=int(batch_size),
     )
+
+    pool = pool.assign(a_null=voi_annealed_null_objective(pool, float(context["voi"])))
+    pool = pool.assign(a_h1=pool.a_null + pool.delta_agent)
     pool = pool.assign(
         horizon=context["horizon"],
         sar_maturity=context["sar_maturity"],
@@ -589,17 +927,27 @@ def select_five_slots(
     rest = remaining()
     take(best(rest, "optimistic"), SLOT3_LABEL)
 
-    # Slot 4: H1 promotion arm. The planner's declared target can only
-    # *tie-break*; it can never force a candidate the acquisition score does not
-    # rank.
+    # Slot 4: third exploitation slot. With ``SLOT4_AGENT_BOOST == 0.0``
+    # ``agent_promoted`` is ``a_h1`` plus the positive part of ``Δ_agent``
+    # multiplied by zero — i.e. exactly ``a_h1``. The sort explicitly falls back
+    # to ``Δ_agent`` and then candidate id so a tie between equal-``a_h1``
+    # candidates still prefers the hypothesis-favoured one, which is the only
+    # role the agent boost retains.
     rest = remaining()
-    take(best(rest, "agent_promoted"), SLOT4_LABEL)
+    if rest.empty:
+        return selected
+    slot4 = rest.sort_values(
+        ["a_h1", "delta_agent", "candidate_id"], ascending=[False, False, True]
+    ).iloc[0]
+    take(slot4, SLOT4_LABEL)
 
     # Slot 5: H0 null-baseline control. ``Δ_agent == 0`` is the hypothesis under
     # test, so the control is the best remaining candidate on the *unmodified*
-    # baseline — the one M3 would query next. If slots 1-4 promoted a hypothesis
-    # candidate over that baseline, this slot now tests the displaced one.
+    # baseline. Both arms are scored on the same VoI-annealed objective, so the
+    # paired audit compares hypothesis-vs-null rather than exploration-vs-null.
     rest = remaining()
+    if rest.empty:
+        return selected
     take(best(rest, "a_null"), SLOT5_FALSIFY_LABEL)
 
     picked = [row["candidate_id"] for row in selected]

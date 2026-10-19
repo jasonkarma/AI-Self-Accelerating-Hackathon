@@ -1,6 +1,13 @@
 import numpy as np
 
-from core.baselines import METHODS, _spearman_or_none, run_benchmark, run_method
+from core.baselines import (
+    METHODS,
+    PAIRED_METRICS,
+    WARM_START_METHOD,
+    _spearman_or_none,
+    run_benchmark,
+    run_method,
+)
 from core.constants import WT_SEQUENCE
 from core.developability import RiskNormalizer
 from data.datasets import generate_fixture
@@ -87,6 +94,54 @@ def test_run_benchmark_emits_all_four_self_learning_metrics():
     assert all(0.0 <= value <= 1.0 for value in report["top_decile_hit_rate"].values())
     # M1 has no model, so its rank correlation is reported as null, not zero.
     assert all(row["m1_random"] is None for row in report["spearman_rho_curves"])
+
+
+def test_warm_start_is_a_separate_ablation_with_its_own_normalisation_floor():
+    """``m5_warm_start`` must not be folded into the matched M1-M5 comparison.
+
+    Its Round 0 is a *different* batch of five queries, so:
+    * it lives under its own key, never inside ``curves``/``aubqc``; and
+    * its normalized curve is measured from the seed's **matched random**
+      ``y*(5)``, not from its own (stronger) start. Normalizing against the warm
+      start's own floor would shrink the headroom it is measured against and
+      report a *lower* fraction of achievable gain for a strictly better start —
+      which is exactly the `0.0237` artefact this test pins down.
+    """
+    frame, norm, tau, _ = _setup(140)
+    report = run_benchmark(frame, norm, tau, seeds=2)
+    warm = report["m5_warm_start"]
+    for key in ("definition", "curves", "top5_panel_curves", "summary", "initial_ids"):
+        assert key in warm, key
+    # The matched-seed rows never contain the ablation.
+    assert WARM_START_METHOD not in report["aubqc"]
+    assert all(WARM_START_METHOD not in row for row in report["curves"])
+    # Its own initial ids differ from M1-M5's matched draws, except by collision.
+    matched = report["matched_initial_seeds"]
+    assert any(set(warm["initial_ids"][seed]) != set(matched[seed]) for seed in matched)
+
+    # The floor is the matched random q=5 score, shared with M5, so a warm start
+    # that is at least as good as the matched seed is normalised to >= its own
+    # raw headroom fraction rather than to a shrunk one.
+    summary = warm["summary"]
+    assert 0.0 <= summary["normalized_aubqc"] <= 0.2 + 1e-9
+    assert summary["aubqc"] >= report["aubqc"]["m5_hybrid"] - 0.5
+
+
+def test_paired_tests_cover_both_requested_comparisons():
+    frame, norm, tau, _ = _setup(90)
+    report = run_benchmark(frame, norm, tau, seeds=3)
+    paired = report["paired_t_tests"]
+    for key in ("m5_hybrid_minus_m3_ucb", "m5_hybrid_minus_m2_greedy"):
+        assert key in paired, key
+        stats = paired[key]["metrics"]
+        assert set(stats) == set(PAIRED_METRICS)
+        for metric, block in stats.items():
+            assert block["metric"] == metric
+            assert block["n"] == 3
+            assert 0 <= block["seeds_won"] <= block["n"]
+    # The exact t distribution is used, so a large effect gives a small p.
+    rho = paired["m5_hybrid_minus_m3_ucb"]["metrics"]["spearman_rho_at_q35"]
+    assert 0.0 <= rho["p_value"] <= 1.0
 
 
 def test_top_decile_threshold_is_the_pool_ninety_ninth_percentile_definition():

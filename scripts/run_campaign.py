@@ -37,6 +37,7 @@ os.environ["M5_POLICY_MODE"] = "live_agent"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.server import initialize  # noqa: E402
+from core.acquisition import VOI_EXPLOIT_WEIGHT  # noqa: E402
 from core.baselines import LiveAgentPolicy  # noqa: E402
 from core.schemas import RoundDecisionRecord  # noqa: E402
 from config.settings import SETTINGS  # noqa: E402
@@ -97,18 +98,100 @@ class Console:
 
 CONSOLE = Console()
 
-#: Methods shown beside the live run. ``m5_hybrid`` is the **10-seed benchmark**
-#: M5 (``AdaptiveToolPolicy`` driving the same portfolio), not the council — it
-#: is labelled "M5 (10-seed)" so it can never be mistaken for the live number,
-#: which is reported separately as "live M5".
+#: Methods shown beside the live run. ``m5_hybrid`` is the **benchmark** M5
+#: (``AdaptiveToolPolicy`` driving the same portfolio), not the council — it is
+#: labelled with the artifact's own seed count so it can never be mistaken for
+#: the live number, which is reported separately as "live M5".
 BASELINE_METHODS = ("m1_random", "m2_greedy", "m3_ucb", "m4_fixed_prior", "m5_hybrid")
-BASELINE_LABELS = {
+BASE_BASELINE_LABELS = {
     "m1_random": "M1",
     "m2_greedy": "M2",
     "m3_ucb": "M3",
     "m4_fixed_prior": "M4",
-    "m5_hybrid": "M5 (10-seed)",
+    "m5_hybrid": "M5",
 }
+
+
+def baseline_labels(benchmark: dict | None) -> dict[str, str]:
+    """M5's label carries the artifact's seed count, so it is never misread."""
+    seeds = (benchmark or {}).get("seeds")
+    suffix = f" ({seeds}-seed)" if seeds else ""
+    return {**BASE_BASELINE_LABELS, "m5_hybrid": f"M5{suffix}"}
+
+
+def live_seed_index(campaign, benchmark: dict | None) -> int | None:
+    """Which benchmark seed the live campaign's Round-0 batch corresponds to.
+
+    ``Campaign.execute_round`` seeds its five initial queries with
+    ``np.random.default_rng(0)``, and ``run_benchmark`` uses
+    ``np.random.default_rng(seed)`` for the same draw — so the live campaign *is*
+    benchmark seed 0. The artifact records every seed's ``initial_ids``; matching
+    them is far more trustworthy than assuming the index, because it fails closed
+    if either side's seeding ever changes.
+    """
+    matched = (benchmark or {}).get("matched_initial_seeds") or {}
+    revealed = campaign.revealed()
+    if revealed.empty:
+        return None
+    seed_ids = set(revealed.loc[revealed.round_number == 0, "candidate_id"].astype(str))
+    for seed, ids in matched.items():
+        if set(map(str, ids)) == seed_ids:
+            return int(seed)
+    return None
+
+
+def _live_seed_checkpoint(campaign) -> float:
+    """The live campaign's own ``y*(5)`` — its Round-0 seed batch score."""
+    revealed = campaign.revealed()
+    if revealed.empty:
+        return float("nan")
+    seed = revealed[revealed.round_number == 0]
+    qualified = seed[seed.y_dev >= campaign.protocol["tau_dev"]]
+    pool = qualified if len(qualified) else seed
+    return float(pool.y_bind.max()) if len(pool) else float("nan")
+
+
+def seed_matched_baselines(campaign, benchmark: dict | None, seed: int) -> dict | None:
+    """M1-M5 numbers for the *live campaign's own seed*.
+
+    A 100-seed median answers "does the design work on average?". It cannot
+    attribute this campaign's result: a seed whose five random probes contain no
+    qualified binder starts from a lower ``y*(5)`` and has more headroom, so the
+    single run and the median are not the same quantity. Re-running the five
+    matched baselines on the identical seed costs a couple of seconds and makes
+    the comparison like-for-like.
+    """
+    if benchmark is None:
+        return None
+    try:
+        from core.baselines import METHODS, run_method
+        from core.developability import RiskNormalizer
+        from core.preregistration import load_protocol
+        from data.datasets import load_primary
+
+        frame, synthetic = load_primary()
+        protocol = campaign.protocol or load_protocol()
+        normalizer = RiskNormalizer.from_dict(protocol["normalizer"])
+        initial = [str(cid) for cid in (benchmark.get("matched_initial_seeds") or {}).get(str(seed), [])]
+        if len(initial) != 5:
+            return None
+        # ``seed_floor`` stays at its default: these five methods share the same
+        # Round-0 batch, so their normalized curves have the same 0% mark anyway.
+        results = {
+            method: run_method(frame, normalizer, protocol["tau_dev"], method, seed, initial)
+            for method in METHODS
+        }
+    except Exception as exc:  # noqa: BLE001 - a report must never fail the run
+        print(f"  {CONSOLE.paint(f'same-seed baselines unavailable: {exc}', 'yellow')}")
+        return None
+    return {
+        method: {
+            "q5": float(next(p["best_qualified_binding"] for p in result.curve if p["query_count"] == 5)),
+            "q35": float(next(p["best_qualified_binding"] for p in result.curve if p["query_count"] == 35)),
+            "aubqc": float(result.aubqc),
+        }
+        for method, result in results.items()
+    }
 
 
 def load_benchmark(path: Path | None = None) -> dict | None:
@@ -128,12 +211,78 @@ def _fmt(value: Any, width: int = 6) -> str:
     return f"{'n/a' if not math.isfinite(number) else f'{number:.3f}':>{width}}"
 
 
+def print_voi_trajectory(campaign) -> None:
+    """Per-round ``VoI`` / ``sar_maturity`` trajectory from the ledger.
+
+    Read from the persisted ``round_slots`` events rather than from
+    ``state["voi_diagnostics"]``, which only holds the *last* batch. The whole
+    point of the empirical ``C`` is that it is a trajectory — thin in Round 1,
+    rising as corroborated SAR accumulates — and a single final number cannot
+    show that. The ``CELLS``/``POS`` columns are the evidence ``C`` was computed
+    from, read from the same revealed ledger the selector saw.
+    """
+    from core.acquisition import sar_effect_table
+
+    with campaign.ledger.connect() as con:
+        rows = con.execute(
+            "SELECT round_number, payload FROM entries WHERE round_number > 0 "
+            "AND event_type='round_slots' ORDER BY sequence_no"
+        ).fetchall()
+
+    CONSOLE.section("VOI / SAR MATURITY TRAJECTORY")
+    if not rows:
+        print(f"  {CONSOLE.paint('no round_slots events in the ledger', 'yellow')}")
+        return
+
+    revealed = campaign.revealed()
+    tau_dev = campaign.protocol["tau_dev"]
+    print(CONSOLE.paint(
+        f"  {'ROUND':6} {'q':>4} {'VoI':>7} {'H':>6} {'C':>7} {'EXPLOIT':>8} {'CELLS':>6} {'POS':>4}",
+        "dim",
+    ))
+    seen: set[int] = set()
+    for row in rows:
+        round_number = int(row["round_number"])
+        slots = (json.loads(row["payload"]).get("slots") or [])
+        if not slots or round_number in seen:
+            continue
+        seen.add(round_number)
+        lead = slots[0]
+        voi = float(lead.get("voi") or 0.0)
+        # The batch is designed from the reveals *before* it, i.e. rounds < it.
+        before = revealed[revealed.round_number < round_number]
+        effects = sar_effect_table(before, tau_dev=tau_dev)
+        print(
+            f"  R{round_number:<5} {int(len(before)):>4} {voi:>7.4f} "
+            f"{float(lead.get('horizon') or 0.0):>6.2f} {float(lead.get('sar_maturity') or 0.0):>7.4f} "
+            f"{1.0 - VOI_EXPLOIT_WEIGHT * voi:>8.4f} {len(effects):>6} {len(effects.position_effects):>4}"
+        )
+    print(
+        f"  {CONSOLE.paint(f'exploit_weight = 1 - {VOI_EXPLOIT_WEIGHT}·VoI; C = min(1, (cells + 0.5·pos) / 10)', 'dim')}"
+    )
+
+
 def print_benchmark_comparison(campaign) -> None:
-    """Compact q=35 comparison of this live run against M1-M5 (10-seed)."""
+    """Compact q=35 comparison of this live run against M1-M5.
+
+    Reports **two** references, because they answer different questions:
+
+    * the **same-seed** baselines — M1-M5 re-run on the live campaign's own five
+      Round-0 queries. This is the like-for-like number: same starting hand, same
+      pool, same budget;
+    * the **100-seed median** — does the design work on average?
+
+    They are never averaged together, and the live run is never compared to the
+    median alone. A seed whose five random probes happen to contain no qualified
+    binder starts from a lower ``y*(5)`` and therefore has *more* headroom, so
+    ``AUBQC`` and ``y*(q)`` from a single run and from a seed median are not the
+    same quantity.
+    """
     benchmark = load_benchmark()
     kpis = campaign.state["kpis"]
     live_best = float(kpis["best_qualified_binding"])
     live_aubqc = campaign.aubqc()
+    seed = live_seed_index(campaign, benchmark)
 
     CONSOLE.section("BASELINE COMPARISON · q=35")
     if not benchmark:
@@ -146,22 +295,56 @@ def print_benchmark_comparison(campaign) -> None:
         final = max(curves, key=lambda row: int(row.get("query_count", 0)))
     final = final or {}
     aubqc = benchmark.get("aubqc") or {}
+    labels = baseline_labels(benchmark)
 
     cells = "".join(
-        f"  {BASELINE_LABELS[method]} {_fmt(final.get(method))}"
+        f"  {labels[method]} {_fmt(final.get(method))}"
         for method in BASELINE_METHODS
     )
     CONSOLE.kv("best qualified binding", f"live M5 {_fmt(live_best)}" + cells)
     aubqc_cells = "".join(
-        f"  {BASELINE_LABELS[method]} {_fmt(aubqc.get(method))}"
+        f"  {labels[method]} {_fmt(aubqc.get(method))}"
         for method in BASELINE_METHODS
     )
     CONSOLE.kv("AUBQC (1/30 scaling)", f"live M5 {_fmt(live_aubqc)}" + aubqc_cells)
 
-    # Two comparisons, because they answer different questions: the 10-seed M5
-    # is the *same* policy family run many times (does the design work on
-    # average?), while the live M5 is one council-driven campaign (does it work
-    # here?). Both are reported, never averaged together.
+    # Same-seed reference first: it is the only comparison that attributes *this*
+    # campaign's result. The seed median follows and answers a different question.
+    # These rows use the plain ``M1..M5`` labels: they are single-seed runs, so the
+    # ``(100-seed)`` suffix would be a lie.
+    if seed is not None:
+        same = seed_matched_baselines(campaign, benchmark, seed)
+        if same:
+            same_labels = dict(BASE_BASELINE_LABELS)
+            live_q5 = _live_seed_checkpoint(campaign)
+            CONSOLE.kv(
+                f"same seed {seed} · q=5",
+                f"live {_fmt(live_q5)}"
+                + "".join(f"  {same_labels[m]} {_fmt(v['q5'])}" for m, v in same.items()),
+            )
+            CONSOLE.kv(
+                f"same seed {seed} · q=35",
+                f"live {_fmt(live_best)}"
+                + "".join(f"  {same_labels[m]} {_fmt(v['q35'])}" for m, v in same.items()),
+            )
+            CONSOLE.kv(
+                f"same seed {seed} · AUBQC",
+                f"live {_fmt(live_aubqc)}"
+                + "".join(f"  {same_labels[m]} {_fmt(v['aubqc'])}" for m, v in same.items()),
+            )
+            matched_aubqc = {m: v["aubqc"] for m, v in same.items()}
+            name, value = max(matched_aubqc.items(), key=lambda item: float(item[1]))
+            gap = live_aubqc - float(value)
+            verdict = "ahead of" if gap > 0 else ("level with" if gap == 0 else "behind")
+            print(
+                f"  {CONSOLE.paint('→', 'grey')} live M5 AUBQC {verdict} the best *same-seed* "
+                f"baseline ({same_labels[name]} {_fmt(value)}) by {gap:+.4f}"
+            )
+
+    # The 100-seed median answers "does the design work on average?" — a different
+    # question from "did it work here", and never averaged with it.
+    print()
+    print(f"  {CONSOLE.paint('seed median (all 100 seeds) — average behaviour, not this run', 'dim')}")
     benchmark_values = {
         method: final.get(method) for method in BASELINE_METHODS if final.get(method) is not None
     }
@@ -174,7 +357,7 @@ def print_benchmark_comparison(campaign) -> None:
         verdict = "ahead of" if gap > 0 else ("level with" if gap == 0 else "behind")
         print(
             f"  {CONSOLE.paint('→', 'grey')} live M5 {verdict} the best q=35 baseline "
-            f"({BASELINE_LABELS[name]} {_fmt(value)}) by {gap:+.3f} binding units"
+            f"({labels[name]} {_fmt(value)}) by {gap:+.3f} binding units"
         )
     if benchmark_aubqc:
         name, value = max(benchmark_aubqc.items(), key=lambda item: float(item[1]))
@@ -182,15 +365,20 @@ def print_benchmark_comparison(campaign) -> None:
         verdict = "ahead of" if gap > 0 else ("level with" if gap == 0 else "behind")
         print(
             f"  {CONSOLE.paint('→', 'grey')} live M5 AUBQC {verdict} the best baseline "
-            f"({BASELINE_LABELS[name]} {_fmt(value)}) by {gap:+.4f}"
+            f"({labels[name]} {_fmt(value)}) by {gap:+.4f}"
         )
     seeds = benchmark.get("seeds", "?")
     policy = benchmark.get("m5_policy_mode", "?")
-    note = (
-        f"reference: {seeds} seeds, median best-qualified binding at q=35 "
-        f"(M5 benchmark policy={policy}); live M5 is this single campaign"
+    print(
+        f"  {CONSOLE.paint(f'seed-median reference: {seeds} seeds, median y*(q) (M5 benchmark policy={policy})', 'dim')}"
     )
-    print(f"  {CONSOLE.paint(note, 'dim')}")
+    print(
+        f"  {CONSOLE.paint('live M5 is one campaign; compare it to the same-seed row, not to the seed median', 'dim')}"
+    )
+    if seed is None:
+        print(
+            f"  {CONSOLE.paint('same-seed row unavailable: the live ledger does not match any benchmark seed', 'yellow')}"
+        )
 
 
 # ── Event rendering ───────────────────────────────────────────────────────────
@@ -431,6 +619,7 @@ async def run(args: argparse.Namespace) -> int:
         )
         CONSOLE.kv("verdicts by round", history)
     CONSOLE.kv("ledger verified", campaign.ledger.verify())
+    print_voi_trajectory(campaign)
 
     print_benchmark_comparison(campaign)
 

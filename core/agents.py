@@ -138,11 +138,17 @@ def adaptive_prior_evidence(
 ) -> dict:
     """Deterministic evidence behind ``Δ_agent``, for the planner and the fallback.
 
-    The agents' prior is the council's declared positional priors **plus** an
-    empirical-Bayes-shrunk SAR term. Both halves are shown to the planner so a
-    memo can cite *why* a substitution scores, and the same numbers feed
+    The agents' prior is the council's declared positional priors **plus** the
+    hierarchical empirical-Bayes SAR term (position-level mutation tolerance and
+    exact-substitution effects). Both are shown to the planner so a memo can cite
+    *why* a substitution scores, and the same numbers feed
     :func:`core.acquisition.adaptive_prior_score` at selection time - one code
     path, so a live run and the benchmark cannot diverge.
+
+    The position-level row matters in Rounds 1-2, where no exact ``(p, aa)`` cell
+    yet has the two observations it needs but positions routinely do. Without it
+    the planner sees an empty SAR table at exactly the moment its prior matters
+    most.
 
     Nothing here reads ``y_bind`` for an unrevealed candidate: ``ledger`` is the
     campaign's revealed frame by construction.
@@ -154,12 +160,20 @@ def adaptive_prior_evidence(
         else positional_priors_from_revealed(ledger, falsified_positions=falsified_positions)
     )
     ranked = sorted(effects.items(), key=lambda item: abs(item[1][1]), reverse=True)[:SAR_HINT_ROWS]
+    position_effects = getattr(effects, "position_effects", {}) or {}
+    ranked_positions = sorted(
+        position_effects.items(), key=lambda item: abs(item[1][1]), reverse=True
+    )
     return {
         "sar_basis": effects.basis,
         "sar_support": effects.support,
         "sar_effects": [
             {"position": position, "residue": residue, "n": n, "shrunk_effect": round(effect, 3)}
             for (position, residue), (n, effect) in ranked
+        ],
+        "position_tolerance_effects": [
+            {"position": position, "n": n, "shrunk_effect": round(effect, 3)}
+            for position, (n, effect) in ranked_positions
         ],
         "falsified_positions": sorted(int(p) for p in falsified_positions),
         "positional_priors": [prior.model_dump() for prior in derived],
