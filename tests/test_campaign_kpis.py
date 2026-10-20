@@ -28,6 +28,7 @@ from core.acquisition import (
     qualified_pool,
     sar_maturity_score,
     sar_effect_table,
+    score_pool,
     select_five_slots,
     value_of_information,
     voi_annealed_null_objective,
@@ -686,7 +687,6 @@ def test_select_five_slots_returns_qualified_distinct_h1_h0_arms():
     # Slots 1-2 are the top two A_H1 candidates in the whole qualified pool.
     assert slots[0]["a_h1"] >= slots[1]["a_h1"]
 
-
 def test_m5_null_arm_is_the_unbiased_baseline_not_m4s_static_prior():
     """FLAW 1 regression: M5 must not inherit M4's refuted WT-anchor prior.
 
@@ -695,6 +695,13 @@ def test_m5_null_arm_is_the_unbiased_baseline_not_m4s_static_prior():
     what that rule penalises). ``A_null`` is now the VoI-annealed qualified
     binding objective and still contains **no** loop-prior term, while M4 keeps
     the static rule.
+
+    This was re-verified empirically, not just structurally: folding
+    ``structural_prior_score`` into ``Δ_agent`` as a cold-start prior (the
+    "M3 ⊂ M4 ⊂ M5" nesting) dragged M5 from 1.9258 (#1) to 1.9231 (#5) on 1N8Z
+    AUBQC and wiped out its cross-target Spearman lead (4/6 cells -> 0/6). The
+    static prior is a *different method*, not an earlier version of M5's belief,
+    and mixing the two made M5 worse at both of its own jobs.
     """
     frame = _scored_frame()
     slots = select_five_slots(frame, None, queries_spent=5, total_budget=35)
@@ -750,11 +757,23 @@ def test_dynamic_voi_formula_and_final_batch_are_exact():
     assert value_of_information(0.0, 0.0) == 0.0
 
     final = voi_context(
-        _sar_table(n_cells=10), queries_spent=30, total_budget=35, batch_size=5
+        _sar_table(n_cells=13), queries_spent=30, total_budget=35, batch_size=5
     )
     # ``VoI`` drives slot 3 only. There is no phase flag any more: the H0 null
     # control is tested on every batch, because it is a definition, not a mode.
     assert final == {"horizon": 0.0, "sar_maturity": 1.0, "voi": 0.0}
+
+    # ``voi_context``'s default maturity denominator is now derived from this
+    # call's own ``total_budget`` and the reference length — ``max(13, 0.3·35) =
+    # 13`` — rather than from a bare 1N8Z-calibrated 10.0. Ten cells therefore no
+    # longer counts as fully mature on a 35-query campaign; thirteen does. The
+    # horizon still zeroes ``VoI`` on the final batch regardless, which is why the
+    # assertion above holds at either denominator.
+    ten_cells = voi_context(
+        _sar_table(n_cells=10), queries_spent=30, total_budget=35, batch_size=5
+    )
+    assert ten_cells["sar_maturity"] == pytest.approx(10 / 13.0)
+    assert ten_cells["voi"] == 0.0
 
 
 # ── Empirical SAR maturity (C from corroborated evidence, not max Δ_agent) ────
@@ -882,8 +901,14 @@ def test_slot5_always_tests_the_null_baseline_never_the_anti_hypothesis():
 
     Restricting slot 5 to non-positive ``Δ_agent`` made the lab boycott its own
     proven substitutions for 20% of every early batch. The control must instead
-    be the unmodified baseline, on *every* batch — early (VoI high) exactly as on
-    the final one (VoI = 0).
+    be the unmodified baseline, on *every* batch — early exactly as on the final
+    one.
+
+    ``A_null`` is now literally ``A_base``: the VoI anneal was removed from the
+    decision path after the five-cell attribution ablation (`no_anneal`: 1N8Z ρ
+    0.5300 -> 0.6578, all p <= 2e-4, no cell worse). The H0 *semantics* are
+    unchanged and in fact purer — the control is now the best candidate on the
+    genuinely unmodified UCB, with no phase-dependent reweighting in between.
     """
     frame = _dynamic_voi_frame()
     decision = _positive_prior_decision()
@@ -894,23 +919,22 @@ def test_slot5_always_tests_the_null_baseline_never_the_anti_hypothesis():
         early[2]["a_h1"] + SLOT3_OPTIMISM * early[2]["voi"] * early[2]["sigma_joint"]
     )
     assert early[4]["slot_type"] == SLOT5_FALSIFY_LABEL
-    # The control maximises the null objective over the remaining candidates,
-    # regardless of the sign of their Δ_agent: a positively-boosted candidate is
-    # no longer banned from the control arm.
+    # The control maximises ``a_null`` over the remaining candidates, regardless of
+    # the sign of their Δ_agent: a positively-boosted candidate is not banned from
+    # the control arm. ``A_null == A_base`` now, so the expected value is the
+    # pool's ``a_base`` maximum, not a VoI-weighted blend.
     remaining = frame.loc[~frame.candidate_id.isin({s["candidate_id"] for s in early[:4]})]
-    expected_null = voi_annealed_null_objective(remaining, float(early[4]["voi"]))
-    assert early[4]["a_null"] == pytest.approx(expected_null.max())
+    assert early[4]["a_null"] == pytest.approx(remaining["a_base"].max())
+    assert (early[4]["a_null"] == early[4]["a_base"])
 
-    # Final batch: VoI=0, so slot 3 is pure A_H1 and the VoI-annealed objective
-    # collapses onto pure qualified binding exploitation — the control rule does
-    # not depend on the VoI phase, only its numeric value does.
+    # Final batch: VoI=0, so slot 3 is pure A_H1. The control rule does not depend
+    # on the VoI phase at all any more — only the optimism bonus does.
     final = select_five_slots(frame, decision, queries_spent=30, total_budget=35, batch_size=5)
     assert final[2]["voi"] == 0.0
     assert final[2]["optimistic"] == pytest.approx(final[2]["a_h1"])
     assert final[4]["slot_type"] == SLOT5_FALSIFY_LABEL
     remaining = frame.loc[~frame.candidate_id.isin({s["candidate_id"] for s in final[:4]})]
-    expected_null = voi_annealed_null_objective(remaining, 0.0)
-    assert final[4]["a_null"] == pytest.approx(expected_null.max())
+    assert final[4]["a_null"] == pytest.approx(remaining["a_base"].max())
 
 
 def test_slot4_is_a_third_exploitation_slot_with_the_agent_boost_off():
@@ -944,29 +968,47 @@ def test_slot4_is_a_third_exploitation_slot_with_the_agent_boost_off():
     assert slot4["candidate_id"] == best["candidate_id"]
 
 
-def test_a_null_is_the_voi_annealed_qualified_binding_objective():
-    """``a_null`` blends early exploration with pure qualified binding.
+def test_a_null_is_a_base_and_voi_no_longer_rewrites_the_objective():
+    """``A_null == A_base`` on every batch. The VoI anneal was removed.
 
-    Every candidate in the qualified pool already clears ``y_dev >= tau_dev``, so
-    the objective must shift toward ``mu_bind`` as the horizon closes instead of
-    paying the un-annealed ``beta_0 = 1.0`` variance and the redundant ``y_dev``
-    margin for all six rounds.
+    This inverts the assertion this test used to make. The annealed objective was
+    *believed* to be necessary — "stop paying for ``beta_0`` variance and the
+    redundant ``y_dev`` margin once the pool is qualified" — but the attribution
+    ablation measured it in five cells and found the opposite:
+
+    * 1N8Z ρ 0.5300 → 0.6578 (p ≈ 1e-9) with AUBQC unchanged;
+    * aayl49_ML 0.2266 → 0.2694 (p = 2e-4) and 0.2141 → 0.2889 (p < 1e-4);
+    * 2FJG 0.1456 → 0.2327 and 0.2612 → 0.4461, **and** AUBQC +0.015 / +0.009
+      at p ≤ 1e-4.
+
+    The reason is mechanical: ``A_base`` carries the only exploration term the
+    objective has (``0.65·beta_0·sigma_bind``), so annealing toward
+    ``mu_bind_norm`` progressively deleted it. On a compressed landscape that is
+    deleting the only signal that works.
+
+    ``VoI`` still exists and still steers — the slot-3 optimism bonus and
+    ``slot_graduation``. It no longer rewrites which objective ranks candidates.
     """
     frame = _scored_frame(60, seed=11)
     frame = frame.assign(mu_bind=np.linspace(0.2, 1.4, len(frame)))
     early = select_five_slots(frame, None, queries_spent=5, total_budget=35)
     final = select_five_slots(frame, None, queries_spent=30, total_budget=35)
+    # ``VoI`` itself is untouched — it is still a reported diagnostic.
     assert early[0]["voi"] == pytest.approx(1.0)
     assert final[0]["voi"] == 0.0
 
     for slot in early + final:
         assert slot["a_h1"] == pytest.approx(slot["a_null"] + slot["delta_agent"])
+        # The law, stated as an equality: the null arm is the baseline.
+        assert slot["a_null"] == pytest.approx(slot["a_base"])
 
-    # The final batch is exploitation-only: ``exploit_weight`` is 1.0, so
-    # ``a_null`` *is* ``mu_bind_norm`` and is no longer correlated with the
-    # un-annealed ``a_base`` by construction.
-    assert not np.allclose(
+    # And it holds identically on both batches, so the objective is no longer a
+    # function of the VoI phase at all.
+    assert np.allclose(
         [slot["a_null"] for slot in final], [slot["a_base"] for slot in final]
+    )
+    assert np.allclose(
+        [slot["a_null"] for slot in early], [slot["a_base"] for slot in early]
     )
 
 

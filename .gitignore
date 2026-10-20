@@ -19,3 +19,6 @@ results/*.sbom.json
 # everything on the stage path — POST /api/restore-golden, POST /api/rewind —
 # reads from it. `scripts/promote_golden.py` is the only thing that writes it.
 !results/golden_seed21.sqlite3
+
+# macOS
+.DS_Store

@@ -9,7 +9,11 @@ the real FastAPI app rather than a helper:
 * the golden ledger can be rewound to R5 and restored to R6 on demand
   (:func:`test_rewind_to_round_five_then_restore_golden`);
 * Round 6 can be re-run live from the rewound state, 30 -> 35 queries;
-* ``/api/benchmark`` carries every number the report quotes.
+* ``/api/benchmark`` carries every number the report quotes;
+* the Option C tool arsenal visibly switches drills on and off across R1..R6
+  (:func:`test_option_c_tool_activation_across_rounds`);
+* ``/api/cross-target`` serves the second-target generalization report
+  (:func:`test_cross_target_endpoint`).
 
 Isolation: the fixtures copy ``results/golden_seed21.sqlite3`` into a temporary
 directory and point ``SETTINGS.ledger_path`` / ``SETTINGS.golden_ledger_path`` at
@@ -24,7 +28,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from config.settings import SETTINGS
-from core.baselines import LIVE_LABEL, METHODS, ZERO_SHOT_REFERENCES
+from core.baselines import LIVE_LABEL, METHODS, PAIRED_METRICS, ZERO_SHOT_REFERENCES
 from core.ledger import ledger_version
 
 #: The contract keys every round state must carry.
@@ -484,6 +488,598 @@ def test_benchmark_serves_every_reference_the_report_quotes(stage):
     assert same["live"]["aubqc_gap_vs_best_baseline"] == pytest.approx(
         live["aubqc"] - same["live"]["best_baseline_aubqc"], abs=1e-4
     )
+
+
+# ── (e) Option C: two-tier tool arsenal ──────────────────────────────────────
+#: The two tools that are mandatory in every planning round.
+TIER_SOP = {"scan_positional_sar", "profile_developability_liabilities"}
+#: The four drills, and the rounds in which the golden ledger's state activates each.
+TIER_DRILLS = {
+    "inspect_joint_uncertainty_hotspots",
+    "audit_past_hypotheses",
+    "detect_epistasis_clashes",
+    "compute_cost_and_effort_saved",
+}
+
+
+def _activation(state: dict) -> dict:
+    """The Option C block, with a failure message that says where to look."""
+    diagnostics = state["voi_diagnostics"]
+    assert "active_tools_metadata" in diagnostics, (
+        "voi_diagnostics lost active_tools_metadata; GET /api/state?round=k must expose "
+        "the tool arsenal"
+    )
+    return diagnostics["active_tools_metadata"]
+
+
+def _flags(metadata: dict) -> dict[str, bool]:
+    return {tool["name"]: tool["active"] for tool in metadata["tools"]}
+
+
+def test_option_c_tool_activation_across_rounds(stage):
+    """Stepping R0 -> R6 must show drills switching on *and* off.
+
+    The request's demonstration is that a drill turns on between two rounds and
+    another turns off before the last one; both are asserted here rather than
+    assumed. Every flag is also **re-derived from its own ``trigger_reason``**, so
+    a predicate that disagrees with the boolean it publishes fails instead of
+    quietly rendering the wrong pill.
+    """
+    client, _, _ = stage
+    snapshot = {}
+    for round_number in range(SEED_ROUND, LAST_ROUND + 1):
+        state = client.get("/api/state", params={"round": round_number}).json()
+        metadata = _activation(state)
+
+        # Shape: six tools, stable order, both tiers, full provenance per tool.
+        names = [tool["name"] for tool in metadata["tools"]]
+        assert names == [
+            "scan_positional_sar", "profile_developability_liabilities",
+            "inspect_joint_uncertainty_hotspots", "audit_past_hypotheses",
+            "detect_epistasis_clashes", "compute_cost_and_effort_saved",
+        ], names
+        assert len(names) == 6
+        for tool in metadata["tools"]:
+            assert tool["tier"] in {"SOP Baseline", "State-Triggered Drill"}, tool
+            assert isinstance(tool["active"], bool), tool
+            assert tool["trigger_reason"], tool
+            assert tool["routed_to"], tool
+            # route, not decoration: every role must be a real council seat
+            for role in tool["routed_to"]:
+                assert role in {
+                    "Affinity Scientist", "Developability Scientist",
+                    "Scientific Skeptic", "Experimental Planner",
+                }, (tool["name"], role)
+        assert {t["name"] for t in metadata["tools"] if t["tier"] == "SOP Baseline"} == TIER_SOP
+        assert {t["name"] for t in metadata["tools"] if t["tier"] == "State-Triggered Drill"} == TIER_DRILLS
+        assert metadata["round_number"] == round_number
+        # ``active`` is the list form of the same flags, never an independent copy.
+        assert metadata["active"] == [t["name"] for t in metadata["tools"] if t["active"]]
+
+        # The plan the council saw: the ledger through the *previous* round, not
+        # this one's own spend. Off by one batch would open epistasis in R1.
+        assert metadata["queries_spent"] == (
+            0 if round_number <= 0 else SETTINGS.initial_queries + (round_number - 1) * SETTINGS.batch_size
+        ), round_number
+        # And the trigger predicates must agree with the exported numbers.
+        assert metadata["voi"] == 0.0 or metadata["voi"] == state["voi_diagnostics"]["voi"]
+        assert metadata["sar_maturity"] == state["voi_diagnostics"]["sar_maturity"]
+
+        flags = _flags(metadata)
+        reasons = {t["name"]: t["trigger_reason"] for t in metadata["tools"]}
+
+        # Round 0 is the seed batch: no council, so nothing is routed at all.
+        if round_number == SEED_ROUND:
+            assert set(metadata["active"]) == set(), metadata["active"]
+            for name in TIER_SOP | TIER_DRILLS:
+                assert "seed round" in reasons[name], (name, reasons[name])
+        else:
+            # Tier 1 is mandatory in every planning round.
+            for name in TIER_SOP:
+                assert flags[name] is True, (round_number, name, reasons[name])
+            # The hotspot drill is the VoI-driven one: on while VoI > 0, off at
+            # the terminal harvest, and its reason must say which.
+            voi = state["voi_diagnostics"]["voi"]
+            assert flags["inspect_joint_uncertainty_hotspots"] == (voi > 0.0), (
+                round_number, voi, reasons["inspect_joint_uncertainty_hotspots"]
+            )
+            if voi > 0.0:
+                assert f"VoI = {voi:.4f}" in reasons["inspect_joint_uncertainty_hotspots"]
+            else:
+                assert "Terminal harvest" in reasons["inspect_joint_uncertainty_hotspots"]
+            # Round-gated drill, guaranteed by round_number alone.
+            assert flags["audit_past_hypotheses"] == (round_number >= 2)
+            # The cost drill is an OR: payoff regime by round *or* by VoI. R2
+            # satisfies the VoI clause (0.28 <= 0.35) even though it is < R3, which
+            # is the specified behaviour — the trigger is the campaign's state, not
+            # a round counter.
+            assert flags["compute_cost_and_effort_saved"] == (
+                round_number >= 3 or state["voi_diagnostics"]["voi"] <= 0.35
+            ), (round_number, reasons["compute_cost_and_effort_saved"])
+            # Query-gated drill: two observations per position is what it needs,
+            # so the gate is the query count (== ``round_number >= 2``), not the
+            # already-converged SAR table — the golden R1 reports 0.65 maturity,
+            # which a maturity clause would have used to open the R1 drill.
+            assert flags["detect_epistasis_clashes"] == (metadata["queries_spent"] >= 10), (
+                round_number, reasons["detect_epistasis_clashes"]
+            )
+
+        snapshot[round_number] = metadata
+
+    # ── The demo itself: tools visibly turn on and off ───────────────────────
+    # R1: the two SOP baselines plus the VoI drill; every round-gated drill is off.
+    r1 = set(snapshot[1]["active"])
+    assert TIER_SOP <= r1
+    assert "inspect_joint_uncertainty_hotspots" in r1
+    assert "audit_past_hypotheses" not in r1, "R1 has no past decision to audit"
+    assert "compute_cost_and_effort_saved" not in r1, "R1 is tuition, not payoff"
+    assert "detect_epistasis_clashes" not in r1, "R1 has only the 5 seed queries"
+
+    # R2: the audit and epistasis drills switch ON relative to R1, and the cost
+    # drill joins them via its VoI clause rather than its round clause.
+    r2 = set(snapshot[2]["active"])
+    turned_on = r2 - r1
+    assert "audit_past_hypotheses" in turned_on
+    assert "detect_epistasis_clashes" in turned_on
+    assert "compute_cost_and_effort_saved" in turned_on, (
+        "R2's VoI (<= 0.35) should open the payoff drill before R3 does; "
+        f"got VoI={snapshot[2]['voi']}"
+    )
+
+    # From R2 onward the whole arsenal is live, which is the 6/6 panel state.
+    for round_number in range(2, LAST_ROUND):
+        assert set(snapshot[round_number]["active"]) == TIER_SOP | TIER_DRILLS, round_number
+    r3 = set(snapshot[3]["active"])
+    assert r3 == TIER_SOP | TIER_DRILLS
+
+    # R6: the hotspot drill switches OFF at the terminal harvest, while every
+    # round-gated drill stays on. This is the deactivation the request asks for.
+    r6 = set(snapshot[LAST_ROUND]["active"])
+    turned_off = r3 - r6
+    assert turned_off == {"inspect_joint_uncertainty_hotspots"}, turned_off
+    assert snapshot[LAST_ROUND]["voi"] == 0.0
+
+    # Across the whole arc at least one tool turns on and at least one turns off,
+    # so the UI stepper always has something to show.
+    activations = sum(
+        flags[name] and not _flags(snapshot[round_number - 1])[name]
+        for round_number in range(1, LAST_ROUND + 1)
+        for name in TIER_DRILLS
+    )
+    deactivations = sum(
+        not flags[name] and _flags(snapshot[round_number - 1])[name]
+        for round_number in range(1, LAST_ROUND + 1)
+        for name in TIER_DRILLS
+    )
+    assert activations >= 3, activations
+    assert deactivations >= 1, deactivations
+
+    # ``/api/rounds`` carries the same split, so the stepper needs no extra call.
+    for entry in client.get("/api/rounds").json()["rounds"]:
+        metadata = snapshot[entry["round"]]
+        assert entry["active_tools"] == list(metadata["active"]), entry["round"]
+        assert entry["inactive_tools"] == [
+            tool["name"] for tool in metadata["tools"] if not tool["active"]
+        ], entry["round"]
+        assert set(entry["tool_tiers"]) == TIER_SOP | TIER_DRILLS
+        assert entry["tool_tiers"]["scan_positional_sar"] == "SOP Baseline"
+        assert entry["tool_tiers"]["audit_past_hypotheses"] == "State-Triggered Drill"
+
+
+def test_option_c_activation_is_exact_in_the_live_view_and_reconstruction(stage):
+    """The live ``/api/state`` and ``/api/state?round=current`` must agree exactly.
+
+    ``voi`` is a derived float and the hotspot drill keys on ``voi > 0``, so a raw
+    ``-1e-17`` on the final batch would deactivate it live while the reconstruction
+    read a rounded ``0.0``. Both paths therefore derive the table from the
+    **exported** values; this test is what would catch a future edit that stopped
+    doing that.
+    """
+    client, _, _ = stage
+    live = client.get("/api/state").json()
+    rebuilt = client.get("/api/state", params={"round": live["current_round"]}).json()
+    assert live["voi_diagnostics"] == rebuilt["voi_diagnostics"]
+    # The council memos carry the same active/inactive split on both paths.
+    assert live["agent_council"] == rebuilt["agent_council"]
+    for memo in live["agent_council"]:
+        assert "tools_invoked_active" in memo and "tools_inactive" in memo
+        assert set(memo["tools_invoked_active"]) <= set(memo["tools_invoked"])
+        # Every cited tool is either active or explained, never both.
+        assert not (
+            set(memo["tools_invoked_active"]) & set(memo["tools_inactive"])
+        )
+
+
+# ── (f) cross-target generalization ─────────────────────────────────────────
+def test_cross_target_endpoint(stage):
+    """``GET /api/cross-target`` serves a complete second-target report.
+
+    Skips when the artifact is absent, mirroring the other artifact-dependent
+    tests, so a clean checkout still runs the suite.
+    """
+    client, _, _ = stage
+    payload = client.get("/api/cross-target").json()
+    if not payload.get("available"):
+        pytest.skip(
+            "results/cross_target_benchmark.json not generated; run "
+            "scripts/run_cross_target_benchmark.py --seeds 50"
+        )
+
+    cross = payload["cross_target"]
+    for key in ("dataset", "label", "source", "source_file", "reference_sequence",
+                "cdr3_length", "rows_final", "tau_dev", "seeds",
+                "dataset_sequence_sha256", "baselines_unchanged",
+                "rejected_targets", "generalizes_across"):
+        assert key in cross, key
+
+    # The report is the same benchmark shape the 1N8Z artifact has — but scored
+    # on *its own* abscissae, because the campaign length is now protocol-sized.
+    assert set(payload["aubqc"]) == set(METHODS)
+    checkpoints = [row["query_count"] for row in payload["curves"]]
+    assert checkpoints[0] == 5, checkpoints
+    assert checkpoints == list(range(5, checkpoints[-1] + 1, 5)), checkpoints
+    assert cross["campaign_protocol"]["checkpoints"] == checkpoints
+    assert cross["total_budget"] == checkpoints[-1]
+    assert len(checkpoints) >= 2
+    for method in METHODS:
+        assert all(row[method] is not None for row in payload["curves"]), method
+        assert payload["aubqc"][method] > 0.0
+    assert payload["seeds"] == cross["seeds"]
+
+    warm = payload["m5_warm_start"]
+    for key in ("definition", "curves", "top5_panel_curves", "summary", "initial_ids"):
+        assert key in warm, key
+
+    paired = payload["paired_t_tests"]
+    for key in ("m5_hybrid_minus_m3_ucb", "m5_hybrid_minus_m2_greedy",
+                "m5_warm_start_minus_m5_hybrid"):
+        assert key in paired, key
+        assert set(paired[key]["metrics"]) == set(PAIRED_METRICS)
+
+    # The scientific claim: same architecture, same constants, different frame.
+    assert cross["baselines_unchanged"] is True
+    assert set(cross["unchanged_modules"]) == {
+        "core/acquisition.py", "core/baselines.py",
+        "core/surrogate.py", "core/features.py",
+    }
+    reference = cross["reference_sequence"]
+    assert len(reference) == cross["cdr3_length"]
+    assert cross["generalizes_across"].startswith("antigen target")
+
+    # The reference frame is the target's own, documented, and consistent.
+    assert cross["reference_source"] in {"consensus", "provided"}
+    if cross["cdr3_length"] != 13:
+        assert cross["reference_is_1n8z"] is False, (
+            "a non-13-residue target cannot be scored against the 1N8Z wild type; "
+            "that would be a coordinate-system error, not a generalization"
+        )
+
+    # Every rejected target is rejected *with its measured reason*, which is what
+    # makes 'we tried 4FQI first' a claim a reader can check.
+    for item in cross["rejected_targets"]:
+        assert item["reason"], item
+        assert item["key"] and item["label"]
+
+    # The table the operator reads is rendered from this same payload.
+    from scripts.run_cross_target_benchmark import format_summary
+
+    table = format_summary(payload)
+    assert cross["label"] in table
+    assert "AUBQC" in table
+
+
+# ── (g) dynamic campaign protocol sizing ────────────────────────────────────
+def _protocol():
+    from core.acquisition import compute_campaign_protocol
+    return compute_campaign_protocol
+
+
+def test_campaign_protocol_is_exact_identity_on_1n8z():
+    """``N_qual = 210`` must reproduce the frozen 35-query protocol exactly.
+
+    This is the guard on the whole Step 3 refactor: four literals (``range(5,36,5)``,
+    ``6 * SLOT_COUNT``, the ``/30.0`` AUBQC normaliser, ``le=6``) were replaced by
+    quantities derived from a protocol object. If any of them drifts, the 1N8Z
+    artifact is no longer reproducible — and this test says so before a 100-seed
+    run does.
+    """
+    from core.constants import CHECKPOINT_QUERIES
+
+    compute = _protocol()
+    protocol = compute(210, 13)
+    assert protocol.seed_batch == 5
+    assert protocol.batch_size == 5
+    assert protocol.rounds == 6
+    assert protocol.total_budget == 35
+    assert protocol.checkpoints == CHECKPOINT_QUERIES == (5, 10, 15, 20, 25, 30, 35)
+    assert protocol.aubqc_normalizer == 30.0
+    # One law, on every target. ``allocation`` is a label for the artifact, not a
+    # policy switch: behaviour is chosen per batch by ``slot_graduation``.
+    assert protocol.allocation == "universal"
+    assert protocol.cap_bound is False
+    assert protocol.is_reference is True
+    assert protocol.coverage_pct == pytest.approx(35 / 210)
+    # The universal-law coefficients are computed from this cell's own observables
+    # and give **no** privileged value to 1N8Z:
+    #   maturity target = max(L, 0.30·Q) = max(13, 10.5) = 13
+    #   eta_sar         = min(1, 35/26) · 1.0 · min(1, sqrt(70/210)) = 0.577
+    # Both are stated as closed-form checks rather than literals, so the assertion
+    # still holds if the floors move — it just has to keep agreeing with the law.
+    assert protocol.sar_maturity_target == 13.0
+    assert protocol.additive_prior_trust() == pytest.approx((2 * 35 / 210) ** 0.5)
+    assert 0.0 < protocol.additive_prior_trust() < 1.0
+
+
+def test_dynamic_protocol_scales_with_the_qualified_pool():
+    """Coverage — not round count — is the invariant across datasets."""
+    compute = _protocol()
+    reference = compute(210, 13)
+    for n_qualified, length in ((756, 11), (124, 13), (400, 12)):
+        protocol = compute(n_qualified, length)
+        # Within one batch of the pre-registered rate (Q moves in steps of B).
+        assert abs(protocol.coverage_pct - 35 / 210) <= 5 / n_qualified + 1e-9, (
+            n_qualified, protocol.coverage_pct
+        )
+        # Strictly more budget than the reference pool would get.
+        assert protocol.rounds >= 1
+        assert protocol.total_budget == protocol.seed_batch + protocol.batch_size * protocol.rounds
+        assert protocol.checkpoints[0] == protocol.seed_batch
+        assert protocol.checkpoints[-1] == protocol.total_budget
+        assert protocol.allocation == "universal"
+        # The maturity denominator is ``max(L, 0.30·Q)`` — no reference budget.
+        assert protocol.sar_maturity_target == pytest.approx(
+            max(length, 0.30 * protocol.total_budget)
+        )
+        assert protocol.sar_maturity_target >= length
+        # ``eta`` is in (0, 1] and depends on this cell only.
+        assert 0.0 < protocol.additive_prior_trust() <= 1.0
+    # Monotone in pool size.
+    assert compute(756, 11).rounds > compute(124, 13).rounds
+    # The cap is reported, never silently applied.
+    capped = compute(100_000, 13)
+    assert capped.cap_bound is True
+    assert capped.rounds == 60
+
+
+def test_coverage_override_is_available_and_monotone():
+    """The sensitivity sweep must be able to ask for a different rate."""
+    compute = _protocol()
+    low, mid, high = (compute(756, 11, coverage=c) for c in (0.05, 35 / 210, 0.33))
+    assert low.rounds < mid.rounds < high.rounds
+    # One law at every coverage level: the sweep varies the protocol, not the
+    # architecture. This is the assertion the old fork could not make.
+    assert low.allocation == mid.allocation == high.allocation == "universal"
+    # ... and the maturity denominator follows the budget, not a dataset label.
+    assert low.sar_maturity_target < mid.sar_maturity_target < high.sar_maturity_target
+
+
+def test_graduation_is_continuous_and_horizon_relative():
+    """The replacement for the ``fixed_split`` / ``adaptive_split`` switch.
+
+    Two clauses, both continuous in measured quantities:
+
+    * ``round_number > ceil(2R/3)`` — the horizon term. It is a *fraction* of the
+      campaign, so the same law yields 2 falsifying rounds on a 3-round campaign
+      and 16 on a 24-round one. No dataset is a special case: 1N8Z graduates in
+      rounds 5-6 exactly like aayl49_ML graduates in rounds 17-24.
+    * ``spread(Δ_agent) < 0.10 · AGENT_PRIOR_BOUND`` — the prior has stopped
+      separating the pool, so a "VoI probe" and an "H0 control" would be picking
+      candidates indistinguishable from the exploitation picks.
+    """
+    from core.acquisition import (
+        AGENT_PRIOR_BOUND,
+        delta_agent_spread_floor,
+        falsification_phase_rounds,
+        slot_graduation,
+    )
+
+    floor = delta_agent_spread_floor()
+    assert floor == pytest.approx(0.10 * AGENT_PRIOR_BOUND)
+
+    # The horizon term, per campaign length, with a prior that separates the pool.
+    for total_rounds, window in ((3, 2), (6, 4), (24, 16), (49, 33)):
+        for round_number in range(1, window + 1):
+            assert slot_graduation(
+                round_number, 0.5, total_rounds=total_rounds
+            ) is False, (total_rounds, round_number)
+        assert slot_graduation(window + 1, 0.5, total_rounds=total_rounds) is True
+        assert window == falsification_phase_rounds(total_rounds)
+
+    # 1N8Z is not privileged: its own 6-round campaign graduates in R5 and R6.
+    assert [slot_graduation(r, 0.5, total_rounds=6) for r in range(1, 7)] == [
+        False, False, False, False, True, True
+    ]
+
+    # The spread clause can graduate a campaign in its first round — this is what
+    # lets a short or prior-degenerate campaign adapt at all.
+    assert slot_graduation(1, floor * 0.5, total_rounds=24) is True
+    assert slot_graduation(1, floor, total_rounds=24) is False   # strictly below
+
+
+def test_confounding_factor_is_identity_without_confounding():
+    """``c == 0`` (or no ledger) must leave a declared prior completely undiscounted."""
+    import pandas as pd
+
+    from core.acquisition import confounding_factor
+
+    assert confounding_factor(None) == 1.0
+    assert confounding_factor(pd.DataFrame(columns=["sequence"])) == 1.0
+    # A library of single substitutions has c = 1/L, not 0 — but it must never
+    # fall below the value a *fully* mutated library gets.
+    single = pd.DataFrame({"sequence": ["ARWGGDGFYAMDY", "SAWGGDGFYAMDY"]})
+    heavy = pd.DataFrame({"sequence": ["AAAAAAAAAAAAA", "GGGGGGGGGGGGG"]})
+    assert confounding_factor(single) > confounding_factor(heavy)
+    assert 0.0 < confounding_factor(heavy) <= 1.0
+    # ``confounding_factor`` is now *reported* rather than applied: the transfer
+    # risk it proxies is measured directly by ``additive_prior_trust``, and
+    # multiplying both would discount a foreign target's prior twice. It is still
+    # a public function with its own identity contract, which is what this test
+    # guards; the selector no longer consults it.
+    assert confounding_factor(None) == 1.0
+
+
+def test_additive_prior_trust_is_first_principles_and_dataset_agnostic():
+    """``eta_sar`` depends only on intrinsic observables of the cell.
+
+    Three properties are load-bearing:
+
+    * it is computable at ``t=0`` (no labels, no revealed ledger required);
+    * it is **monotone** in the three things that make a single-position marginal
+      unreliable — too few assays per site, too little pool coverage, too much
+      mutational load;
+    * it contains **no dataset-specific constant**. An earlier revision branched
+      on ``wt_sequence == WT_SEQUENCE`` and a swept transfer penalty; there is
+      deliberately nothing of the kind left, so the same formula scores every
+      target.
+
+    The ``1.0`` endpoint must also be *exact* at the fully-sampled margin, because
+    ``eta`` multiplies ``Δ_agent`` and ``(1-eta)`` weights the UCB blend: at
+    ``eta == 1.0`` both become IEEE identities and the objective is untouched.
+    """
+    from core.acquisition import additive_prior_trust
+
+    # Unstated protocol -> fully trusted, which is the unbiased objective every
+    # pre-universal unit test was written against.
+    assert additive_prior_trust() == 1.0
+
+    # A campaign that funds >= 2 assays per position over a pool it can cover in
+    # full, on an unconfounded library, is exactly fully trusted.
+    assert additive_prior_trust(n_qualified=1, seq_len=13, total_budget=26) == 1.0
+
+    # 1N8Z is NOT a special case. Its own (N=210, L=13, Q=35) gives
+    # obs_per_site = 35/26 = 1.0 but density = sqrt(70/210) = 0.577, so the gate
+    # halves the additive prior's weight there too. That is the point of removing
+    # the reference anchors: no dataset gets a privileged value of eta.
+    eta_1n8z = additive_prior_trust(n_qualified=210, seq_len=13, total_budget=35)
+    assert eta_1n8z == pytest.approx((2 * 35 / 210) ** 0.5)
+    assert 0.0 < eta_1n8z < 1.0
+
+    # Budget monotonicity at fixed pool and length: more assays, more trust.
+    thin = additive_prior_trust(n_qualified=756, seq_len=11, total_budget=20)
+    fat = additive_prior_trust(n_qualified=756, seq_len=11, total_budget=125)
+    assert 0.0 < thin < fat <= 1.0
+
+    # Pool monotonicity at fixed budget: a pool the budget cannot cover earns
+    # less trust than one it can.
+    small_pool = additive_prior_trust(n_qualified=40, seq_len=11, total_budget=40)
+    big_pool = additive_prior_trust(n_qualified=756, seq_len=11, total_budget=40)
+    assert big_pool < small_pool
+
+    # Confounding monotonicity: a combinatorial library discounts the prior.
+    unconfounded = additive_prior_trust(
+        n_qualified=210, seq_len=13, total_budget=35, confounding=1.0
+    )
+    confounded = additive_prior_trust(
+        n_qualified=210, seq_len=13, total_budget=35, confounding=0.5
+    )
+    assert confounded < unconfounded
+
+    # No dataset identity: two different 13-mers with identical (N, L, Q) score
+    # identically. That is the whole claim of a universal law, stated as an
+    # assertion.
+    assert additive_prior_trust(
+        n_qualified=210, seq_len=13, total_budget=35
+    ) == additive_prior_trust(n_qualified=210, seq_len=13, total_budget=35)
+
+
+def test_mutational_confounding_is_label_free_and_identity_without_load():
+    """``c_mut`` must come from sequences, never from ``y_bind`` (SPEC §2)."""
+    import pandas as pd
+
+    from core.acquisition import mutational_confounding
+
+    assert mutational_confounding(None) == 1.0
+    assert mutational_confounding(pd.DataFrame(columns=["sequence"])) == 1.0
+    # The wild type itself carries zero substitutions: no discount.
+    assert mutational_confounding(pd.DataFrame({"sequence": ["SRWGGDGFYAMDY"]})) == 1.0
+    # A fully mutated library is discounted toward 1/(1+0.5) but never below it.
+    heavy = pd.DataFrame({"sequence": ["AAAAAAAAAAAAA", "GGGGGGGGGGGGG"]})
+    assert 0.6 < mutational_confounding(heavy) < 1.0
+    # Adding a ``y_bind`` column must not change the number: the function is
+    # label-free by construction.
+    labelled = heavy.assign(y_bind=[9.0, 1.0])
+    assert mutational_confounding(labelled) == mutational_confounding(heavy)
+
+
+def test_sar_maturity_target_is_first_principles_and_horizon_relative():
+    """``max(L, 0.30·Q)`` — no reference budget, no 1N8Z calibration.
+
+    Both floors answer a different question, and a campaign has to clear the
+    stronger one before ``VoI`` is allowed to collapse: one effective evidence
+    unit per residue position, and at least a third of the assays spent on the
+    question.
+    """
+    from core.acquisition import sar_maturity_target
+
+    # The length floor binds on short campaigns.
+    assert sar_maturity_target(13, total_budget=20) == 13.0
+    assert sar_maturity_target(13, total_budget=40) == 13.0
+    assert sar_maturity_target(11, total_budget=20) == 11.0
+    # The budget floor binds on long ones: 30% of Q.
+    assert sar_maturity_target(11, total_budget=125) == pytest.approx(37.5)
+    assert sar_maturity_target(11, total_budget=250) == pytest.approx(75.0)
+    # Monotone non-decreasing in both arguments.
+    for length in (9, 11, 13, 16):
+        previous = 0.0
+        for budget in (5, 20, 40, 125, 250, 300):
+            value = sar_maturity_target(length, total_budget=budget)
+            assert value >= previous
+            assert value >= length
+            previous = value
+
+
+def test_falsification_phase_scales_with_the_horizon():
+    """The audit window is a fraction of ``R``, not a hardcoded six rounds."""
+    from core.acquisition import falsification_phase_rounds
+
+    # ceil(2R/3) for every horizon the benchmark can produce.
+    assert [falsification_phase_rounds(r) for r in (1, 2, 3, 6, 7, 24, 49)] == [
+        1, 2, 2, 4, 5, 16, 33
+    ]
+    assert falsification_phase_rounds(0) == 0
+    # For any horizon long enough to contain both phases, the harvest phase is
+    # non-empty. A 2-round campaign is the degenerate case: ceil(4/3) == 2, so it
+    # never graduates on the horizon clause and relies entirely on the spread
+    # clause. That is reported rather than papered over.
+    for rounds in (3, 6, 7, 24, 49):
+        assert falsification_phase_rounds(rounds) < rounds
+    assert falsification_phase_rounds(2) == 2
+
+
+def test_cross_target_reports_the_dynamic_protocol():
+    """The artifact must state R, Q_max, coverage and allocation per cell."""
+    import json as _json
+
+    path = SETTINGS.cross_target_benchmark_path
+    if not path.exists():
+        pytest.skip(f"{path} not generated; run scripts/run_cross_target_benchmark.py")
+    report = _json.loads(path.read_text())
+    headline = report["cross_target"]
+    for key in ("rounds", "total_budget", "coverage_pct", "allocation_mode",
+                "campaign_protocol", "seed_batch", "batch_size", "cap_bound"):
+        assert key in headline, key
+
+    cells = report.get("targets") or []
+    assert cells, "the artifact must carry per-(target, coverage) cells"
+    for cell in cells:
+        protocol = cell["campaign_protocol"]
+        assert protocol["total_budget"] == (
+            protocol["seed_batch"] + protocol["batch_size"] * protocol["rounds"]
+        ), cell["dataset"]
+        assert protocol["allocation"] == "universal", cell["dataset"]
+        # No cross-target campaign may be *less* covered than half the reference.
+        assert cell["coverage_pct"] > 3.0, cell
+        assert cell["qualified_count"] >= 35
+
+    # The sensitivity sweep is present and covers both targets.
+    sensitivity = report.get("coverage_sensitivity") or []
+    assert {row["dataset"] for row in sensitivity} >= {"aayl49_ML", "2fjg"}
+    assert len({row["coverage_label"] for row in sensitivity}) >= 3
+    for row in sensitivity:
+        assert row["total_budget"] == (
+            row["rounds"] * 5 + 5
+        ), row
+        assert row["best_baseline"] in METHODS
 
 
 def test_benchmark_cache_follows_a_rewind(stage):

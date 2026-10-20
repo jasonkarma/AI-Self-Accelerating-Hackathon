@@ -10,13 +10,35 @@ from .constants import CHARGE, HYDROPATHY, RISK_COMPONENTS, RISK_WEIGHTS, WT_SEQ
 from .features import validate_sequence
 
 
-def raw_components(sequence: str) -> dict[str, float]:
-    s = validate_sequence(sequence)
+def raw_components(
+    sequence: str,
+    *,
+    wt_sequence: str | None = None,
+    length: int | None = None,
+) -> dict[str, float]:
+    """Six raw developability components for one sequence.
+
+    ``wt_sequence`` is the reference the liability *excess* is measured against
+    (``liability = max(0, this - reference)``). It defaults to the frozen 1N8Z
+    wild type, so a 1N8Z call is unchanged; a cross-target call passes its own
+    reference, because charging a 9-mer for liabilities its own germline already
+    carries would measure the target, not the mutation.
+
+    ``length`` is inferred from the sequence when omitted, which makes this
+    width-agnostic without stopping the existing 13-residue dataset boundary
+    from being enforced downstream by ``validate_dataset``.
+    """
+    reference = WT_SEQUENCE if wt_sequence is None else str(wt_sequence)
+    if length is None:
+        length = len(str(sequence).strip())
+    s = validate_sequence(sequence, length=length)
     hydro = np.asarray([HYDROPATHY[a] for a in s])
     charges = np.asarray([CHARGE[a] for a in s])
     same_sign = sum(1 for a, b in zip(charges[:-1], charges[1:]) if a and b and np.sign(a) == np.sign(b))
     liability = s.count("C") + sum(s.count(m) for m in ("NG", "NS", "DG", "DS"))
-    wt_liability = WT_SEQUENCE.count("C") + sum(WT_SEQUENCE.count(m) for m in ("NG", "NS", "DG", "DS"))
+    wt_liability = reference.count("C") + sum(
+        reference.count(m) for m in ("NG", "NS", "DG", "DS")
+    )
     return {
         "hydro": float(hydro.mean()),
         "window": float(max(hydro[i:i + 5].mean() for i in range(9))),
@@ -31,13 +53,23 @@ def raw_components(sequence: str) -> dict[str, float]:
 class RiskNormalizer:
     minima: dict[str, float]
     maxima: dict[str, float]
+    #: Reference CDR3 the liability *excess* is measured against. ``None`` means
+    #: the frozen 1N8Z wild type, so every existing protocol — and every artifact
+    #: serialized before this field existed — keeps its exact meaning.
+    reference: str | None = None
 
     @classmethod
-    def fit(cls, sequences: Iterable[str]) -> "RiskNormalizer":
-        frame = pd.DataFrame(raw_components(s) for s in sequences)
+    def fit(
+        cls, sequences: Iterable[str], *, wt_sequence: str | None = None
+    ) -> "RiskNormalizer":
+        frame = pd.DataFrame(
+            raw_components(s, wt_sequence=wt_sequence) for s in sequences
+        )
         if frame.empty:
             raise ValueError("Cannot fit risk normalizer to an empty pool")
-        return cls(frame.min().to_dict(), frame.max().to_dict())
+        return cls(
+            frame.min().to_dict(), frame.max().to_dict(), reference=wt_sequence
+        )
 
     def transform_components(self, components: dict[str, float]) -> dict[str, float]:
         result = {}
@@ -47,7 +79,7 @@ class RiskNormalizer:
         return result
 
     def score(self, sequence: str) -> dict[str, object]:
-        raw = raw_components(sequence)
+        raw = raw_components(sequence, wt_sequence=self.reference)
         normalized = self.transform_components(raw)
         risk = float(np.dot([normalized[n] for n in RISK_COMPONENTS], RISK_WEIGHTS))
         return {"raw": raw, "normalized": normalized, "risk": risk, "y_dev": 1.0 - risk}
@@ -57,4 +89,7 @@ class RiskNormalizer:
 
     @classmethod
     def from_dict(cls, value: dict[str, dict[str, float]]) -> "RiskNormalizer":
+        # ``reference`` is deliberately *not* read from the serialized protocol:
+        # the frozen 1N8Z protocol predates the field, and a cross-target run
+        # re-fits its own normalizer rather than reinterpreting that artifact.
         return cls(value["minima"], value["maxima"])

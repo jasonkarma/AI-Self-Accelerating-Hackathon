@@ -35,8 +35,12 @@ import pandas as pd
 from scipy.stats import spearmanr
 
 from .acquisition import (
+    REFERENCE_N_QUALIFIED,
     SLOT_COUNT,
+    CampaignProtocol,
     adaptive_prior_score,
+    affinity_score,
+    compute_campaign_protocol,
     fixed_expert_prior,
     positional_priors_from_revealed,
     qualified_pool,
@@ -101,10 +105,12 @@ class AdaptiveToolPolicy:
 
     mode = "adaptive_tool"
 
-    def __init__(self) -> None:
+    def __init__(self, wt_sequence: str | None = None) -> None:
         self.last_priors: list = []
         self.last_sar: dict = {}
         self.falsified_positions: set[int] = set()
+        #: Reference frame this policy scores against. ``None`` = frozen 1N8Z.
+        self.wt_sequence = wt_sequence
 
     def prepare(
         self,
@@ -112,12 +118,16 @@ class AdaptiveToolPolicy:
         tau_dev: float,
         *,
         residuals: dict[str, float] | None = None,
+        wt_sequence: str | None = None,
     ) -> None:
         """Precompute the priors and SAR table for one decision."""
+        reference = self.wt_sequence if wt_sequence is None else wt_sequence
         self.last_priors = positional_priors_from_revealed(
-            revealed, falsified_positions=self.falsified_positions
+            revealed, falsified_positions=self.falsified_positions, wt_sequence=reference
         )
-        self.last_sar = sar_effect_table(revealed, tau_dev=tau_dev, residuals=residuals)
+        self.last_sar = sar_effect_table(
+            revealed, tau_dev=tau_dev, residuals=residuals, wt_sequence=reference
+        )
 
     def score(self, sequences: pd.Series, revealed: pd.DataFrame) -> np.ndarray:
         """``Δ_agent`` for each sequence."""
@@ -128,6 +138,7 @@ class AdaptiveToolPolicy:
                 priors=self.last_priors,
                 sar_effects=self.last_sar,
                 falsified_positions=self.falsified_positions,
+                wt_sequence=self.wt_sequence,
             )
             for s in sequences
         ])
@@ -198,6 +209,8 @@ def warm_start_ids(
     *,
     k: int = SLOT_COUNT,
     seed: int = 0,
+    wt_sequence: str | None = None,
+    anchor_positions: tuple[int, ...] | None = None,
 ) -> list[str]:
     """Round-0 queries chosen by the Virtual Lab's cold-start prior.
 
@@ -222,6 +235,7 @@ def warm_start_ids(
        One slot is reserved for an anchor-conserving scaffold when one exists,
        because the paired audit needs a candidate whose rule set is empty.
     """
+    reference = WT_SEQUENCE if wt_sequence is None else str(wt_sequence)
     scored = [
         {
             "candidate_id": str(cid),
@@ -236,7 +250,7 @@ def warm_start_ids(
         if row["y_dev"] >= tau_dev
         and "C" not in row["sequence"]
         and not any(motif in row["sequence"] for motif in LIABILITY_MOTIFS)
-        and sum(a != b for a, b in zip(row["sequence"], WT_SEQUENCE)) >= 2
+        and sum(a != b for a, b in zip(row["sequence"], reference)) >= 2
     ]
     if len(eligible) < k:
         # Fall back to the qualified pool, then to the raw frame, rather than
@@ -246,7 +260,9 @@ def warm_start_ids(
         return []
 
     def mutations(row: dict) -> set[int]:
-        return {p for p in range(13) if row["sequence"][p] != WT_SEQUENCE[p]}
+        return {
+            p for p in range(len(reference)) if row["sequence"][p] != reference[p]
+        }
 
     def hamming(a: str, b: str) -> int:
         return sum(x != y for x, y in zip(a, b))
@@ -258,7 +274,11 @@ def warm_start_ids(
     # criterion is information — spread the five queries across the substitution
     # space and let the loop do the exploiting.
     eligible.sort(key=lambda row: row["candidate_id"])
-    anchors = set(ANCHOR_POSITIONS)
+    anchors = set(
+        ANCHOR_POSITIONS
+        if anchor_positions is None
+        else tuple(int(p) for p in anchor_positions)
+    )
 
     # Slot 1: an anchor-conserving scaffold when one exists, so the batch contains
     # a candidate whose positional rule set is empty (the clean H0 reference).
@@ -315,6 +335,10 @@ def _pick_m5(
     falsified_positions: set[int] | frozenset[int],
     priors: list | None = None,
     batch_size: int = SLOT_COUNT,
+    wt_sequence: str | None = None,
+    anchor_positions: tuple[int, ...] | None = None,
+    protocol: CampaignProtocol | None = None,
+    variant: str | None = None,
 ) -> list[dict]:
     """M5's five slots, delegated to the single shared portfolio.
 
@@ -355,18 +379,28 @@ def _pick_m5(
         decision,
         ledger=revealed,
         tau_dev=tau_dev,
-        sar_effects=sar_effect_table(revealed, tau_dev=tau_dev, residuals=residuals),
+        sar_effects=sar_effect_table(
+            revealed, tau_dev=tau_dev, residuals=residuals, wt_sequence=wt_sequence
+        ),
         residuals=residuals,
         falsified_positions=falsified_positions,
         queries_spent=queries_spent,
         total_budget=total_budget,
         batch_size=batch_size,
+        wt_sequence=wt_sequence,
+        anchor_positions=anchor_positions,
+        protocol=protocol,
+        variant=variant,
     )
 
 
 def run_method(frame: pd.DataFrame, normalizer: RiskNormalizer, tau_dev: float, method: str, seed: int,
                initial_ids: list[str], m5_policy: AdaptiveToolPolicy | LiveAgentPolicy | None = None,
-               *, seed_floor: float | None = None) -> BenchmarkResult:
+               *, seed_floor: float | None = None,
+               wt_sequence: str | None = None,
+               anchor_positions: tuple[int, ...] | None = None,
+               protocol: CampaignProtocol | None = None,
+               variant: str | None = None) -> BenchmarkResult:
     """Run one method on one seed and return its full discovery record.
 
     ``seed_floor`` overrides the baseline of the **normalized** curve. The
@@ -385,7 +419,12 @@ def run_method(frame: pd.DataFrame, normalizer: RiskNormalizer, tau_dev: float, 
     X = encode_sequences(work.sequence)
     id_to_idx = {cid: i for i, cid in enumerate(work.candidate_id)}
     queried = list(initial_ids)
-    total_budget = len(initial_ids) + 6 * SLOT_COUNT
+    # ``protocol`` defaults to the frozen 6-round / 35-query campaign, so an
+    # existing caller keeps its exact budget. A dynamically sized cross-target run
+    # passes its own, which is where R and Q come from now.
+    if protocol is None:
+        protocol = compute_campaign_protocol(REFERENCE_N_QUALIFIED, 13)
+    total_budget = protocol.total_budget
     curve, panel_curve, rho_curve, picks = [], [], [], []
     policy = m5_policy or AdaptiveToolPolicy()
     falsified_positions: set[int] = set()
@@ -499,31 +538,32 @@ def run_method(frame: pd.DataFrame, normalizer: RiskNormalizer, tau_dev: float, 
                     str(cid): float(y) - float(mu)
                     for cid, y, mu in zip(revealed.candidate_id, revealed.y_bind, mu_revealed)
                 }
-                policy.prepare(revealed, tau_dev, residuals=residuals)
+                policy.prepare(revealed, tau_dev, residuals=residuals, wt_sequence=wt_sequence)
                 delta_agents = np.asarray([
                     adaptive_prior_score(
                         s,
                         priors=policy.last_priors,
                         sar_effects=policy.last_sar,
                         falsified_positions=falsified_positions,
+                        wt_sequence=wt_sequence,
                     )
                     for s in pool.sequence
                 ])
-                # M5's *world model* for the rank-correlation metric is the
-                # binding mean plus the agent prior, **not** ``A_base``.
-                # ``A_base`` carries ``beta_0 = 1.0`` tree variance and a
-                # ``0.35 · (mu_d + sigma_d)`` developability margin, neither of
-                # which is a binding prediction — scoring M5 with it measured
-                # something other than what M5 actually believes about affinity
-                # and depressed its rho for a scale reason, not a science one.
-                # ``Δ_agent`` is bounded to ±0.06 in *log10 Kd*, so it is
-                # expressed in ``mu_bind`` units by multiplying by the pool's
-                # ``mu_bind`` spread before the two are added.
-                delta_span = float(np.ptp(pool.mu_bind.to_numpy())) if len(pool) > 1 else 0.0
-                pool = pool.assign(score=pool.mu_bind + delta_agents * delta_span)
+                # M5's *world model* for the rank-correlation metric —
+                # ``mu_bind + Δ_agent · span``, **not** ``A_base``. The definition
+                # lives in :func:`core.acquisition.affinity_score` so the metric
+                # and any slot that elects to rank on the model read one function.
+                # They previously did not, which is how ρ could report 0.6578 while
+                # every pick ranked on ``a_base``.
+                pool = pool.assign(score=affinity_score(pool, delta_agents))
             elif method == "m4_fixed_prior":
                 pool = pool.copy()
-                pool["score"] = pool.a_base + [fixed_expert_prior(s) for s in pool.sequence]
+                pool["score"] = pool.a_base + [
+                    fixed_expert_prior(
+                        s, wt_sequence=wt_sequence, anchor_positions=anchor_positions
+                    )
+                    for s in pool.sequence
+                ]
             else:
                 pool = pool.assign(score=pool.a_base)
 
@@ -546,6 +586,10 @@ def run_method(frame: pd.DataFrame, normalizer: RiskNormalizer, tau_dev: float, 
                     falsified_positions=falsified_positions,
                     priors=policy.last_priors,
                     batch_size=SLOT_COUNT,
+                    wt_sequence=wt_sequence,
+                    anchor_positions=anchor_positions,
+                    protocol=protocol,
+                    variant=variant,
                 )
                 round_picks = [str(slot["candidate_id"]) for slot in slot_records]
                 # Keep the full records, not just the ids: the audit needs each
@@ -595,16 +639,84 @@ def run_method(frame: pd.DataFrame, normalizer: RiskNormalizer, tau_dev: float, 
         seed=seed,
         initial_ids=initial_ids,
         curve=curve,
-        aubqc=float(sum(values) / 30.0),
+        # ``protocol.aubqc_normalizer`` is exactly 30.0 for the frozen 1N8Z
+        # protocol (six post-seed checkpoints weighing 1 each), so this reproduces
+        # the historical ``1/30`` scaling bit-for-bit while letting a longer
+        # campaign be scored on its own abscissae.
+        aubqc=float(sum(values) / protocol.aubqc_normalizer),
         picks=picks,
         normalized_curve=normalized_curve,
-        normalized_aubqc=float(sum(normalized_values) / 30.0),
+        normalized_aubqc=float(sum(normalized_values) / protocol.aubqc_normalizer),
         panel_curve=panel_curve,
-        panel_aubqc=float(sum(panel_values) / 30.0),
+        panel_aubqc=float(sum(panel_values) / protocol.aubqc_normalizer),
         rho_curve=rho_curve,
         top_decile_hits=int(post_seed_hits),
         top_decile_queries=int(post_seed_queries),
     )
+
+
+def run_variant(
+    frame: pd.DataFrame,
+    normalizer: RiskNormalizer,
+    tau_dev: float,
+    *,
+    seeds: int,
+    variant: str | None,
+    method: str = "m5_hybrid",
+    wt_sequence: str | None = None,
+    anchor_positions: tuple[int, ...] | None = None,
+    protocol: CampaignProtocol | None = None,
+) -> dict:
+    """One M5 mechanism ablated, on the **same matched seeds** as the benchmark.
+
+    ``variant=None`` reproduces production M5 exactly — the caller should assert
+    that before trusting any variant number, which is why the driver returns the
+    full per-seed AUBQC list rather than just a mean.
+
+    The seed batch is drawn with ``np.random.default_rng(seed).choice(...)``,
+    identical to :func:`run_benchmark`, so variant-vs-production differences are
+    attributable to the mechanism and not to a different cold start.
+    """
+    if protocol is None:
+        protocol = compute_campaign_protocol(REFERENCE_N_QUALIFIED, 13)
+    results = [
+        run_method(
+            frame, normalizer, tau_dev, method, seed,
+            np.random.default_rng(seed).choice(
+                frame.candidate_id.to_numpy(), SLOT_COUNT, replace=False
+            ).tolist(),
+            AdaptiveToolPolicy(),
+            wt_sequence=wt_sequence,
+            anchor_positions=anchor_positions,
+            protocol=protocol,
+            variant=variant,
+        )
+        for seed in range(seeds)
+    ]
+    aubqc = np.asarray([r.aubqc for r in results], dtype=float)
+    last_q = protocol.total_budget
+    rho = np.asarray(
+        [
+            next(
+                (p["spearman_rho"] for p in r.rho_curve if p["query_count"] == last_q),
+                None,
+            )
+            for r in results
+        ],
+        dtype=object,
+    )
+    rho_values = np.asarray([v for v in rho if v is not None], dtype=float)
+    return {
+        "variant": variant,
+        "method": method,
+        "seeds": seeds,
+        "aubqc": float(aubqc.mean()),
+        "aubqc_se": float(aubqc.std(ddof=1) / np.sqrt(len(aubqc))) if len(aubqc) > 1 else float("nan"),
+        "aubqc_per_seed": aubqc.tolist(),
+        "rho": float(rho_values.mean()) if rho_values.size else None,
+        "rho_n": int(rho_values.size),
+        "rho_per_seed": [None if v is None else float(v) for v in rho],
+    }
 
 
 def _median_curve(
@@ -614,11 +726,14 @@ def _median_curve(
     *,
     digits: int,
     methods: tuple[str, ...] | None = None,
+    checkpoints: tuple[int, ...] | None = None,
 ) -> list[dict]:
     """Median across seeds of one per-checkpoint series, one column per method."""
     names = METHODS if methods is None else methods
+    if checkpoints is None:
+        checkpoints = compute_campaign_protocol(REFERENCE_N_QUALIFIED, 13).checkpoints
     curve = []
-    for q in range(5, 36, 5):
+    for q in checkpoints:
         row: dict = {"query_count": q}
         for name in names:
             values = [
@@ -873,14 +988,41 @@ def _seed_floor(frame: pd.DataFrame, normalizer: RiskNormalizer, tau_dev: float,
 
 
 def run_benchmark(frame: pd.DataFrame, normalizer: RiskNormalizer, tau_dev: float, *, seeds: int = 10,
-                  m5_policy_mode: str = "adaptive_tool", include_warm_start: bool = True) -> dict:
+                  m5_policy_mode: str = "adaptive_tool", include_warm_start: bool = True,
+                  wt_sequence: str | None = None,
+                  anchor_positions: tuple[int, ...] | None = None,
+                  protocol: CampaignProtocol | None = None) -> dict:
+    """The matched M1-M5 (+ optional warm-start) ablation.
+
+    ``wt_sequence`` / ``anchor_positions`` are the *reference frame* the
+    positional layers score against: the SAR table, ``Δ_agent``, M4's static
+    loop prior and the warm-start rule all compare against it. Omitted, they mean
+    the frozen 1N8Z reference, so every existing call — including the artifact in
+    ``results/benchmark_100seeds.json`` — is unchanged to the last bit. A
+    cross-target run passes its own reference instead of reinterpreting the 1N8Z
+    one, which is the difference between generalizing and mislabelling.
+
+    Every other constant in this function and in :mod:`core.acquisition` (bounds,
+    shrinkage, VoI weights, slot rules, AUBQC's ``1/30``) is deliberately
+    identical across targets: the claim under test is that the *architecture*
+    transfers, not that it can be retuned per dataset.
+    """
+    if protocol is None:
+        protocol = compute_campaign_protocol(REFERENCE_N_QUALIFIED, 13)
     results = []
     warm_results: list[BenchmarkResult] = []
     policy = LiveAgentPolicy() if m5_policy_mode == "live_agent" else AdaptiveToolPolicy()
     for seed in range(seeds):
         initial = np.random.default_rng(seed).choice(frame.candidate_id.to_numpy(), 5, replace=False).tolist()
         # The primary ablation: all five methods share these exact five seeds.
-        results.extend(run_method(frame, normalizer, tau_dev, m, seed, initial, policy) for m in METHODS)
+        results.extend(
+            run_method(
+                frame, normalizer, tau_dev, m, seed, initial, policy,
+                wt_sequence=wt_sequence, anchor_positions=anchor_positions,
+                protocol=protocol,
+            )
+            for m in METHODS
+        )
         if include_warm_start:
             # The optional sixth row re-seeds its own Round 0 from the cold-start
             # prior. It is *not* part of the matched M1-M5 comparison, and its
@@ -890,19 +1032,29 @@ def run_benchmark(frame: pd.DataFrame, normalizer: RiskNormalizer, tau_dev: floa
             warm_results.append(
                 run_method(
                     frame, normalizer, tau_dev, WARM_START_METHOD, seed,
-                    warm_start_ids(frame, normalizer, tau_dev, seed=seed),
+                    warm_start_ids(
+                        frame, normalizer, tau_dev, seed=seed,
+                        wt_sequence=wt_sequence, anchor_positions=anchor_positions,
+                    ),
                     LiveAgentPolicy() if m5_policy_mode == "live_agent" else AdaptiveToolPolicy(),
                     seed_floor=floor,
+                    wt_sequence=wt_sequence, anchor_positions=anchor_positions,
+                    protocol=protocol,
                 )
             )
-    curves = _median_curve(results, "curve", "best_qualified_binding", digits=3)
-    top5_panel_curves = _median_curve(results, "panel_curve", "top5_panel_binding", digits=3)
+    checkpoints = protocol.checkpoints
+    curves = _median_curve(
+        results, "curve", "best_qualified_binding", digits=3, checkpoints=checkpoints
+    )
+    top5_panel_curves = _median_curve(
+        results, "panel_curve", "top5_panel_binding", digits=3, checkpoints=checkpoints
+    )
 
     # Spearman is reported as a seed-mean per checkpoint (not a median of
     # medians) because the quantity of interest is the model's *expected* rank
     # correlation, and per-seed values are already scalar summaries.
     spearman_rho_curves = []
-    for q in range(5, 36, 5):
+    for q in checkpoints:
         row: dict = {"query_count": q}
         for name in METHODS:
             rho = _mean_rho(results, name, q)
@@ -941,16 +1093,39 @@ def run_benchmark(frame: pd.DataFrame, normalizer: RiskNormalizer, tau_dev: floa
     # ``method`` here must be the comprehension's own variable. Referencing the
     # leftover loop variable from the curve loop above silently reported M5's
     # AUBQC under every method name.
+    def _mean_se(values: list[float]) -> tuple[float, float]:
+        """``(mean, standard error)``. The SE is what decides whether a gap is real.
+
+        Reported alongside every headline number because the 100-seed SE on AUBQC
+        is ~0.004-0.007, which is the same order as every M3/M4/M5 difference on
+        1N8Z. A bare mean invited four rounds of reading noise as signal.
+        """
+        arr = np.asarray([v for v in values if v is not None and np.isfinite(v)], dtype=float)
+        if arr.size == 0:
+            return float("nan"), float("nan")
+        if arr.size == 1:
+            return float(arr[0]), float("nan")
+        return float(arr.mean()), float(arr.std(ddof=1) / np.sqrt(arr.size))
+
+    aubqc_mean_se = {m: _mean_se([r.aubqc for r in results if r.method == m]) for m in METHODS}
+
     report = {
         "m5_policy_mode": policy.mode,
         "seeds": seeds,
         "curves": curves,
-        "aubqc": {m: float(np.mean([r.aubqc for r in results if r.method == m])) for m in METHODS},
+        "aubqc": {m: aubqc_mean_se[m][0] for m in METHODS},
+        # Standard errors for every headline scalar. ``aubqc_se[m]`` is the exact
+        # number a reader needs to judge ``aubqc[m] - aubqc[n]``: a difference
+        # smaller than ~2·sqrt(se_m² + se_n²) is not evidence, and the paired
+        # tests below are the sharper instrument when the seeds are matched.
+        "aubqc_se": {m: aubqc_mean_se[m][1] for m in METHODS},
         # ``y*(q)`` rescaled 0-1 between the seed checkpoint and the pool ceiling.
         # The area keeps the preregistered 1/30 scaling, so its ceiling is
         # 6/30 = 0.2 for a method that jumps to the pool ceiling on round one;
         # reported as a clean fraction of headroom, not as 100.
-        "normalized_curves": _median_curve(results, "normalized_curve", "normalized", digits=4),
+        "normalized_curves": _median_curve(
+            results, "normalized_curve", "normalized", digits=4, checkpoints=checkpoints
+        ),
         "normalized_aubqc": {
             m: float(np.mean([r.normalized_aubqc for r in results if r.method == m])) for m in METHODS
         },
@@ -983,11 +1158,11 @@ def run_benchmark(frame: pd.DataFrame, normalizer: RiskNormalizer, tau_dev: floa
         # strictly seed-for-seed.
         warm_curve = _median_curve(
             warm_results, "curve", "best_qualified_binding", digits=3,
-            methods=(WARM_START_METHOD,),
+            methods=(WARM_START_METHOD,), checkpoints=checkpoints,
         )
         warm_panel = _median_curve(
             warm_results, "panel_curve", "top5_panel_binding", digits=3,
-            methods=(WARM_START_METHOD,),
+            methods=(WARM_START_METHOD,), checkpoints=checkpoints,
         )
         report["m5_warm_start"] = {
             "definition": (

@@ -7,9 +7,17 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from .constants import AMINO_ACIDS
 
 
+#: Upper bound on a positional prior's 1-based position. Raised from the frozen
+#: 13 to the longest CDR3 AbBiBench exposes (18) so a cross-target campaign can
+#: declare a rule at its own positions. Every 1N8Z path is unaffected — its
+#: sequences are 13 residues and `validate_sequence` still enforces that length at
+#: the dataset boundary, so a 14th position can never reach a 1N8Z prior.
+MAX_CDR3_LENGTH = 18
+
+
 class PositionalSoftPrior(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    position: int = Field(ge=1, le=13)
+    position: int = Field(ge=1, le=MAX_CDR3_LENGTH)
     preferred_residues: list[str] = Field(default_factory=list)
     discouraged_residues: list[str] = Field(default_factory=list)
     weight_delta: float = Field(ge=-0.15, le=0.15)
@@ -31,9 +39,16 @@ class PositionalSoftPrior(BaseModel):
         return self
 
 
+#: Ceiling on a round number. Mirrors :data:`core.acquisition.ROUNDS_MAX`; kept as
+#: a literal here so ``core.schemas`` stays importable without the acquisition
+#: module (which pulls in numpy/pandas). A dynamically sized campaign runs more
+#: than six rounds, and ``le=6`` would have rejected its planner's own record.
+MAX_ROUNDS = 60
+
+
 class RoundDecisionRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    round_number: int = Field(ge=1, le=6)
+    round_number: int = Field(ge=1, le=MAX_ROUNDS)
     phase: Literal["Cold-Start Tuition (Exploration)", "Self-Accelerating Payoff (Exploitation)"]
     tools_invoked: list[str]
     hypothesis_id: str

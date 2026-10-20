@@ -9,7 +9,7 @@ touching orchestration code.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 
 import pandas as pd
@@ -38,7 +38,13 @@ from .schemas import AgentMemo, PositionalSoftPrior, RoundDecisionRecord
 
 @dataclass(frozen=True)
 class AgentDefinition:
-    """One seat on the council."""
+    """One seat on the council.
+
+    ``prompt`` is the **default** seat text, instantiated for the frozen 1N8Z
+    reference frame. A campaign on another dataset replaces it per round through
+    :attr:`with_prompt`, because a prompt that names ``W3``/``D12`` on an 11-mer
+    describes residues that are not at those positions.
+    """
 
     slug: str
     prompt: str
@@ -54,6 +60,24 @@ class AgentDefinition:
     @property
     def thinking_budget(self) -> int | None:
         return self.model.thinking_budget
+
+    def with_prompt(self, prompt: str | None) -> "AgentDefinition":
+        """This seat, re-instantiated against a target-specific prompt.
+
+        ``None`` returns ``self`` unchanged, so a caller that has no reference
+        frame (the frozen 1N8Z path, and every existing test) keeps the default
+        text exactly. Everything else — model, tools, schema — is preserved: this
+        re-frames the question, it does not change who answers it.
+        """
+        if prompt is None or prompt == self.prompt:
+            return self
+        return AgentDefinition(
+            slug=self.slug,
+            prompt=prompt,
+            tools_invoked=self.tools_invoked,
+            model=self.model,
+            response_schema=self.response_schema,
+        )
 
 
 #: Cognitive-diversity roster. Model ids come from ``core.llm.AGENT_MODELS``;
@@ -229,6 +253,7 @@ async def run_scientists(
     *,
     on_memo: Callable[[AgentMemo], Awaitable[None]] | None = None,
     on_error: Callable[[str, BaseException], Awaitable[None]] | None = None,
+    active_tools: Iterable[str] | None = None,
 ) -> list[AgentMemo]:
     """Run the three scientists concurrently (Skeptic joins the same gather).
 
@@ -236,13 +261,37 @@ async def run_scientists(
     debate instead of waiting for the slowest model. A seat that raises still
     produces a memo describing the failure, so one bad credential or model id
     does not abort the round.
+
+    ``active_tools`` is Option C's drill schedule
+    (:func:`core.tool_arsenal.select_active_tools`). When given, a seat is handed
+    only the tools that are *both* in its static roster *and* currently active —
+    so the Affinity Scientist genuinely loses ``detect_epistasis_clashes`` in
+    Round 1 and regains it in Round 2. The recorded ``tools_invoked`` is what the
+    seat was actually given, not the static tuple, which is what makes the
+    activation visible in the ledger rather than decorative.
+
+    ``None`` keeps the historical behaviour (every rostered tool), so a caller
+    that does not use Option C is unaffected.
     """
+
+    allowed = None if active_tools is None else {str(name) for name in active_tools}
+
+    def seat_tools(definition: AgentDefinition) -> list[str]:
+        roster = list(definition.tools_invoked)
+        if allowed is None:
+            return roster
+        return [name for name in roster if name in allowed]
 
     async def one(definition: AgentDefinition) -> AgentMemo:
         resolved = router.spec_for(definition.role)
+        granted = seat_tools(definition)
         context = {
             "role": definition.role,
-            "tools": {name: tools.get(name) for name in definition.tools_invoked},
+            "tools": {name: tools.get(name) for name in granted},
+            # Named so a memo can explain a tool it used to have and does not.
+            "tools_withheld": [
+                name for name in definition.tools_invoked if name not in granted
+            ],
             "fallback": f"{definition.role} reviewed deterministic evidence; confidence remains bounded.",
         }
         try:
@@ -255,7 +304,7 @@ async def run_scientists(
                 await on_error(definition.role, exc)
         memo = AgentMemo(
             role=definition.role,
-            tools_invoked=list(definition.tools_invoked),
+            tools_invoked=granted,
             thinking_trace=trace,
             memo=text,
             model=resolved.model if resolved else definition.model.model,

@@ -545,16 +545,285 @@ def audit_past_hypotheses(ledger_df: pd.DataFrame, previous_decisions: list[dict
     }
 
 
-def compute_cost_and_effort_saved(ledger_df: pd.DataFrame, assay_cost_usd: int = 1500) -> dict:
+def compute_cost_and_effort_saved(
+    ledger_df: pd.DataFrame,
+    assay_cost_usd: int = 1500,
+    full_pool: int = 419,
+) -> dict:
+    """Cost saved against an exhaustive screen of ``full_pool`` candidates.
+
+    ``full_pool`` defaults to the frozen 1N8Z pool (419), so the live campaign's
+    figure is unchanged. It is a parameter because a cross-target campaign that
+    kept reporting "saved vs 419" would be quoting another dataset's denominator:
+    aayl49_ML has 1,510 candidates, and its saving is 3.6x larger for the same
+    spend.
+    """
     queried = int(ledger_df.candidate_id.nunique()) if "candidate_id" in ledger_df else 0
-    full_pool = 419
     return {"tool": "compute_cost_and_effort_saved", "queries": queried,
             "spent_usd": queried * assay_cost_usd, "full_pool_cost_usd": full_pool * assay_cost_usd,
             "saved_vs_exhaustive_usd": max(0, (full_pool - queried) * assay_cost_usd),
-            "assay_days_parallel_batches": int(np.ceil(queried / 5))}
+            "assay_days_parallel_batches": int(np.ceil(queried / 5)),
+            "full_pool": int(full_pool)}
 
 
 TOOL_REGISTRY: dict[str, Callable] = {fn.__name__: fn for fn in (
     scan_positional_sar, detect_epistasis_clashes, profile_developability_liabilities,
     inspect_joint_uncertainty_hotspots, audit_past_hypotheses, compute_cost_and_effort_saved,
 )}
+
+
+# ── Option C: two-tier SOP baselines + state-triggered drills ────────────────
+#: Tier labels. Rendered verbatim by the UI, so they are stable strings rather
+#: than an enum: a new tier can be added without migrating a ledger.
+TIER_SOP = "SOP Baseline"
+TIER_DRILL = "State-Triggered Drill"
+
+#: Which council seats each tool is routed to. The planner is the synthesizer and
+#: receives every active tool's output; the scientists see only their own.
+TOOL_ROUTING: dict[str, tuple[str, ...]] = {
+    "scan_positional_sar": ("Affinity Scientist", "Experimental Planner"),
+    "profile_developability_liabilities": ("Developability Scientist", "Experimental Planner"),
+    "inspect_joint_uncertainty_hotspots": ("Scientific Skeptic", "Experimental Planner"),
+    "audit_past_hypotheses": ("Scientific Skeptic", "Experimental Planner"),
+    "detect_epistasis_clashes": ("Affinity Scientist", "Scientific Skeptic"),
+    "compute_cost_and_effort_saved": ("Experimental Planner",),
+}
+
+#: Tier per tool. The two SOP baselines are the evidence every round is required
+#: to gather; the four drills are diagnostics the campaign state has to justify.
+TOOL_TIERS: dict[str, str] = {
+    "scan_positional_sar": TIER_SOP,
+    "profile_developability_liabilities": TIER_SOP,
+    "inspect_joint_uncertainty_hotspots": TIER_DRILL,
+    "audit_past_hypotheses": TIER_DRILL,
+    "detect_epistasis_clashes": TIER_DRILL,
+    "compute_cost_and_effort_saved": TIER_DRILL,
+}
+
+#: Display order for the tool panel, and the order ``select_active_tools``
+#: returns. Stable so a UI can diff two rounds positionally and highlight the
+#: rows that flipped.
+ACTIVE_TOOL_ORDER: tuple[str, ...] = (
+    "scan_positional_sar",
+    "profile_developability_liabilities",
+    "inspect_joint_uncertainty_hotspots",
+    "audit_past_hypotheses",
+    "detect_epistasis_clashes",
+    "compute_cost_and_effort_saved",
+)
+
+#: ``sar_maturity`` at which the epistasis drill may open before the query count
+#: does. A table this converged already carries the co-mutation evidence the drill
+#: exists to find, so waiting for batch 2 solely on a query count would be
+#: withholding a measurement the campaign has already earned.
+EPISTASIS_MATURITY_TRIGGER = 0.30
+
+#: ``VoI`` at or below which the cost drill opens: the campaign has entered its
+#: payoff regime, so "what has this loop saved versus an exhaustive screen?" stops
+#: being a forecast and becomes a reportable number.
+COST_PAYOFF_VOI_TRIGGER = 0.35
+
+
+def _sop_reason(round_number: int) -> tuple[bool, str]:
+    """Tier 1 predicate: on for every planning round, off for the seed batch.
+
+    Round 0 is the five-query seed draw. No council runs and no batch is designed,
+    so claiming the SOP baselines were *routed* there would be false — the rounds
+    the request names are 1..6.
+    """
+    if round_number < 1:
+        return False, "Deactivated: seed round has no council planning step"
+    return True, f"Active: mandatory SOP baseline (R{round_number})"
+
+
+#: Reason emitted for every drill on the seed batch. Round 0 has no council, and
+#: its ``voi``/``sar_maturity`` are ``empty_state`` placeholders rather than
+#: measurements — ``voi = 0.0`` there would otherwise satisfy the cost drill's
+#: ``voi <= 0.35`` clause and report a "payoff regime" for a campaign that has not
+#: designed a single batch. A drill is a diagnostic the council chooses to run, so
+#: no council means no drill.
+_NO_COUNCIL = "Deactivated: seed round has no council (no batch designed yet)"
+
+
+def _hotspot_reason(round_number: int, voi: float) -> tuple[bool, str]:
+    """Tier 2: joint-uncertainty hotspots are worth inspecting only if VoI > 0.
+
+    ``VoI == 0`` means no future query can be re-decided against what this batch
+    would learn — the terminal harvest. Inspecting uncertainty there would rank
+    candidates nothing can still act on.
+    """
+    if round_number < 1:
+        return False, _NO_COUNCIL
+    if voi > 0.0:
+        return True, f"Active: VoI = {voi:.4f} > 0"
+    return False, f"Deactivated: Terminal harvest (VoI = {voi:.4f})"
+
+
+def _audit_reason(round_number: int) -> tuple[bool, str]:
+    """Tier 2: there is nothing to audit before one round has completed."""
+    if round_number < 1:
+        return False, _NO_COUNCIL
+    if round_number >= 2:
+        return True, f"Active: {round_number - 1} past decision(s) to audit (R{round_number} >= R2)"
+    return False, "Deactivated: no completed round to audit yet (R1 < R2)"
+
+
+def _epistasis_reason(
+    round_number: int, queries_spent: int, sar_maturity: float
+) -> tuple[bool, str]:
+    """Tier 2: co-mutation residuals need two observations per position.
+
+    The gate is ``queries_spent >= 10``, which — counting the seed batch — is
+    exactly ``round_number >= 2``, the round the request names. ``sar_maturity``
+    is accepted and reported for context but deliberately **not** an alternative
+    trigger: the golden ledger already reports ``sar_maturity = 0.65`` in Round 1,
+    so an ``or sar_maturity >= 0.30`` clause would open the drill in the very round
+    the request says it must be closed. What the drill actually consumes is
+    co-mutation evidence, and that is a function of how many variants have been
+    measured — not of how converged the table already is.
+    """
+    if round_number < 1:
+        return False, _NO_COUNCIL
+    if queries_spent >= 10:
+        return True, (
+            f"Active: {queries_spent} queries spent >= 10 (R{round_number} >= R2)"
+        )
+    return (
+        False,
+        f"Deactivated: only {queries_spent} queries spent < 10 "
+        f"(R{round_number} < R2); SAR maturity {sar_maturity:.4f} is not a trigger",
+    )
+
+
+def _cost_reason(round_number: int, voi: float) -> tuple[bool, str]:
+    """Tier 2: cost saved is a payoff-regime report, not a tuition-phase forecast."""
+    if round_number < 1:
+        return False, _NO_COUNCIL
+    if round_number >= 3:
+        return True, f"Active: payoff regime (R{round_number} >= R3)"
+    if voi <= COST_PAYOFF_VOI_TRIGGER:
+        return (
+            True,
+            f"Active: payoff regime (VoI = {voi:.4f} <= {COST_PAYOFF_VOI_TRIGGER:.2f})",
+        )
+    return (
+        False,
+        f"Deactivated: tuition regime (R{round_number} < R3 and VoI = {voi:.4f} "
+        f"> {COST_PAYOFF_VOI_TRIGGER:.2f})",
+    )
+
+
+#: ``name -> predicate``. Each predicate returns ``(active, trigger_reason)`` and
+#: is the *single* definition of that tool's trigger; the UI, the runner and the
+#: tests all read the flag this produces, so a reason string can never disagree
+#: with the boolean beside it.
+TOOL_TRIGGERS: dict[str, Callable[..., tuple[bool, str]]] = {
+    "scan_positional_sar": _sop_reason,
+    "profile_developability_liabilities": _sop_reason,
+    "inspect_joint_uncertainty_hotspots": _hotspot_reason,
+    "audit_past_hypotheses": _audit_reason,
+    "detect_epistasis_clashes": _epistasis_reason,
+    "compute_cost_and_effort_saved": _cost_reason,
+}
+
+
+def select_active_tools(
+    round_number: int,
+    queries_spent: int,
+    voi: float,
+    sar_maturity: float,
+) -> dict:
+    """Option C: partition the six tools into SOP baselines and triggered drills.
+
+    Deterministic and pure — the same four numbers always produce the same table,
+    so the live ``/api/state`` and a ``/api/state?round=k`` reconstruction cannot
+    disagree, and a test can recompute every flag from its own ``trigger_reason``.
+
+    Two tiers:
+
+    **Tier 1 — SOP baselines**, active in every planning round (1..6) and off only
+    on the seed batch, which has no council::
+
+        scan_positional_sar             -> Affinity Scientist, Experimental Planner
+        profile_developability_liabilities
+                                        -> Developability Scientist, Experimental Planner
+
+    **Tier 2 — state-triggered drills**, each opened by a campaign-state predicate::
+
+        inspect_joint_uncertainty_hotspots   voi > 0            (deactivates at the
+                                                                 terminal harvest)
+        audit_past_hypotheses                round_number >= 2
+        detect_epistasis_clashes             queries_spent >= 10
+                                             or sar_maturity >= 0.30
+        compute_cost_and_effort_saved        round_number >= 3 or voi <= 0.35
+
+    ``queries_spent`` must be the **planning prefix** — the ledger the council saw
+    when it designed this round, i.e. the reveals through ``round_number - 1``, not
+    through ``round_number``. Passing the round's own spend would open the
+    epistasis drill one batch early in every campaign.
+
+    ``voi`` and ``sar_maturity`` are expected pre-rounded to the precision the API
+    exports them at (4 dp), because a raw ``-1e-17`` residual would otherwise
+    deactivate the hotspot drill in the live view while the reconstructed view,
+    reading a rounded ``0.0``, deactivated it by the terminal-harvest branch. One
+    rounding rule, applied by the caller, keeps both paths byte-identical.
+    """
+    # Every predicate receives ``round_number`` first: the seed batch has no
+    # council, and on it ``voi == 0.0`` is an ``empty_state`` placeholder rather
+    # than a measured payoff signal. Without the guard that placeholder satisfies
+    # the cost drill's ``voi <= 0.35`` clause and reports a payoff regime for a
+    # campaign that has not designed a batch.
+    arguments = {
+        "scan_positional_sar": (int(round_number),),
+        "profile_developability_liabilities": (int(round_number),),
+        "inspect_joint_uncertainty_hotspots": (int(round_number), float(voi)),
+        "audit_past_hypotheses": (int(round_number),),
+        "detect_epistasis_clashes": (
+            int(round_number), int(queries_spent), float(sar_maturity),
+        ),
+        "compute_cost_and_effort_saved": (int(round_number), float(voi)),
+    }
+    tools = []
+    for name in ACTIVE_TOOL_ORDER:
+        active, reason = TOOL_TRIGGERS[name](*arguments[name])
+        tools.append({
+            "name": name,
+            "tier": TOOL_TIERS[name],
+            "active": bool(active),
+            "trigger_reason": reason,
+            "routed_to": list(TOOL_ROUTING[name]),
+        })
+    return {
+        "round_number": int(round_number),
+        "queries_spent": int(queries_spent),
+        "voi": float(voi),
+        "sar_maturity": float(sar_maturity),
+        "active": [tool["name"] for tool in tools if tool["active"]],
+        "tools": tools,
+    }
+
+
+#: Decimal places ``/api/state`` exports ``voi`` and ``sar_maturity`` at. The
+#: tool table is derived from the *exported* values, never the raw floats, so the
+#: live view and a round-``k`` reconstruction cannot disagree: the live campaign
+#: holds a raw ``voi`` of ~``-1e-17`` on the final batch while the reconstruction
+#: reads the rounded ``0.0`` off the persisted batch design, and the hotspot drill
+#: would otherwise be active in one and inactive in the other.
+VOI_EXPORT_DIGITS = 4
+
+
+def active_tools_for_state(
+    *, round_number: int, queries_spent: int, voi: float, sar_maturity: float
+) -> dict:
+    """The exported ``active_tools_metadata`` block for one round.
+
+    Single call site for the rounding rule documented on :data:`VOI_EXPORT_DIGITS`,
+    so ``empty_state``, the live ``_refresh_state`` path and ``state_at`` all
+    produce byte-identical tables for the same round.
+    """
+    return select_active_tools(
+        round_number=int(round_number),
+        queries_spent=int(queries_spent),
+        voi=round(float(voi), VOI_EXPORT_DIGITS),
+        sar_maturity=round(float(sar_maturity), VOI_EXPORT_DIGITS),
+    )

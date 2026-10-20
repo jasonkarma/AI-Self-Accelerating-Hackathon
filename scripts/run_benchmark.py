@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config.settings import SETTINGS
@@ -88,8 +90,19 @@ def print_report(report: dict) -> None:
     rho_q35 = {
         row["query_count"]: row for row in report["spearman_rho_curves"]
     }.get(35, {})
+    aubqc_se = report.get("aubqc_se") or {}
+
+    def _with_se(method: str) -> str:
+        """``mean ± SE`` — the width that decides whether a gap is evidence."""
+        mean = report["aubqc"][method]
+        se = aubqc_se.get(method)
+        if se is None or not np.isfinite(se):
+            return _cell(mean, 13, 4)
+        return f"{mean:>7.4f} ±{se:.4f}"
+
     summary_rows = [
-        ["AUBQC (1/30)"] + [_cell(report["aubqc"][m], 7, 4) for m in methods],
+        ["AUBQC (1/30), mean ±SE"] + [_with_se(m) for m in methods],
+        ["AUBQC (1/30), point"] + [_cell(report["aubqc"][m], 7, 4) for m in methods],
         ["normalized AUBQC"] + [_cell(report["normalized_aubqc"][m], 7, 4) for m in methods],
         ["top-5 panel AUBQC"] + [_cell(report["top5_panel_aubqc"][m], 7, 4) for m in methods],
         ["top-decile hit rate"] + [_cell(report["top_decile_hit_rate"][m], 7, 4) for m in methods],
@@ -183,8 +196,29 @@ if __name__ == "__main__":
     path = SETTINGS.root / f"results/benchmark_{args.seeds}seeds.json"
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps(result, indent=2) + "\n")
-    if args.seeds == 10:
-        SETTINGS.benchmark_path.write_text(json.dumps(result, indent=2) + "\n")
+
+    # ``SETTINGS.benchmark_path`` is what ``/api/benchmark`` serves, and the stage
+    # tests assert it carries the full 100-seed ablation. It therefore must not be
+    # overwritten by a *shorter* exploratory run: a 10-seed pass used to clobber
+    # the published artifact, which silently downgraded the served report and
+    # broke the UI's seed-21 same-seed row. Publishing only when the new run is at
+    # least as large as what is already on disk makes the artifact monotone in
+    # evidence, which is the property a reader expects of a published table.
+    served = SETTINGS.benchmark_path
+    published_seeds = 0
+    if served.exists():
+        try:
+            published_seeds = int(json.loads(served.read_text()).get("seeds") or 0)
+        except (ValueError, OSError):
+            published_seeds = 0
+    if args.seeds >= published_seeds:
+        served.write_text(json.dumps(result, indent=2) + "\n")
+        print(f"wrote {served} (served by /api/benchmark)")
+    else:
+        print(
+            f"kept {served}: it holds a {published_seeds}-seed run, which a "
+            f"{args.seeds}-seed pass must not downgrade"
+        )
 
     print_report(result)
     print(f"\nwrote {path}")

@@ -14,6 +14,7 @@ from .acquisition import (
     sar_effect_table,
     score_pool,
 )
+from .prompts import DEFAULT_TARGET_NAME, build_prompts
 from config.settings import SETTINGS
 from .agents import (
     AGENT_DEFINITIONS,
@@ -25,11 +26,13 @@ from .agents import (
 from .llm import DeterministicReasoner, ModelRouter
 from .schemas import AgentMemo, PositionalSoftPrior, RoundDecisionRecord
 from .tool_arsenal import (
+    VOI_EXPORT_DIGITS,
     audit_past_hypotheses,
     detect_epistasis_clashes,
     inspect_joint_uncertainty_hotspots,
     profile_developability_liabilities,
     scan_positional_sar,
+    select_active_tools,
 )
 
 
@@ -96,18 +99,45 @@ def _deterministic_decision(
     ``ranked`` (ordered by ``sigma_joint``) remains the ordering for slots 3-5 when
     no prospective batch is available.
     """
+    # The contract requires slots 3, 4 and 5 to be *distinct* candidates, and slot
+    # 3 is pinned to ``ranked[0]`` below. So every fallback here has to skip
+    # ``ranked[0]`` as well as any slot already claimed — otherwise a batch whose
+    # prospective list is short (or a caller that supplies no batch at all) yields
+    # ``h1 == h0`` or ``h1 == slot3`` and ``RoundDecisionRecord`` rejects the whole
+    # round. That is the ``next_unused`` bug in ``_reconcile_decision`` wearing a
+    # different hat, and it is worth stating: this function builds a *decision*, so
+    # its identifiers must satisfy the decision's own uniqueness contract.
+    def _distinct_fallback(*used_ids: str) -> list[str]:
+        taken = {cid for cid in used_ids if cid} | {ranked[0]}
+        spare = [cid for cid in ranked if cid not in taken]
+        if len(spare) < 2:
+            raise ValueError(
+                "Planner requires at least three unqueried candidates distinct from "
+                f"the slot-3 probe ({ranked[0]}); got {len(ranked)}"
+            )
+        return spare[:2]
+
     if prospective:
         by_slot = {int(slot["slot_id"]): str(slot["candidate_id"]) for slot in prospective}
-        h1 = by_slot.get(4) or by_slot.get(1) or ranked[1]
-        h0 = by_slot.get(5) or ranked[2]
+        h1 = by_slot.get(4) or by_slot.get(1)
+        h0 = by_slot.get(5)
+        if not h1 or not h0 or h1 == h0 or h1 == ranked[0] or h0 == ranked[0]:
+            h1, h0 = _distinct_fallback(h1 or "", h0 or "")
         statement = (
             f"H1 candidate {h1} will out-measure the H0 control {h0} on this batch's "
             f"binding assay."
         )
         supporting = [str(slot["candidate_id"]) for slot in prospective]
     else:
-        h1, h0 = ranked[1], ranked[2]
-        statement = "Conserve W3 while exploring lower-liability substitutions."
+        h1, h0 = _distinct_fallback()
+        # The fallback claim has to be testable on *any* target, so it cannot name
+        # a fixed residue ("conserve W3" was a claim about 1N8Z's position 3 that
+        # the audit could never grade, and on an 11-mer it named a position that
+        # does not exist). It states the comparison the batch will actually run.
+        statement = (
+            f"H1 candidate {h1} will out-measure its nearest competitor on this "
+            f"batch's binding assay."
+        )
         supporting = ledger.candidate_id.astype(str).head(3).tolist() if not ledger.empty else []
 
     return RoundDecisionRecord(
@@ -120,7 +150,12 @@ def _deterministic_decision(
         supporting_candidate_ids=supporting,
         agent_disagreement_summary="Skeptic reserves a direct falsification slot.",
         confidence_rating="Low" if len(ledger) < 15 else "Medium",
-        positional_priors=priors or [PositionalSoftPrior(position=3, preferred_residues=["W"], discouraged_residues=[], weight_delta=.15)],
+        # No invented default prior. A hardcoded ``position=3, preferred=["W"]``
+        # declared a 1N8Z structural claim on every target; when the council has
+        # not spoken, the honest value is an empty rule set, which reduces
+        # ``Δ_agent`` to its empirical and structural halves rather than to one
+        # dataset's residues.
+        positional_priors=priors or [],
         # Slot 3 is the contract's max-joint-uncertainty probe on *every* path —
         # ``_reconcile_decision`` enforces the same invariant for the live planner.
         # The selector's VoI-exploration pick is a different, later decision, and
@@ -235,11 +270,25 @@ def _reconcile_decision(
         raise ValueError("Planner requires at least three unqueried candidates")
 
     def next_unused(used: set[str], preferred: str, pool: list[str] | None = None) -> str:
-        candidates = pool or ranked
-        # Only candidates the acquisition step can actually score are eligible.
-        if preferred in candidates and preferred not in used:
-            return preferred
-        return next(cid for cid in candidates if cid not in used)
+        """An unused candidate, preferring ``preferred`` then ``pool`` then ``ranked``.
+
+        The three-tier fallback is load-bearing, not defensive programming. A
+        role-restricted pool (``h1_candidates`` or ``h0_candidates``) can be
+        *exhausted*: if slot 3 already consumed the only H0 candidate, searching
+        the role list alone raises ``StopIteration`` from an unguarded ``next()``
+        or, worse, silently re-uses an id and fails ``unique_targets``. Falling
+        back to ``ranked`` keeps the contract satisfiable while still honouring
+        the role whenever the role list has anything left.
+        """
+        for candidates in (pool, ranked):
+            if not candidates:
+                continue
+            if preferred in candidates and preferred not in used:
+                return preferred
+            spare = [cid for cid in candidates if cid not in used]
+            if spare:
+                return spare[0]
+        raise ValueError("no unqueried candidate available for a planner slot")
 
     slot3 = ranked[0]
     used = {slot3}
@@ -263,13 +312,53 @@ def _reconcile_decision(
 
 
 class VirtualLabRunner:
-    def __init__(self, router: ModelRouter | None = None, *, hitl: bool = False):
+    def __init__(
+        self,
+        router: ModelRouter | None = None,
+        *,
+        hitl: bool = False,
+        wt_sequence: str | None = None,
+        target_name: str | None = None,
+        anchor_positions: tuple[int, ...] | None = None,
+    ):
         self.router, self.hitl, self.events = router or ModelRouter(), hitl, RoundEventBus()
         self._approval = asyncio.Event()
         self.previous_decisions: list[dict] = []
         #: What each round's council *declared*, kept for provenance now that the
         #: selector is scored on data-derived priors. Keyed by round number.
         self.declared_priors_by_round: dict[int, list[dict]] = {}
+        #: Reference frame the council is briefed on. ``None`` means the frozen 1N8Z
+        #: frame, which is what every existing caller and the live campaign get, so
+        #: no prompt text changes unless a cross-target campaign opts in.
+        self.wt_sequence = wt_sequence
+        self.target_name = target_name
+        self.anchor_positions = anchor_positions
+        self._prompts: dict[str, str] | None = (
+            None
+            if wt_sequence is None and target_name is None and anchor_positions is None
+            else build_prompts(
+                wt_sequence=wt_sequence,
+                target_name=target_name or DEFAULT_TARGET_NAME,
+                anchor_positions=anchor_positions,
+            )
+        )
+
+    def prompts_for(self, *, tau_dev: float | None = None) -> dict[str, str] | None:
+        """Target-specific seat prompts, or ``None`` for the frozen defaults.
+
+        Rebuilt per call only when a frame was supplied, because ``tau_dev`` is a
+        protocol property rather than a runner property. ``None`` is deliberate:
+        it tells every downstream consumer "use the default text", so the frozen
+        1N8Z path is a genuine no-op rather than a re-rendered equivalent.
+        """
+        if self.wt_sequence is None and self.target_name is None and self.anchor_positions is None:
+            return None
+        return build_prompts(
+            wt_sequence=self.wt_sequence,
+            target_name=self.target_name or DEFAULT_TARGET_NAME,
+            anchor_positions=self.anchor_positions,
+            tau_dev=tau_dev,
+        )
 
     def approve(self) -> None: self._approval.set()
 
@@ -290,16 +379,6 @@ class VirtualLabRunner:
         phase_exact = "Cold-Start Tuition (Exploration)" if round_number <= 2 else "Self-Accelerating Payoff (Exploitation)"
         await self.events.emit("round_started", {"round": round_number, "phase": phase_short})
 
-        tools = {
-            "scan_positional_sar": scan_positional_sar(ledger),
-            "detect_epistasis_clashes": detect_epistasis_clashes(ledger),
-            "inspect_joint_uncertainty_hotspots": inspect_joint_uncertainty_hotspots(unqueried),
-            "audit_past_hypotheses": audit_past_hypotheses(ledger, self.previous_decisions),
-            "profile_developability_liabilities": self._developability_tool(unqueried),
-        }
-        for name, output in tools.items():
-            await self.events.emit("tool_output", {"tool": name, "output": output})
-
         # Score the pool with the *selector's own* objective before the council
         # sees it. The shortlist used to be ranked by ``sigma_joint`` (the
         # exploration axis) while ``select_five_slots`` ranked by ``A_H1`` and
@@ -308,6 +387,12 @@ class VirtualLabRunner:
         # candidates it had never mentioned. Feeding the planner the prospective
         # batch instead of a differently-ranked list is the fix: the claim is
         # written about candidates that are actually entering this round.
+        #
+        # This now runs *before* the tool table, because Option C's drill schedule
+        # is driven by the ``voi`` / ``sar_maturity`` this call returns. Building
+        # every tool first and filtering afterwards would run five deterministic
+        # scans whose output nobody consumes, and — worse — would emit
+        # ``tool_output`` events for drills the schedule has switched off.
         base_priors = deterministic_priors(ledger, tau_dev, falsified_positions=falsified_positions)
         scored, voi = score_pool(
             unqueried,
@@ -321,6 +406,33 @@ class VirtualLabRunner:
             total_budget=SETTINGS.total_budget,
             batch_size=SETTINGS.batch_size,
         )
+        # ``queries_spent`` here is the planning prefix — the ledger the council
+        # is looking at *now*, before this round's batch is measured — which is
+        # exactly what ``select_active_tools`` documents it needs.
+        activation = select_active_tools(
+            round_number=round_number,
+            queries_spent=int(len(ledger)),
+            voi=round(float(voi["voi"]), VOI_EXPORT_DIGITS),
+            sar_maturity=round(float(voi["sar_maturity"]), VOI_EXPORT_DIGITS),
+        )
+        active_names = set(activation["active"])
+        await self.events.emit("tool_activation", activation)
+
+        # Only the drills the schedule opened are computed and emitted.
+        builders = {
+            "scan_positional_sar": lambda: scan_positional_sar(ledger),
+            "detect_epistasis_clashes": lambda: detect_epistasis_clashes(ledger),
+            "inspect_joint_uncertainty_hotspots": lambda: inspect_joint_uncertainty_hotspots(unqueried),
+            "audit_past_hypotheses": lambda: audit_past_hypotheses(ledger, self.previous_decisions),
+            "profile_developability_liabilities": lambda: self._developability_tool(unqueried),
+        }
+        tools = {
+            name: build()
+            for name, build in builders.items()
+            if name in active_names
+        }
+        for name, output in tools.items():
+            await self.events.emit("tool_output", {"tool": name, "output": output})
         prospective = prospective_slots(scored)
         eligible = qualified_pool(unqueried, tau_dev)
         ranked = eligible.sort_values(["sigma_joint", "candidate_id"], ascending=[False, True]).candidate_id.tolist()
@@ -348,7 +460,9 @@ class VirtualLabRunner:
             )
 
         memos = await run_scientists(
-            self.router, tools, on_memo=stream_memo, on_error=report_error
+            self.router, tools,
+            on_memo=stream_memo, on_error=report_error,
+            active_tools=active_names,
         )
 
         # The exact Σ-priors + empirical-SAR numbers behind Δ_agent, reused for

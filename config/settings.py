@@ -42,6 +42,15 @@ class Settings:
     #: it, so a bad live round can never cost the demo its campaign.
     golden_ledger_path: Path = ROOT / "results/golden_seed21.sqlite3"
     benchmark_path: Path = ROOT / "results/benchmark_10seeds.json"
+    #: Cross-target generalization artifact (``scripts/run_cross_target_benchmark.py``).
+    #: Deliberately *not* ``benchmark_path``: the 1N8Z ablation is the frozen
+    #: reference and a second target must never overwrite it.
+    cross_target_benchmark_path: Path = ROOT / "results/cross_target_benchmark.json"
+    cross_target_csv: Path = ROOT / "data/processed/cross_target.csv"
+    #: The cross-target protocol is frozen to its own file. ``freeze_protocol``
+    #: defaults to ``protocol_path``, which is the 1N8Z preregistration — calling it
+    #: without an explicit output would invalidate the live campaign and golden ledger.
+    cross_target_protocol_path: Path = ROOT / "config/cross_target_protocol.json"
     pool_size: int = 419
     initial_queries: int = 5
     rounds: int = 6

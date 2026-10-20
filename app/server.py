@@ -180,6 +180,55 @@ def candidates(offset: int = 0, limit: int = 100): return {"total": len(current(
 @app.get("/api/benchmark")
 def benchmark(): return benchmark_payload()
 
+
+#: ``results/cross_target_benchmark.json`` memoized on its mtime+size. The artifact
+#: is written by a script, not by the campaign, so it can be regenerated while the
+#: API is up; keying on the stat means the endpoint picks that up without a restart
+#: and without re-reading a multi-MB JSON on every poll.
+_cross_target_cache: dict | None = None
+_cross_target_key: tuple | None = None
+
+
+def cross_target_payload() -> dict:
+    """The second-target generalization report, as written by the script.
+
+    Served verbatim rather than recomputed: the benchmark takes minutes and the
+    endpoint is a *report* of a run that was already made. The one addition is
+    ``available``, so a checkout where the script has not run yet gets an explicit
+    ``false`` instead of a 500 or a misleadingly empty report.
+    """
+    global _cross_target_cache, _cross_target_key
+    path = SETTINGS.cross_target_benchmark_path
+    if not path.exists():
+        return {
+            "available": False,
+            "path": str(path),
+            "detail": (
+                "cross-target artifact not generated; run "
+                "`python scripts/run_cross_target_benchmark.py --seeds 50`"
+            ),
+        }
+    stat = path.stat()
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    if _cross_target_cache is not None and _cross_target_key == key:
+        return _cross_target_cache
+    try:
+        payload = json.loads(path.read_text())
+        payload.setdefault("cross_target", {})
+        payload["available"] = True
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "available": False,
+            "path": str(path),
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+    _cross_target_cache, _cross_target_key = payload, key
+    return payload
+
+
+@app.get("/api/cross-target")
+def cross_target(): return cross_target_payload()
+
 @app.get("/api/ledger")
 def ledger():
     store = current().ledger

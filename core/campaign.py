@@ -16,12 +16,14 @@ from .acquisition import sar_effect_table, select_five_slots
 from .tool_arsenal import (
     H1_ARM_KEY,
     H1_EXPLOIT_SLOT_IDS,
+    active_tools_for_state,
     audit_past_hypotheses,
     compute_cost_and_effort_saved,
     detect_epistasis_clashes,
     inspect_joint_uncertainty_hotspots,
     profile_developability_liabilities,
     scan_positional_sar,
+    select_active_tools,
 )
 from .constants import CHECKPOINT_QUERIES, WT_SEQUENCE
 from .virtual_lab_runner import VirtualLabRunner
@@ -422,6 +424,16 @@ class Campaign:
         # campaign whose final batch genuinely had ``voi == 0`` for a *different*
         # reason, and the UI could not distinguish the two.
         self.state["voi_diagnostics"] = self._voi_diagnostics(last_round, self.state["batch_slots"], revealed)
+        # Option C: the council memos restored above are the payload as recorded,
+        # which predates the tool-activation schedule. The split is attached here,
+        # after the diagnostics exist, so the live hydrated view and the ``state_at``
+        # reconstruction carry identical memo objects — ``tests/test_stage_readiness``
+        # compares them by exact dict equality.
+        if self.state["agent_council"]:
+            self.state["agent_council"] = self._annotate_council_memos(
+                self.state["agent_council"],
+                self.state["voi_diagnostics"]["active_tools_metadata"],
+            )
         # ``pareto_data`` was the one contract field this replay left empty, so a
         # restarted API served an empty risk/binding scatter for a campaign that
         # had queried 35 candidates. It is a pure function of the revealed ledger.
@@ -516,6 +528,38 @@ class Campaign:
     def _round_reveals(self, round_number: int) -> pd.DataFrame:
         """Reveals at the end of ``round_number`` (``round_number == -1``: none)."""
         return self.snapshot().revealed(max(-1, round_number))
+
+    def _annotate_council_memos(self, memos: list[dict], metadata: dict) -> list[dict]:
+        """Split each memo's ``tools_invoked`` into active and inactive (Option C).
+
+        The recorded list is **not** rewritten. A memo in the golden ledger was
+        written before Option C existed, and its ``tools_invoked`` is what that
+        council actually cited at the time; overwriting it would make the audit
+        trail claim a seat saw a tool it never ran. Instead the round's live
+        activation table is attached beside it:
+
+        * ``tools_invoked_active`` — cited tools the drill schedule says are on for
+          this round;
+        * ``tools_inactive`` — cited tools that are off, so the UI can grey them out
+          and explain why rather than silently dropping them;
+        * ``tool_activation_reasons`` — the trigger string per cited tool.
+        """
+        active = set(metadata.get("active") or ())
+        reasons = {
+            tool["name"]: tool["trigger_reason"]
+            for tool in metadata.get("tools") or []
+        }
+        annotated = []
+        for memo in memos:
+            entry = dict(memo)
+            cited = [str(name) for name in entry.get("tools_invoked") or ()]
+            entry["tools_invoked_active"] = [name for name in cited if name in active]
+            entry["tools_inactive"] = [name for name in cited if name not in active]
+            entry["tool_activation_reasons"] = {
+                name: reasons[name] for name in cited if name in reasons
+            }
+            annotated.append(entry)
+        return annotated
 
     def _round_verdicts(self, round_number: int) -> tuple[list[dict], set[int]]:
         """Hypothesis verdicts and inverted positions **as of** ``round_number``.
@@ -739,7 +783,9 @@ class Campaign:
         state["voi_diagnostics"] = self._voi_diagnostics(round_number, slots, revealed)
         state["hcdr3_ribbon"] = self._ribbon_for(round_number)
         state["declared_priors"] = declared
-        state["agent_council"] = memos
+        state["agent_council"] = self._annotate_council_memos(
+            memos, state["voi_diagnostics"]["active_tools_metadata"]
+        )
         state["batch_slots"] = slots
         state["pareto_data"] = self._pareto_data(revealed)
         state["hypotheses"] = hypotheses
@@ -765,6 +811,8 @@ class Campaign:
             last = hypotheses[-1] if hypotheses else {}
             slots = state.get("batch_slots") or []
             kpis = state["kpis"]
+            diagnostics = state["voi_diagnostics"]
+            active_metadata = diagnostics.get("active_tools_metadata") or {}
             entries.append({
                 "round": round_number,
                 "label": "Seed" if round_number == 0 else f"R{round_number}",
@@ -772,9 +820,9 @@ class Campaign:
                 "query_count": kpis["query_budget_spent"],
                 "best_qualified_binding": kpis["best_qualified_binding"],
                 "delta_vs_wt": kpis["delta_vs_wt"],
-                "voi": state["voi_diagnostics"]["voi"],
-                "sar_maturity": state["voi_diagnostics"]["sar_maturity"],
-                "exploit_weight": state["voi_diagnostics"]["exploit_weight"],
+                "voi": diagnostics["voi"],
+                "sar_maturity": diagnostics["sar_maturity"],
+                "exploit_weight": diagnostics["exploit_weight"],
                 "hypotheses_supported": kpis["hypotheses_supported"],
                 "hypotheses_falsified": kpis["hypotheses_falsified"],
                 "hypothesis_id": last.get("hypothesis_id"),
@@ -783,6 +831,18 @@ class Campaign:
                 "council_seats": len(state.get("agent_council") or []),
                 "slots": len(slots),
                 "slot_candidate_ids": [slot.get("candidate_id") for slot in slots],
+                # Option C: the compact per-round tool summary, so the stepper can
+                # show a drill switching on/off between two adjacent entries without
+                # fetching either round's full state.
+                "active_tools": list(active_metadata.get("active") or []),
+                "inactive_tools": [
+                    tool["name"] for tool in active_metadata.get("tools") or []
+                    if not tool["active"]
+                ],
+                "tool_tiers": {
+                    tool["name"]: tool["tier"]
+                    for tool in active_metadata.get("tools") or []
+                },
             })
         return entries
 
@@ -1112,6 +1172,19 @@ class Campaign:
             entry["verdict"] = record["verdict"]
             entry["evidence"] = record
 
+    def _queries_before_round(self, round_number: int) -> int:
+        """Queries the council had seen when it designed ``round_number``.
+
+        The **planning prefix**, not the round's own spend: round ``k`` was designed
+        from the reveals through ``k - 1``. Feeding the Option C selector the
+        round's own spend would open ``detect_epistasis_clashes`` in R1 (10 queries)
+        instead of R2, which is exactly the off-by-one-batch the drill's
+        ``queries_spent >= 10`` trigger is written against.
+        """
+        if round_number < 1:
+            return 0
+        return int(len(self._round_reveals(round_number - 1)))
+
     def _voi_diagnostics(self, round_number: int, slots: list[dict], revealed: pd.DataFrame) -> dict:
         """Batch-level VoI state plus the position-level SAR that fed ``Δ_agent``.
 
@@ -1119,6 +1192,14 @@ class Campaign:
         (they are computed once from the qualified pool), so the batch-level view
         simply reads them off slot 1. ``exploit_weight`` is spelled out because it
         *is* the architecture change: 0.35 in Round 1, 1.0 by the final batch.
+
+        ``active_tools_metadata`` (Option C) is derived from the **already-rounded**
+        VoI and SAR maturity this dict exports, never the raw floats. The live path
+        and the ``state_at`` reconstruction must agree field for field —
+        ``tests/test_stage_readiness.py`` compares the two by exact dict equality —
+        and a raw ``voi`` of ``-1e-17`` on the final batch would deactivate the
+        hotspot drill live while the reconstruction, reading ``0.0`` off the
+        persisted batch design, deactivated it via the terminal-harvest branch.
         """
         from .acquisition import VOI_EXPLOIT_WEIGHT
 
@@ -1126,11 +1207,13 @@ class Campaign:
         voi = float(lead.get("voi", 0.0) or 0.0)
         sar = sar_effect_table(revealed, tau_dev=self.protocol["tau_dev"])
         position_effects = getattr(sar, "position_effects", {}) or {}
+        sar_maturity = round(float(lead.get("sar_maturity", 0.0) or 0.0), 4)
+        exported_voi = round(voi, 4)
         return {
             "round_number": round_number,
-            "voi": round(voi, 4),
+            "voi": exported_voi,
             "horizon": round(float(lead.get("horizon", 0.0) or 0.0), 4),
-            "sar_maturity": round(float(lead.get("sar_maturity", 0.0) or 0.0), 4),
+            "sar_maturity": sar_maturity,
             "exploit_weight": round(1.0 - VOI_EXPLOIT_WEIGHT * voi, 4),
             "exploration_weight": round(VOI_EXPLOIT_WEIGHT * voi, 4),
             "slot_split": "3-exploit / 2-experimental",
@@ -1140,6 +1223,12 @@ class Campaign:
                 {"position": position, "n": int(n), "shrunk_effect": round(float(effect), 4)}
                 for position, (n, effect) in sorted(position_effects.items())
             ],
+            "active_tools_metadata": active_tools_for_state(
+                round_number=round_number,
+                queries_spent=self._queries_before_round(round_number),
+                voi=exported_voi,
+                sar_maturity=sar_maturity,
+            ),
         }
 
     def _refresh_state(self, round_number: int, slots: list[dict], memos: list) -> None:
@@ -1150,10 +1239,11 @@ class Campaign:
         # visible movement away; 3 dp keeps ``delta_vs_wt`` tracking it.
         delta = round(best - reference, 3) if reference is not None else 0.0
         self._record_quality(revealed)
+        diagnostics = self._voi_diagnostics(round_number, slots, revealed)
         self.state.update({
             "current_round": round_number,
             "phase": "Cold-Start Tuition" if round_number <= 2 else "Self-Accelerating Payoff",
-            "voi_diagnostics": self._voi_diagnostics(round_number, slots, revealed),
+            "voi_diagnostics": diagnostics,
             # The ribbon is the *declared* provenance of this batch's priors and
             # the audit's refuted positions, read back from the ledger entry
             # ``_annotate_decision`` has just written. Built by the same helper as
@@ -1168,7 +1258,10 @@ class Campaign:
                 "hypotheses_supported": sum(h["verdict"] == "SUPPORTED" for h in self.hypotheses),
                 "hypotheses_falsified": sum(h["verdict"] == "FALSIFIED" for h in self.hypotheses),
             },
-            "agent_council": [m.model_dump() for m in memos],
+            "agent_council": self._annotate_council_memos(
+                [m.model_dump() for m in memos],
+                diagnostics["active_tools_metadata"],
+            ),
             "batch_slots": [self._slot_diagnostics(s) for s in slots],
             "pareto_data": self._pareto_data(revealed),
         })

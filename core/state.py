@@ -17,7 +17,18 @@ def empty_voi_diagnostics() -> dict:
     remaining-horizon factor and ``sar_maturity`` the empirically corroborated
     fraction of the hierarchical SAR table. ``exploit_weight`` is exported
     explicitly so the UI can show the mix without re-deriving the formula.
+
+    ``active_tools_metadata`` carries the Option C tool arsenal (SOP baselines
+    versus state-triggered drills) for the same round. It lives *inside* this
+    object rather than at the top level because ``/api/state``'s top-level key set
+    is frozen by ``api_contract.json`` and asserted for exact equality in
+    ``tests/test_core.py``; ``voi_diagnostics`` is the additive-only container, and
+    VoI is what triggers half the drills. It is computed by
+    :func:`core.tool_arsenal.select_active_tools` once the round's numbers exist;
+    the empty table here is the seed-round shape.
     """
+    from .tool_arsenal import active_tools_for_state
+
     return {
         "round_number": 0,
         "voi": 0.0,
@@ -27,6 +38,9 @@ def empty_voi_diagnostics() -> dict:
         "exploration_weight": 0.0,
         "slot_split": "3-exploit / 2-experimental",
         "position_tolerance_effects": [],
+        "active_tools_metadata": active_tools_for_state(
+            round_number=0, queries_spent=0, voi=0.0, sar_maturity=0.0
+        ),
     }
 
 
