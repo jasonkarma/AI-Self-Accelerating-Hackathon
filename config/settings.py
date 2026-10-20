@@ -41,7 +41,19 @@ class Settings:
     #: ``1.963`` AUBQC). Stage recovery reads *from* this file and never writes to
     #: it, so a bad live round can never cost the demo its campaign.
     golden_ledger_path: Path = ROOT / "results/golden_seed21.sqlite3"
+    #: The artifact ``/api/benchmark`` serves. The **filename is historical and
+    #: wrong**: ``scripts/run_benchmark.py`` writes ``benchmark_<n>seeds.json`` and
+    #: then copies the result over this path whenever ``n`` is at least the
+    #: published seed count, so this file holds a 100-seed run despite saying
+    #: "10seeds". It is kept as the *path* because a rename would orphan the
+    #: frozen artifact; the endpoint reports the true seed count from the file's
+    #: own ``seeds`` field via :meth:`benchmark_source`, and the UI must label it
+    #: from that, never from the filename.
     benchmark_path: Path = ROOT / "results/benchmark_10seeds.json"
+    #: Canonical name for the same artifact. Present so new code can refer to the
+    #: honest filename, and so ``scripts/run_benchmark.py --seeds 100`` output is
+    #: discoverable without knowing the historical alias.
+    benchmark_canonical_path: Path = ROOT / "results/benchmark_100seeds.json"
     #: Cross-target generalization artifact (``scripts/run_cross_target_benchmark.py``).
     #: Deliberately *not* ``benchmark_path``: the 1N8Z ablation is the frozen
     #: reference and a second target must never overwrite it.

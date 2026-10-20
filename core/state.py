@@ -38,8 +38,81 @@ def empty_voi_diagnostics() -> dict:
         "exploration_weight": 0.0,
         "slot_split": "3-exploit / 2-experimental",
         "position_tolerance_effects": [],
+        # First-principles provenance. The UI must never present ``a_null`` as
+        # something ``exploit_weight`` steers: the VoI anneal was retired and the
+        # objective is ``a_null := a_base`` on every path, so the weight is a
+        # *diagnostic* of how much headroom the anneal would have had, not a
+        # coefficient in the shipped objective. See
+        # :func:`voi_objective_provenance` for why this is data and not a comment.
+        **voi_objective_provenance(voi=0.0, sar_maturity=0.0),
         "active_tools_metadata": active_tools_for_state(
             round_number=0, queries_spent=0, voi=0.0, sar_maturity=0.0
+        ),
+    }
+
+
+def voi_objective_provenance(
+    *,
+    voi: float,
+    sar_maturity: float,
+    protocol=None,
+) -> dict:
+    """The three coefficients that explain *where the objective comes from*.
+
+    Added for the frontend showcase, where a chart that plots ``exploit_weight``
+    next to the selected candidates invites the reading "this weight steers the
+    picks". It does not: ``a_null`` was shipped as ``a_base`` at ``e567cd4`` and
+    the ``no_anneal`` ablation is the evidence. So the weight is exported with an
+    explicit ``steers_null_objective: False`` rather than left to inference.
+
+    ``eta_sar`` is :func:`core.acquisition.additive_prior_trust` — how much the
+    empirical SAR prior is trusted given this pool and budget — and
+    ``sar_maturity_target`` is the denominator ``sar_maturity`` is measured
+    against. Both are derived from ``t=0`` observables, which is what makes them
+    reportable without leaking a label.
+
+    ``slot_graduation`` is read from the *same* function the selector calls
+    (:func:`core.acquisition.slot_graduation`), so the badge cannot disagree with
+    the batch that was actually chosen. It needs the measured ``Δ_agent`` spread,
+    which this builder does not have, so it is left ``None`` and filled in by the
+    caller that does (``Campaign._voi_diagnostics``).
+    """
+    eta_sar = None
+    target = None
+    if protocol is not None:
+        # ``Campaign.protocol`` is the *frozen JSON dict* from
+        # ``config/frozen_protocol.json``, not a ``CampaignProtocol``: it carries
+        # ``qualified_count`` / ``tau_dev`` but no ``seq_len`` or ``total_budget``,
+        # so the two coefficients cannot be read off it directly. Coerce it into
+        # the dataclass first, defaulting the protocol-shaped fields the frozen
+        # 1N8Z file predates. Without this the badges are silently ``None``.
+        try:
+            from .acquisition import CampaignProtocol, REFERENCE_N_QUALIFIED
+
+            if hasattr(protocol, "additive_prior_trust"):
+                campaign_protocol = protocol
+            else:
+                campaign_protocol = CampaignProtocol(
+                    n_qualified=int(
+                        protocol.get("qualified_count") or REFERENCE_N_QUALIFIED
+                    ),
+                    seq_len=int(protocol.get("seq_len") or 13),
+                )
+            eta_sar = float(campaign_protocol.additive_prior_trust())
+            target = float(campaign_protocol.sar_maturity_target)
+        except Exception:  # noqa: BLE001 - a frozen protocol may not round-trip
+            eta_sar, target = None, None
+    return {
+        "eta_sar": eta_sar,
+        "sar_maturity_target": target,
+        "slot_graduation": None,
+        "steers_null_objective": False,
+        "objective": "a_null := a_base",
+        "objective_note": (
+            "exploit_weight / exploration_weight report how much exploration the "
+            "*anneal* would have done at this VoI. They are diagnostics: the "
+            "shipped objective is a_null := a_base, and the no_anneal ablation is "
+            "the evidence. Do not label them as coefficients of a_null."
         ),
     }
 

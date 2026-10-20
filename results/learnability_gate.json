@@ -1,0 +1,221 @@
+{
+  "seeds": 50,
+  "rho_gate": 0.15,
+  "min_nqual": 50,
+  "scored_universe_size": 2174,
+  "rows": [
+    {
+      "target_id": "1mhp_LC",
+      "L": 12,
+      "N_qual_deduped": 0,
+      "overlap_pct_removed": 0.0,
+      "coverage_label": "-",
+      "skipped": "8 unique CDRH3 after dedupe (< 50)"
+    },
+    {
+      "target_id": "1mlc",
+      "L": 9,
+      "N_qual_deduped": 67,
+      "pool_deduped": 133,
+      "overlap_pct_removed": 0.0,
+      "coverage_label": "16.7pct",
+      "coverage_pct": 14.925,
+      "R": 1,
+      "Q": 10,
+      "threshold_source": "pool_median",
+      "M2_rho": 0.3899,
+      "M3_rho": 0.3541,
+      "max_baseline_rho": 0.3899,
+      "passes_gate": true
+    },
+    {
+      "target_id": "1mlc",
+      "L": 9,
+      "N_qual_deduped": 67,
+      "pool_deduped": 133,
+      "overlap_pct_removed": 0.0,
+      "coverage_label": "33pct",
+      "coverage_pct": 29.851,
+      "R": 3,
+      "Q": 20,
+      "threshold_source": "pool_median",
+      "M2_rho": 0.3967,
+      "M3_rho": 0.3335,
+      "max_baseline_rho": 0.3967,
+      "passes_gate": true
+    },
+    {
+      "target_id": "3gbn_h1",
+      "L": 14,
+      "N_qual_deduped": 0,
+      "overlap_pct_removed": 0.0,
+      "coverage_label": "-",
+      "skipped": "2 unique CDRH3 after dedupe (< 50)"
+    },
+    {
+      "target_id": "3gbn_h9",
+      "L": 14,
+      "N_qual_deduped": 0,
+      "overlap_pct_removed": 0.0,
+      "coverage_label": "-",
+      "skipped": "2 unique CDRH3 after dedupe (< 50)"
+    },
+    {
+      "target_id": "4d5_her2",
+      "L": 13,
+      "N_qual_deduped": 656,
+      "pool_deduped": 1227,
+      "overlap_pct_removed": 0.0,
+      "coverage_label": "16.7pct",
+      "coverage_pct": 16.768,
+      "R": 21,
+      "Q": 110,
+      "threshold_source": "wild_type",
+      "M2_rho": 0.024,
+      "M3_rho": 0.0392,
+      "max_baseline_rho": 0.0392,
+      "passes_gate": false
+    },
+    {
+      "target_id": "4d5_her2",
+      "L": 13,
+      "N_qual_deduped": 656,
+      "pool_deduped": 1227,
+      "overlap_pct_removed": 0.0,
+      "coverage_label": "33pct",
+      "coverage_pct": 32.774,
+      "R": 42,
+      "Q": 215,
+      "threshold_source": "wild_type",
+      "M2_rho": 0.0201,
+      "M3_rho": 0.0218,
+      "max_baseline_rho": 0.0218,
+      "passes_gate": false
+    },
+    {
+      "target_id": "4fqi_h1",
+      "L": 14,
+      "N_qual_deduped": 0,
+      "overlap_pct_removed": 0.0,
+      "coverage_label": "-",
+      "skipped": "2 unique CDRH3 after dedupe (< 50)"
+    },
+    {
+      "target_id": "4fqi_h3",
+      "L": 14,
+      "N_qual_deduped": 0,
+      "overlap_pct_removed": 0.0,
+      "coverage_label": "-",
+      "skipped": "2 unique CDRH3 after dedupe (< 50)"
+    },
+    {
+      "target_id": "5a12_ang2",
+      "L": null,
+      "N_qual_deduped": 0,
+      "overlap_pct_removed": 100.0,
+      "coverage_label": "-",
+      "skipped": "0 unique CDRH3 after dedupe (< 50)"
+    },
+    {
+      "target_id": "5a12_vegf",
+      "L": null,
+      "N_qual_deduped": 0,
+      "overlap_pct_removed": 100.0,
+      "coverage_label": "-",
+      "skipped": "0 unique CDRH3 after dedupe (< 50)"
+    },
+    {
+      "target_id": "aayl49",
+      "L": 11,
+      "N_qual_deduped": 396,
+      "pool_deduped": 792,
+      "overlap_pct_removed": 17.41,
+      "coverage_label": "16.7pct",
+      "coverage_pct": 16.414,
+      "R": 12,
+      "Q": 65,
+      "threshold_source": "pool_median",
+      "M2_rho": 0.0064,
+      "M3_rho": 0.0453,
+      "max_baseline_rho": 0.0453,
+      "passes_gate": false
+    },
+    {
+      "target_id": "aayl49",
+      "L": 11,
+      "N_qual_deduped": 396,
+      "pool_deduped": 792,
+      "overlap_pct_removed": 17.41,
+      "coverage_label": "33pct",
+      "coverage_pct": 32.828,
+      "R": 25,
+      "Q": 130,
+      "threshold_source": "pool_median",
+      "M2_rho": 0.0229,
+      "M3_rho": 0.0174,
+      "max_baseline_rho": 0.0229,
+      "passes_gate": false
+    },
+    {
+      "target_id": "aayl50_LC",
+      "L": null,
+      "N_qual_deduped": 0,
+      "overlap_pct_removed": 100.0,
+      "coverage_label": "-",
+      "skipped": "0 unique CDRH3 after dedupe (< 50)"
+    },
+    {
+      "target_id": "aayl52_LC",
+      "L": 10,
+      "N_qual_deduped": 0,
+      "overlap_pct_removed": 0.0,
+      "coverage_label": "-",
+      "skipped": "1 unique CDRH3 after dedupe (< 50)"
+    },
+    {
+      "target_id": "g6_LC",
+      "L": null,
+      "N_qual_deduped": 0,
+      "overlap_pct_removed": 100.0,
+      "coverage_label": "-",
+      "skipped": "0 unique CDRH3 after dedupe (< 50)"
+    }
+  ],
+  "note": "M5 was never constructed; only M2 and M3 were run.",
+  "partition": {
+    "note": "Exhaustive 17-of-17 AbBiBench partition. M5 was never constructed by the gate; it was run only on the cells listed under m5_evaluated.",
+    "directories_enumerated": 17,
+    "m5_evaluated": [
+      "1n8z",
+      "aayl49_ML",
+      "2fjg",
+      "aayl51",
+      "1mlc"
+    ],
+    "learnable_multiround": [
+      "1n8z",
+      "aayl49_ML",
+      "2fjg"
+    ],
+    "unlearnable": [
+      "aayl51",
+      "4d5_her2",
+      "aayl49"
+    ],
+    "single_round": [
+      "1mlc"
+    ],
+    "degenerate_1_or_2_cdrh3": [
+      "1mhp_LC",
+      "3gbn_h1",
+      "3gbn_h9",
+      "4fqi_h1",
+      "4fqi_h3",
+      "5a12_ang2",
+      "5a12_vegf",
+      "aayl50_LC",
+      "aayl52_LC",
+      "g6_LC"
+    ]
+  }
+}

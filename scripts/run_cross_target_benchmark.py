@@ -53,6 +53,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import os
 import sys
 from pathlib import Path
@@ -92,6 +93,20 @@ TARGET_CHAIN: tuple[dict, ...] = (
     {"key": "aayl49_ML", "label": "aayl49 ML (anti-lysozyme)", "file": "binding_affinity/aayl49_ML_benchmarking_data.csv"},
     {"key": "1mlc", "label": "1MLC (anti-lysozyme)", "file": "binding_affinity/1mlc_benchmarking_data.csv"},
     {"key": "2fjg", "label": "2FJG (b12 / HIV-1 gp120)", "file": "binding_affinity/2fjg_benchmarking_data.csv"},
+    # Pre-registered lockbox holdout (see LOCKBOX_PREREGISTRATION.md). Selected by
+    # `scripts/audit_lockbox_metadata.py` from all 17 corpus targets **before** any
+    # M1-M5 number existed for it: N_qual=486, L=12 (a third width), 0 % sequence
+    # overlap with any already-scored target. It is listed last on purpose so
+    # ``dataset=None`` still resolves to the original chain.
+    {"key": "aayl51", "label": "aayl51 lockbox (L=12, pre-registered holdout)", "file": "binding_affinity/aayl51_benchmarking_data.csv"},
+    # Single-round boundary control. Selected by
+    # `scripts/baseline_learnability_gate.py`, which runs **M2/M3 only**: it is the
+    # one target in the corpus whose exploitation baselines clear
+    # ``max(rho) >= 0.15`` (M2 0.390, M3 0.354) after deduplication against every
+    # scored pool. At N_qual=67 the protocol sizes to R=1, Q=10 — so this cell
+    # measures a *single* round and contains no post-seed learning to evaluate.
+    # Reported as a boundary control, never as evidence for or against the loop.
+    {"key": "1mlc", "label": "1MLC boundary control (L=9, R=1 — no post-seed learning)", "file": "binding_affinity/1mlc_benchmarking_data.csv"},
 )
 
 #: Coverage levels in the sensitivity sweep, as fractions of the qualified pool.
@@ -105,9 +120,13 @@ COVERAGE_SWEEP: tuple[tuple[str, float], ...] = (
     ("33pct", 0.33),
 )
 
-#: The two targets the dynamic-sizing run reports. Both are real AbBiBench
+#: The targets the dynamic-sizing run reports by default. Both are real AbBiBench
 #: antibody-antigen datasets with genuine positional diversity; the rejected
 #: targets are still recorded in every result so the selection is auditable.
+#: ``aayl51`` is deliberately **not** here: it is the lockbox holdout and must be
+#: added by an explicit ``--dataset aayl51 --merge``, never as a side effect of a
+#: bare ``run``. Otherwise a routine regeneration would silently consume the
+#: holdout and the pre-registration would be void.
 PRIMARY_TARGETS: tuple[str, ...] = ("aayl49_ML", "2fjg")
 
 #: Fallback slice already on disk: real AbBiBench 4D5/HER2 data, 13-mers.
@@ -356,7 +375,7 @@ def _one_run(
     return report
 
 
-def run_cross_target(
+def measure_cells(
     *,
     dataset: str | None,
     seeds: int,
@@ -364,15 +383,13 @@ def run_cross_target(
     token: str | None,
     m5_policy_mode: str,
     sweep: bool = True,
-) -> dict:
-    """Every target x every coverage level, reported side by side.
+) -> tuple[list[dict], str]:
+    """Run every (target, coverage) cell and return ``(cells, first_target_key)``.
 
-    The top level of the returned artifact keeps the shape ``/api/cross-target``
-    and the stage test already consume (``curves``, ``aubqc``, ``m5_warm_start``,
-    ``paired_t_tests``, ``cross_target``); that block is the **pre-registered
-    16.7% cell of the first target**, so a reader who only looks at the headline
-    sees the protocol the rule actually prescribes. ``targets`` then carries every
-    cell, and ``coverage_sensitivity`` carries the per-target comparison.
+    Returns the **raw** cells rather than a finished report, because ``--merge``
+    needs the full per-method curves for the cells it just measured. Summarising
+    first and reconstructing later would lose them, and the artifact would then
+    claim curves it does not have.
     """
     targets = (
         tuple(t for t in TARGET_CHAIN if t["key"].lower() == dataset.lower())
@@ -398,45 +415,282 @@ def run_cross_target(
                     m5_policy_mode=m5_policy_mode,
                 )
             )
+    return results, targets[0]["key"]
 
-    # Headline = the reference-coverage cell of the first target.
+
+def run_cross_target(
+    *,
+    dataset: str | None,
+    seeds: int,
+    repo: str,
+    token: str | None,
+    m5_policy_mode: str,
+    sweep: bool = True,
+) -> dict:
+    """Every target x every coverage level, reported side by side.
+
+    The top level of the returned artifact keeps the shape ``/api/cross-target``
+    and the stage test already consume (``curves``, ``aubqc``, ``m5_warm_start``,
+    ``paired_t_tests``, ``cross_target``); that block is the **pre-registered
+    16.7% cell of the first target**, so a reader who only looks at the headline
+    sees the protocol the rule actually prescribes. ``targets`` then carries every
+    cell, and ``coverage_sensitivity`` carries the per-target comparison.
+    """
+    cells, headline_target = measure_cells(
+        dataset=dataset, seeds=seeds, repo=repo, token=token,
+        m5_policy_mode=m5_policy_mode, sweep=sweep,
+    )
+    return build_report(cells, headline_target=headline_target)
+
+
+#: Curve series copied into every ``targets[]`` row so the UI can chart a target
+#: that is *not* the headline. Without these the frontend can only plot one cell
+#: per artifact, which is the whole reason the lockbox target would be invisible.
+CELL_CURVE_KEYS: tuple[str, ...] = (
+    "curves",
+    "normalized_curves",
+    "top5_panel_curves",
+    "spearman_rho_curves",
+)
+
+
+def cell_summary(r: dict) -> dict:
+    """One row of ``targets[]``: every metric the UI renders for one (target, coverage)."""
+    return {
+        "dataset": r["cross_target"]["dataset"],
+        "label": r["cross_target"]["label"],
+        "coverage_label": r["cross_target"]["coverage_label"],
+        "coverage_pct": r["cross_target"]["coverage_pct"],
+        "campaign_protocol": r["cross_target"]["campaign_protocol"],
+        "qualified_count": r["cross_target"]["qualified_count"],
+        "cdr3_length": r["cross_target"]["cdr3_length"],
+        "reference_sequence": r["cross_target"]["reference_sequence"],
+        "rows_final": r["cross_target"]["rows_final"],
+        "aubqc": r["aubqc"],
+        "aubqc_se": r.get("aubqc_se"),
+        "normalized_aubqc": r["normalized_aubqc"],
+        "top5_panel_aubqc": r["top5_panel_aubqc"],
+        "top_decile_hit_rate": r["top_decile_hit_rate"],
+        "spearman_rho_at_last_checkpoint": {
+            m: next((p[m] for p in reversed(r["spearman_rho_curves"])
+                     if p.get(m) is not None), None)
+            for m in METHODS
+        },
+        "paired": {
+            key: r["paired_t_tests"][key]["metrics"]["aubqc"]
+            for key in ("m5_hybrid_minus_m3_ucb", "m5_hybrid_minus_m2_greedy",
+                        f"{WARM_START_METHOD}_minus_m5_hybrid")
+            if key in r.get("paired_t_tests", {})
+        },
+        "m5_warm_start_summary": r.get("m5_warm_start", {}).get("summary"),
+        "checkpoints": [row["query_count"] for row in r.get("curves", [])],
+        # Full series, so every cell is chartable and not just the headline.
+        **{key: r.get(key) or [] for key in CELL_CURVE_KEYS},
+        "seeds": r.get("seeds"),
+        "m5_policy_mode": r.get("m5_policy_mode"),
+        "zero_shot_references": r.get("zero_shot_references"),
+    }
+
+
+def _as_cell(entry: dict) -> dict:
+    """Normalise one artifact entry into a full cell.
+
+    Two shapes reach this function:
+
+    * a **full cell**, as produced by ``_one_run`` — identified by having a
+      ``cross_target`` block;
+    * a **``targets[]`` summary row**, whether wrapped as ``{"_summary": row}`` by
+      ``merge_cells`` or passed bare. Modern rows carry their curve series but
+      never a ``cross_target`` block, so keying on ``_summary`` alone misclassified
+      them as full cells and ``cell_summary`` then raised ``KeyError:
+      'cross_target'``.
+
+    The discriminator is therefore ``cross_target``, not the wrapper.
+    """
+    if "cross_target" in entry:
+        return entry
+    s = dict(entry.get("_summary") or entry)
+    protocol = s.get("campaign_protocol") or {}
+    rho_at_last = s.get("spearman_rho_at_last_checkpoint") or {}
+    # ``spearman_rho_curves`` is what the sensitivity table reads; synthesise a
+    # single final-checkpoint row from the stored per-method value. Coverage
+    # sensitivity only ever looks at the last non-null point, so this is exact.
+    checkpoints = s.get("checkpoints") or []
+    last_q = checkpoints[-1] if checkpoints else None
+    return {
+        "cross_target": {
+            "dataset": s["dataset"],
+            "label": s.get("label"),
+            "coverage_label": s["coverage_label"],
+            "coverage_pct": s.get("coverage_pct"),
+            "cdr3_length": s.get("cdr3_length"),
+            "qualified_count": s.get("qualified_count"),
+            "reference_sequence": s.get("reference_sequence"),
+            "rows_final": s.get("rows_final"),
+            "rounds": protocol.get("rounds"),
+            "total_budget": protocol.get("total_budget"),
+            "allocation_mode": protocol.get("allocation"),
+            "eta_sar": _eta_sar(protocol),
+            "sar_maturity_target": _sar_maturity_target(protocol),
+        },
+        "aubqc": s.get("aubqc") or {},
+        "aubqc_se": s.get("aubqc_se") or {},
+        "normalized_aubqc": s.get("normalized_aubqc") or {},
+        "top5_panel_aubqc": s.get("top5_panel_aubqc") or {},
+        "top_decile_hit_rate": s.get("top_decile_hit_rate") or {},
+        "spearman_rho_curves": [{"query_count": last_q, **rho_at_last}],
+        "paired_t_tests": {
+            k: {"metrics": {"aubqc": v}} for k, v in (s.get("paired") or {}).items()
+        },
+        "m5_warm_start": {"summary": s.get("m5_warm_start_summary")},
+        "curves": [],
+        "_summary": s,
+    }
+
+
+def build_report(results: list[dict], *, headline_target: str) -> dict:
+    """Assemble the artifact from a flat list of (target, coverage) cells.
+
+    Split out of :func:`run_cross_target` so ``--merge`` can rebuild the same
+    shape from *existing* cells plus newly measured ones. A merge that produced a
+    differently-shaped artifact would break ``/api/cross-target`` silently, which
+    is exactly the class of bug this refactor exists to prevent.
+    """
+    if not results:
+        raise ValueError("no cells to report")
+    cells = [_as_cell(r) for r in results]
+    # Headline = the reference-coverage cell of the named target, so a reader who
+    # only looks at the top of the file sees the pre-registered protocol. Only a
+    # freshly measured cell can be the headline: it must carry the curves.
+    measurable = [r for r in results if "_summary" not in r]
+    pool = measurable or cells
     headline = next(
-        (r for r in results
-         if r["cross_target"]["dataset"] == targets[0]["key"]
+        (c for c, r in zip(cells, pool)
+         if r["cross_target"]["dataset"] == headline_target
          and r["cross_target"]["coverage_label"] == "16.7pct"),
-        results[0],
+        cells[0],
     )
     report = dict(headline)
-    report["targets"] = [
-        {
-            "dataset": r["cross_target"]["dataset"],
-            "label": r["cross_target"]["label"],
-            "coverage_label": r["cross_target"]["coverage_label"],
-            "coverage_pct": r["cross_target"]["coverage_pct"],
-            "campaign_protocol": r["cross_target"]["campaign_protocol"],
-            "qualified_count": r["cross_target"]["qualified_count"],
-            "cdr3_length": r["cross_target"]["cdr3_length"],
-            "aubqc": r["aubqc"],
-            "aubqc_se": r.get("aubqc_se"),
-            "normalized_aubqc": r["normalized_aubqc"],
-            "top5_panel_aubqc": r["top5_panel_aubqc"],
-            "top_decile_hit_rate": r["top_decile_hit_rate"],
-            "spearman_rho_at_last_checkpoint": {
-                m: next((p[m] for p in reversed(r["spearman_rho_curves"])
-                         if p.get(m) is not None), None)
-                for m in METHODS
-            },
-            "paired": {
-                key: r["paired_t_tests"][key]["metrics"]["aubqc"]
-                for key in ("m5_hybrid_minus_m3_ucb", "m5_hybrid_minus_m2_greedy",
-                            f"{WARM_START_METHOD}_minus_m5_hybrid")
-                if key in r.get("paired_t_tests", {})
-            },
-            "m5_warm_start_summary": r.get("m5_warm_start", {}).get("summary"),
-        }
-        for r in results
-    ]
-    report["coverage_sensitivity"] = _coverage_sensitivity(results)
+    report["targets"] = [_summary_of(c) for c in cells]
+    report["coverage_sensitivity"] = _coverage_sensitivity(cells)
+    return report
+
+
+def _summary_of(cell: dict) -> dict:
+    """``cell_summary`` for a normalised cell, reusing a stored summary verbatim."""
+    return cell["_summary"] if "_summary" in cell else cell_summary(cell)
+
+
+#: ``None`` — never ``nan`` — is the "not recorded" value for these coefficients.
+#: ``nan`` is not valid JSON, so emitting it makes ``/api/cross-target`` 500 the
+#: moment one legacy cell lacks the field. ``None`` serialises as ``null`` and the
+#: frontend renders "n/a", which is what a missing coefficient actually means.
+def _finite_or_none(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _eta_sar(protocol: dict) -> float | None:
+    """Recompute the additive-prior trust the protocol recorded, if it stored it."""
+    if "eta_sar" in protocol:
+        return _finite_or_none(protocol["eta_sar"])
+    try:
+        from core.acquisition import CampaignProtocol
+        return _finite_or_none(CampaignProtocol(**protocol).additive_prior_trust())
+    except Exception:  # noqa: BLE001 - a legacy cell may not round-trip
+        return None
+
+
+def _sar_maturity_target(protocol: dict) -> float | None:
+    if "sar_maturity_target" in protocol:
+        return _finite_or_none(protocol["sar_maturity_target"])
+    try:
+        from core.acquisition import CampaignProtocol
+        return _finite_or_none(CampaignProtocol(**protocol).sar_maturity_target)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def merge_cells(existing: dict, new_cells: list[dict], *, headline_target: str) -> dict:
+    """Append ``new_cells`` to an existing artifact without discarding any target.
+
+    ``run_cross_target`` rebuilds the artifact from scratch, so running it for a
+    single new target would silently drop every other target's cells — the exact
+    failure mode that makes a "let's add the lockbox" step destroy the published
+    cross-target table. This merges instead:
+
+    * existing cells are kept verbatim, including their seeds and protocol;
+    * a new cell replaces an existing one **only** on an exact
+      ``(dataset, coverage_label)`` match, and the replacement is recorded in
+      ``merge_log`` so a reader can see what changed;
+    * the flat result list is reconstructed from the top-level headline block plus
+      ``targets[]``, which is required because the artifact stores per-method
+      curves for the headline cell only.
+    """
+    merged: dict[tuple[str, str], dict] = {}
+
+    # Seed with the artifact's **top-level block** first. That block is a real cell
+    # (full per-method curves) for the published headline target; artifacts written
+    # before ``CELL_CURVE_KEYS`` existed carry no other curves at all. Deriving the
+    # headline from ``targets[]`` alone would therefore find no curves for it and
+    # silently promote the newly merged target into the headline slot — the
+    # data-loss case this whole function exists to avoid.
+    prior_ct = existing.get("cross_target") or {}
+    if prior_ct.get("dataset") and existing.get("curves"):
+        headline_key = (str(prior_ct["dataset"]), str(prior_ct.get("coverage_label")))
+        merged[headline_key] = existing
+
+    for cell in existing.get("targets") or []:
+        key = (str(cell["dataset"]), str(cell["coverage_label"]))
+        if key in merged:
+            continue
+        # A ``targets[]`` row is never a full cell: it carries curve series but no
+        # ``cross_target`` block. ``_as_cell`` normalises whichever shape it
+        # receives, so store the row bare and let it normalise once.
+        merged[key] = cell
+
+    replaced, added = [], []
+    for cell in new_cells:
+        key = (str(cell["cross_target"]["dataset"]), str(cell["cross_target"]["coverage_label"]))
+        if key in merged:
+            replaced.append({"dataset": key[0], "coverage_label": key[1]})
+        else:
+            added.append({"dataset": key[0], "coverage_label": key[1]})
+        merged[key] = cell
+
+    # The headline stays with the *published* target. Letting the newly merged
+    # target take it would replace the artifact's top-level curves — the block
+    # ``/api/cross-target`` serves to the hero chart — with the lockbox's. Adding
+    # a target must not silently rewrite the primary multi-target report.
+    prior_headline = (existing.get("cross_target") or {}).get("dataset")
+    headline = prior_headline or headline_target
+    carried = [v for v in merged.values() if "_summary" not in v]
+    if not any(
+        c["cross_target"]["dataset"] == headline
+        and c["cross_target"]["coverage_label"] == "16.7pct"
+        for c in carried
+    ):
+        # The published headline's curves could not be preserved by this artifact
+        # version. Fall back to the freshly measured run rather than emitting a
+        # headline block with no curves.
+        headline = headline_target
+
+    report = build_report(list(merged.values()), headline_target=headline)
+    report["merge_log"] = {
+        "added": added,
+        "replaced": replaced,
+        "targets_present": sorted({k[0] for k in merged}),
+        "headline": headline,
+        "headline_preserved_from_previous_artifact": headline == prior_headline,
+        "note": (
+            "Cells under 'added' were measured by this run; cells under 'replaced' "
+            "were re-measured. The headline block keeps the previously published "
+            "target, so adding a target never rewrites the primary report."
+        ),
+    }
     return report
 
 
@@ -470,8 +724,14 @@ def _coverage_sensitivity(results: list[dict]) -> list[dict]:
             # The two universal-law coefficients that decide how much this cell
             # departs from the frozen 1N8Z behaviour, reported per row so the
             # comparison across coverage is attributable rather than asserted.
-            "eta_sar": round(float(r["cross_target"]["eta_sar"]), 4),
-            "sar_maturity_target": round(float(r["cross_target"]["sar_maturity_target"]), 3),
+            # ``None`` means "this cell predates the coefficient" — it must reach
+            # the JSON as ``null``, not crash the table. The 5pct/33pct legacy
+            # cells carry no ``eta_sar`` at all, so coercing with ``float()``
+            # raised TypeError the moment a third target was merged in.
+            "eta_sar": _finite_or_none(r["cross_target"].get("eta_sar")),
+            "sar_maturity_target": _finite_or_none(
+                r["cross_target"].get("sar_maturity_target")
+            ),
             "aubqc_m5": round(aubqc["m5_hybrid"], 4),
             "aubqc_m5_se": round(float((r.get("aubqc_se") or {}).get("m5_hybrid", float("nan"))), 4),
             "aubqc_best_baseline": round(baselines[best], 4),
@@ -621,12 +881,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-sweep", action="store_true",
                         help="run only the pre-registered 16.7%% coverage level")
     parser.add_argument("--m5-policy-mode", choices=["adaptive_tool", "live_agent"], default="adaptive_tool")
+    parser.add_argument("--merge", action="store_true",
+                        help="append the measured cells to the existing artifact instead of "
+                             "replacing it; required when adding a target to an already "
+                             "published report")
     parser.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
     args = parser.parse_args(argv)
     logging.basicConfig(level=getattr(logging, args.log_level),
                         format="%(asctime)s %(levelname)s %(message)s")
+    if args.merge and not args.dataset:
+        raise SystemExit(
+            "--merge needs an explicit --dataset; merging a full auto run would "
+            "re-measure every target and silently replace published cells"
+        )
 
-    report = run_cross_target(
+    cells, headline_target = measure_cells(
         dataset=args.dataset,
         seeds=args.seeds,
         repo=args.repo,
@@ -636,6 +905,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     path = SETTINGS.cross_target_benchmark_path
     path.parent.mkdir(parents=True, exist_ok=True)
+    if args.merge and path.exists():
+        # Fold the freshly measured cells into the on-disk artifact instead of
+        # replacing it, so adding the lockbox target does not delete the two
+        # published targets.
+        existing = json.loads(path.read_text())
+        report = merge_cells(existing, cells, headline_target=args.dataset)
+        LOGGER.info(
+            "merged %d new cell(s) into %s (targets now: %s)",
+            len(cells), path.name, report["merge_log"]["targets_present"],
+        )
+    else:
+        report = build_report(cells, headline_target=headline_target)
     path.write_text(json.dumps(report, indent=2) + "\n")
     print(format_summary(report))
     print(f"\nwrote {path}")

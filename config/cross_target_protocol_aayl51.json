@@ -1,0 +1,33 @@
+{
+  "dataset_sequence_sha256": "17e2e97b2b3a603e4f8ccf78996894fd52a59ee40eaaae5f467a19860af1b44b",
+  "is_synthetic": false,
+  "normalizer": {
+    "maxima": {
+      "aromatic": 0.4166666666666667,
+      "charge": 0.3416666666666666,
+      "cluster": 3.0,
+      "hydro": 0.9083333333333332,
+      "liability": 1.0,
+      "window": 2.45
+    },
+    "minima": {
+      "aromatic": 0.08333333333333333,
+      "charge": 0.0,
+      "cluster": 0.0,
+      "hydro": -1.8583333333333334,
+      "liability": 0.0,
+      "window": -1.2200000000000002
+    }
+  },
+  "pool_size": 972,
+  "qualification_pass_rate": 0.5,
+  "qualified_count": 486,
+  "tau_dev": 0.6721211539185251,
+  "tau_risk": 0.3278788460814749,
+  "threshold_percentile": 0.5,
+  "threshold_source": "pool_median",
+  "version": "1.2-post-kickoff",
+  "wild_type": "SRWGGDGFYAMDY",
+  "wt_pass_fraction": 0.779835390946502,
+  "wt_risk": 0.40056826038376014
+}

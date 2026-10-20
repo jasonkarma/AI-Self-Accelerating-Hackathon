@@ -99,8 +99,12 @@ the terminal as it finishes, then prints the validated `RoundDecisionRecord` JSO
 Flags: `--rounds N`, `--allow-offline`, `--verbose` (full tool payloads), `--no-color`.
 
 The final `CAMPAIGN STATE` block ends with a `BASELINE COMPARISON · q=35` table read from
-`results/benchmark_10seeds.json`, showing this live run's `best_qualified_binding` and AUBQC next to
-`M1`–`M4` **and** `M5 (10-seed)`, so the ten-seed benchmark M5 and the single live M5 are visible
+`results/benchmark_10seeds.json` — which, despite the filename, holds the **100-seed** run (the name
+is historical: `run_benchmark.py` writes `benchmark_<n>seeds.json` and copies the result over this
+path whenever `n` is at least the published seed count). Label it from the artifact's own `seeds`
+field, never from the filename; `/api/benchmark` publishes this as `source.label` for exactly that
+reason. The table shows this live run's `best_qualified_binding` and AUBQC next to
+`M1`–`M4` **and** `M5 (100-seed)`, so the benchmark M5 and the single live M5 are visible
 side by side. `delta vs WT` is measured against the measured WT when the pool contains it, otherwise
 against the frozen q=5 seed baseline, so it moves with `best_qualified_binding` instead of staying at
 `0.0`. Each round's hypothesis is graded as a paired H1-vs-H0 experiment (Slot 4 against Slot 5) and
@@ -122,10 +126,18 @@ A_H1(s)   = A_base(s) + Δ_agent(s)               # M5, |Δ_agent| <= 0.06
 only: on 1N8Z the best binders start `AR...` and carry 4–5 aromatics, which that rule penalises, so
 M4 trails plain UCB and M5 must not inherit the bias.
 
+> **`A_null := A_base` is the production law (commit `e567cd4`).** The VoI anneal that used to move
+> `A_null` toward the surrogate prediction was retired, and the `no_anneal` ablation is the evidence:
+> it *tied* on AUBQC (p ≈ 0.94 / 0.81) while **losing ρ significantly** (−0.043, p = 2.0e-4 at
+> 16.7 % coverage; −0.075, p = 2.4e-16 at 33 %). `exploit_weight` / `exploration_weight` are still
+> exported by `/api/state`, but they are **diagnostics of what the anneal would have done**, not
+> coefficients of the shipped objective. The payload says so explicitly via
+> `voi_diagnostics.steers_null_objective: false` — do not label them as steering `a_null`.
+
 | Slot | Objective |
 | --- | --- |
 | 1–2 | top 2 by `A_H1` — surrogate exploitation plus the agents' vote |
-| 3 | `A_H1 + 0.50 · VoI · σ_joint` — optimistic UCB that anneals to pure exploitation as `VoI → 0` |
+| 3 | `A_H1 + 0.50 · VoI · σ_joint` — optimistic UCB; the optimism bonus is withdrawn once `slot_graduation` fires |
 | 4 | `A_H1 + 0.50 · max(0, Δ_agent)` — the H1 promotion arm |
 | 5 | top `A_base` — the H0 null-baseline control (what M3 would query next) |
 
@@ -153,6 +165,91 @@ rule that loses its paired test is inverted in later rounds, so the lab genuinel
 
 The Spearman column is the one comparable to zero-shot affinity predictors on 1N8Z (AF3 `-0.16`,
 ProteinMPNN `-0.17`, ESM-2 `-0.13`); it is reported as `n/a` for M1, which has no scoring model at all.
+
+### Results: 1N8Z primary benchmark (100 seeds)
+
+From `results/benchmark_100seeds.json`. **On AUBQC and ρ the story is different, and both are true:**
+
+| Metric | M1 | M2 | M3 | M4 | **M5** |
+| --- | --- | --- | --- | --- | --- |
+| AUBQC ± SE | 1.9061 ± 0.0071 | 1.9240 ± 0.0060 | **1.9246 ± 0.0070** | 1.9120 ± 0.0079 | 1.9237 ± 0.0072 |
+| Spearman ρ @ q=35 | n/a | 0.5081 | 0.3442 | 0.2991 | **0.6578** |
+
+M5 beats every baseline on **rank correlation** at q=35 (+0.3136 vs M3, p = 8.4e-32, **98/100
+seeds**), which is the axis comparable to the zero-shot predictors. It does **not** beat them on
+AUBQC: −0.0009 vs M3 (p = 0.77), and it is *behind* M2 on `top5_panel_aubqc` (−0.0188, p = 4.2e-7)
+and `top_decile_hit_rate` (−0.0680, p = 2.9e-11). The 100-seed SE on AUBQC is ~0.007, the same order
+as every M3/M4/M5 gap — so a bare AUBQC mean invites reading noise as a win. Report ρ and AUBQC
+together or not at all.
+
+### Results: cross-target + pre-registered lockbox (`aayl51`, L=12)
+
+`python scripts/run_cross_target_benchmark.py --dataset aayl51 --seeds 50 --merge`
+(stored in `results/cross_target_benchmark.json`; `--merge` appends without touching published cells).
+
+| Target | L | N_qual | Coverage | R | Q | M5 AUBQC ± SE | Best baseline | M5 rank |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `aayl49_ML` | 11 | 756 | 16.53 % | 24 | 125 | 2.3109 ± 0.0126 | 2.3254 (M3) | 3/5 |
+| `2fjg` | 13 | 124 | 16.13 % | 3 | 20 | 0.0782 ± 0.0029 | 0.0799 (M4) | 2/5 |
+| **`aayl51`** | **12** | **486** | 16.46 % | 15 | 80 | **1.9726 ± 0.0060** | 1.9774 (M4) | 3/5 |
+
+**The lockbox is a negative result for M5 on AUBQC**, and it is published as one. It was selected by
+`scripts/audit_lockbox_metadata.py` from all 17 AbBiBench targets **before** any M1–M5 number existed
+for it (N_qual 486, L=12, 0 % sequence overlap with any scored target) — see
+`LOCKBOX_PREREGISTRATION.md` and `results/lockbox_metadata.json`. M5 ranks 3/5 at every coverage
+level on `aayl51` and never leads ρ. The 16 `L=14` targets are unusable: `3gbn_*`, `4fqi_*` collapse
+to **2** distinct CDR3s and `5a12_*`, `aayl50_LC`, `aayl52_LC`, `g6_LC` to **1**.
+
+AUBQC is **not** comparable across these rows: the protocol sizes itself to the qualified pool, so
+`2fjg` gets 20 queries and `aayl49_ML` 125. Compare rank-vs-baselines *within* a row.
+
+### Results: exhaustive 17-of-17 AbBiBench partition
+
+Two blind stages selected the holdouts; neither used an M5 number. Stage A
+(`scripts/audit_lockbox_metadata.py`) is metadata-only. Stage B
+(`scripts/baseline_learnability_gate.py`) runs **only M2/M3** and gates on
+`max(M2_rho, M3_rho) >= 0.15`.
+
+| Class | Targets | Evidence |
+| --- | --- | --- |
+| **Learnable, multi-round — M5 leads ρ** | `1n8z` (L=13) · `aayl49_ML` (L=11) · `2fjg` (L=13) | M5 > M3 on ρ at p ≤ 2e-4 in **3 of 3** |
+| **Unlearnable — no rank signal** | `aayl51` (L=12) · `4d5_her2` (L=13) · `aayl49` (L=11) | baselines 0.006–0.045 |
+| **Single-round boundary** | `1mlc` (L=9, **R=1**, Q=10) | baselines learn (0.35–0.40) but only 1 round |
+| **Degenerate (1–2 distinct CDRH3)** | `1mhp_LC`, `3gbn_h1`, `3gbn_h9`, `4fqi_h1`, `4fqi_h3`, `5a12_ang2`, `5a12_vegf`, `aayl50_LC`, `aayl52_LC`, `g6_LC` | not search problems |
+
+**M5 vs M3 on Spearman ρ (the generalisation claim):**
+
+| Target | L | rounds | M5 ρ | M3 ρ | Δ | p | seeds won |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `1n8z` | 13 | 6 | 0.6578 | 0.3442 | **+0.3136** | **8.4e-32** | 98/100 |
+| `aayl49_ML` | 11 | 24 | 0.2694 | 0.1907 | **+0.0787** | **2.4e-10** | — |
+| `2fjg` | 13 | 3 | 0.2327 | −0.0530 | **+0.2857** | **6.2e-06** | — |
+| `aayl51` | 12 | 15 | 0.0098 | 0.0112 | −0.0014 | 0.68 | — |
+| `1mlc` | 9 | **1** | 0.3814 | 0.3541 | +0.0273 | — | — |
+
+**Read this as:** M5's rank model beats standard UCB wherever a rank signal exists, and
+neither wins nor loses where none does. Two caveats travel with it:
+
+- **`1mlc` is a boundary control, not evidence.** At N_qual=67 the protocol clamps to
+  `R=1, Q=10`, and M5's AUBQC is *bit-identical* to M3's (paired Δ = +0.0000, p = 1.0)
+  because one 5-slot batch is the same set for both methods. Structural, not empirical.
+- **A tie on `aayl51`/`4d5_her2`/`aayl49` is not a safety claim.** No method correlates
+  with truth there, so the benchmark has **no power** on those targets — not proof that
+  M5 is robust.
+
+Raw gate output: `results/learnability_gate.json`, also served by
+`/api/cross-target` as `learnability_gate`.
+
+### API contract
+
+```bash
+python scripts/generate_api_contract.py          # regenerate from live payloads
+python scripts/generate_api_contract.py --check  # fail if it is stale
+```
+
+`api_contract.json` is auto-generated from `TestClient` payloads for `/api/state`, `/api/benchmark`,
+`/api/cross-target` and `/api/attribution`. Do not hand-edit it; `--check` runs in the test suite, so
+a stale contract fails CI instead of being discovered by whoever builds the frontend.
 
 ### Pre-flight check
 

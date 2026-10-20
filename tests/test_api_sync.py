@@ -138,10 +138,18 @@ def test_api_state_and_benchmark_match_the_frozen_artifacts():
     with TestClient(app) as client:
         state = client.get("/api/state").json()
         contract = json.load(open("api_contract.json"))
-        # The top-level contract is unchanged; the new fields live inside the
-        # existing ``batch_slots`` objects plus one additive ``voi_diagnostics``.
-        assert set(contract) <= set(state)
+        # ``api_contract.json`` is now generated from four endpoints, so it is a
+        # *bundle* (``state``/``benchmark``/``cross_target``/``attribution`` plus
+        # ``_meta``) rather than a bare state document. The state contract still
+        # has to be a superset of what ``/api/state`` serves — that direction is
+        # what keeps the frontend from referencing a field the backend lacks.
+        assert set(contract["state"]) <= set(state)
         assert "voi_diagnostics" in state
+        # Every endpoint the frontend codes against is in the bundle, so a
+        # removed endpoint is a contract change rather than a silent 404.
+        for key in ("state", "benchmark", "cross_target", "attribution"):
+            assert key in contract, key
+        assert contract["_meta"]["generated_by"] == "scripts/generate_api_contract.py"
 
         kpis = state["kpis"]
         assert kpis["query_budget_spent"] == kpis["total_budget"] == SETTINGS.total_budget
@@ -209,3 +217,146 @@ def test_api_state_and_benchmark_match_the_frozen_artifacts():
             for block in paired[key]["metrics"].values():
                 assert np.isfinite(block["mean_diff"])
                 assert block["n"] == 100
+
+        # The served file is named ``benchmark_10seeds.json`` but holds a 100-seed
+        # run. The endpoint must publish that honestly, so the frontend labels the
+        # hero chart from data rather than from a filename it happens to read.
+        source = benchmark["source"]
+        assert source["seeds"] == 100
+        assert source["label"] == "100-seed benchmark"
+        assert source["filename_is_historical"] is True
+
+
+#: Provenance fields the showcase renders beside ``a_null``. Adding one here is
+#: how the contract stays truthful about *where the objective comes from*.
+VOI_PROVENANCE_FIELDS: tuple[str, ...] = (
+    "eta_sar",
+    "sar_maturity_target",
+    "slot_graduation",
+    "steers_null_objective",
+    "objective",
+)
+
+
+def test_state_exposes_objective_provenance():
+    """``voi_diagnostics`` must say out loud that the anneal does not steer ``a_null``.
+
+    ``a_null`` shipped as ``a_base`` at ``e567cd4``. A UI that plots
+    ``exploit_weight`` next to the batch therefore has to be told, in the payload,
+    that the weight is a diagnostic. ``steers_null_objective`` is that statement;
+    without it the chart invites exactly the wrong reading.
+    """
+    from app.server import app
+
+    _require(SETTINGS.ledger_path)
+    _require(SETTINGS.benchmark_path)
+    with TestClient(app) as client:
+        _assert_provenance(client)
+
+
+def _assert_provenance(client) -> None:
+    diagnostics = client.get("/api/state").json()["voi_diagnostics"]
+    for field in VOI_PROVENANCE_FIELDS:
+        assert field in diagnostics, field
+    assert diagnostics["steers_null_objective"] is False
+    assert diagnostics["objective"] == "a_null := a_base"
+    # The coefficients are real numbers on a live campaign, not placeholders: a
+    # silent ``None`` here would let the badge render "n/a" forever.
+    assert diagnostics["eta_sar"] is not None and diagnostics["eta_sar"] > 0.0
+    assert diagnostics["sar_maturity_target"] is not None
+    assert diagnostics["sar_maturity_target"] > 0.0
+    assert isinstance(diagnostics["slot_graduation"], bool)
+
+    # Every checkpoint and every method, so the hero chart has no gaps.
+    curves = client.get("/api/state").json()["benchmark_curves"]
+    assert [row["query_count"] for row in curves] == list(range(5, 36, 5))
+    for row in curves:
+        for method in METHODS:
+            assert row.get(method) is not None, (row["query_count"], method)
+
+
+def test_attribution_endpoint_serves_the_mechanism_ablations():
+    """``GET /api/attribution`` must serve every variant the report discusses.
+
+    The load-bearing rows here are the *negative* ones: a variant that ties
+    production is evidence the mechanism is not earning its place. A UI that only
+    renders improvements would make this artifact unreadable, so the endpoint's
+    job is to hand over all of them, unscored and unfiltered.
+    """
+    from app.server import app
+
+    with TestClient(app) as client:
+        payload = client.get("/api/attribution").json()
+    if not payload.get("available"):
+        pytest.skip(payload.get("detail", "attribution artifact not generated"))
+
+    assert payload["cells"], "an available artifact must carry at least one cell"
+    for cell in payload["cells"]:
+        assert cell["cell"]
+        rows = cell["rows"]
+        # Production is always present, keyed by the stringified None.
+        assert "None" in rows
+        # Every non-production row must come with its paired comparison, so the
+        # table cannot show a variant without saying whether the gap is real.
+        for name in rows:
+            if name == "None":
+                continue
+            assert name in cell["production_minus"], name
+            comparison = cell["production_minus"][name]
+            assert "aubqc" in comparison and "rho" in comparison
+        # Baselines are re-run on the matched seeds, never borrowed from another
+        # artifact — that is what makes each delta a paired difference.
+        for baseline in ("m2_greedy", "m3_ucb", "m4_fixed_prior"):
+            assert baseline in rows, (cell["cell"], baseline)
+
+
+def test_api_contract_is_generated_from_the_backend():
+    """The committed ``api_contract.json`` must not drift from the live payloads.
+
+    The file the frontend codes against used to carry handwritten numbers — four
+    checkpoints instead of seven, three methods instead of five, and a
+    ``best_qualified_binding`` no artifact ever produced. ``--check`` regenerates
+    into memory and compares, so a stale contract fails here instead of being
+    discovered by whoever builds the UI.
+    """
+    from scripts.generate_api_contract import main as contract_main
+
+    assert contract_main(["--check"]) == 0, (
+        "api_contract.json is stale; run `python scripts/generate_api_contract.py`"
+    )
+
+
+def test_cross_target_exposes_the_learnability_gate():
+    """The gate must be reachable, and must never contain an M5 number.
+
+    The gate's scientific value depends on having been run **without** M5: it is
+    what makes the holdout choice independent of the thing being measured. If a
+    future refactor starts writing M5 fields into it, the selection stops being
+    blind and every claim resting on it becomes circular. This test is that guard.
+    """
+    from app.server import app
+
+    if not (SETTINGS.root / "results/learnability_gate.json").exists():
+        pytest.skip("learnability gate not generated")
+    with TestClient(app) as client:
+        payload = client.get("/api/cross-target").json()
+    gate = payload["learnability_gate"]
+    assert gate["available"] is True
+    assert gate["rows"], "gate must carry its measured rows"
+    assert gate.get("rho_gate") == 0.15
+    for row in gate["rows"]:
+        assert not any("m5" in str(key).lower() for key in row), row
+        if row.get("skipped"):
+            # A skipped target never ran a baseline, so it carries no rho. It must
+            # say *why* it was skipped rather than silently reporting a zero.
+            assert row["skipped"], row
+            continue
+        assert "M2_rho" in row and "M3_rho" in row, row
+        best = max(v for v in (row["M2_rho"], row["M3_rho"]) if v is not None)
+        assert row["passes_gate"] == (best >= gate["rho_gate"]), row
+    # The partition must account for every CSV in the corpus.
+    assert gate["partition"]["directories_enumerated"] == 17
+    # ``1n8z`` is a reference row, never a member of the dynamic-sized matrix:
+    # its 35-query protocol is not comparable row-for-row with the others.
+    assert "1n8z" not in {t["dataset"] for t in payload["targets"]}
+    assert [r["dataset"] for r in payload["reference_targets"]] == ["1n8z"]

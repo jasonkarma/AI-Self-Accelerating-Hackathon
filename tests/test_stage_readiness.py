@@ -31,8 +31,13 @@ from config.settings import SETTINGS
 from core.baselines import LIVE_LABEL, METHODS, PAIRED_METRICS, ZERO_SHOT_REFERENCES
 from core.ledger import ledger_version
 
-#: The contract keys every round state must carry.
-CONTRACT_KEYS = set(json.load(open("api_contract.json")))
+#: The contract keys every round state must carry. The file is now a bundle of
+#: four endpoint payloads (``state``/``benchmark``/``cross_target``/``attribution``
+#: plus ``_meta``), so the state document is ``["state"]`` rather than the whole
+#: file. Reading the bundle's own keys here would silently compare the round state
+#: against endpoint *names*.
+_CONTRACT = json.load(open("api_contract.json"))
+CONTRACT_KEYS = set(_CONTRACT["state"])
 
 #: Rounds in the verified Seed-21 campaign.
 SEED_ROUND = 0
@@ -108,7 +113,7 @@ def test_state_at_every_round_matches_the_contract(stage):
             "Cold-Start Tuition" if round_number <= 2 else "Self-Accelerating Payoff"
         )
         kpis = state["kpis"]
-        assert set(kpis) == set(json.load(open("api_contract.json"))["kpis"])
+        assert set(kpis) == set(_CONTRACT["state"]["kpis"])
         assert kpis["query_budget_spent"] == SETTINGS.initial_queries + round_number * SETTINGS.batch_size
         assert kpis["total_budget"] == SETTINGS.total_budget
         assert 0.0 < kpis["best_qualified_binding"] <= 10.0

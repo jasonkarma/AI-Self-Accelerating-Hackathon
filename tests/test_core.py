@@ -50,7 +50,11 @@ def test_soft_prior_bounds():
 def test_api_contract_and_risk_components():
     from app.server import app
     with TestClient(app) as client:
-        state=client.get("/api/state").json(); contract=json.load(open("api_contract.json")); assert state.keys()==contract.keys()
+        # ``api_contract.json`` is a bundle of four endpoints now, so the state
+        # document lives under ``contract["state"]``. The invariant is unchanged:
+        # the contract and the live payload must have exactly the same key set, so
+        # the frontend can never reference a field the backend does not serve.
+        state=client.get("/api/state").json(); contract=json.load(open("api_contract.json"))["state"]; assert state.keys()==contract.keys()
         assert client.options("/api/state",headers={"Origin":"http://localhost:5173","Access-Control-Request-Method":"GET"}).headers["access-control-allow-origin"]=="*"
         candidate=client.get("/api/candidates?limit=1").json()["items"][0]; assert len(candidate["developability_components_raw"])==6 and len(candidate["developability_components_normalized"])==6
 

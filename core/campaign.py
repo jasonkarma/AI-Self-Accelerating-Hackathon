@@ -1185,6 +1185,24 @@ class Campaign:
             return 0
         return int(len(self._round_reveals(round_number - 1)))
 
+    @staticmethod
+    def _delta_agent_spread(slots: list[dict]) -> float | None:
+        """Spread of the batch's measured ``Δ_agent``, or ``None`` if unavailable.
+
+        ``slot_graduation`` takes this as its "has the prior stopped moving?"
+        input. Returning ``None`` rather than ``0.0`` when no slot carries the
+        field matters: ``0.0`` would read as *fully converged* and mark any batch
+        graduated, so a missing measurement would silently switch the slot law.
+        """
+        values = [
+            float(slot["delta_agent"])
+            for slot in slots
+            if slot.get("delta_agent") is not None
+        ]
+        if len(values) < 2:
+            return None
+        return float(max(values) - min(values))
+
     def _voi_diagnostics(self, round_number: int, slots: list[dict], revealed: pd.DataFrame) -> dict:
         """Batch-level VoI state plus the position-level SAR that fed ``Δ_agent``.
 
@@ -1201,7 +1219,8 @@ class Campaign:
         hotspot drill live while the reconstruction, reading ``0.0`` off the
         persisted batch design, deactivated it via the terminal-harvest branch.
         """
-        from .acquisition import VOI_EXPLOIT_WEIGHT
+        from .acquisition import VOI_EXPLOIT_WEIGHT, slot_graduation
+        from .state import voi_objective_provenance
 
         lead = slots[0] if slots else {}
         voi = float(lead.get("voi", 0.0) or 0.0)
@@ -1209,6 +1228,23 @@ class Campaign:
         position_effects = getattr(sar, "position_effects", {}) or {}
         sar_maturity = round(float(lead.get("sar_maturity", 0.0) or 0.0), 4)
         exported_voi = round(voi, 4)
+        # ``eta_sar`` / ``sar_maturity_target`` come off the *same* campaign
+        # protocol the selector used, so the badge and the picks cannot disagree.
+        # ``slot_graduation`` is read straight from ``core.acquisition`` with this
+        # campaign's own round count, and the spread is taken from the batch's
+        # measured ``Δ_agent`` — the identical inputs the selector saw.
+        provenance = voi_objective_provenance(
+            voi=exported_voi, sar_maturity=sar_maturity, protocol=self.protocol
+        )
+        spread = self._delta_agent_spread(slots)
+        if spread is not None and self.protocol is not None:
+            provenance["slot_graduation"] = bool(
+                slot_graduation(
+                    round_number,
+                    spread,
+                    total_rounds=int(self.protocol.get("rounds", 6)),
+                )
+            )
         return {
             "round_number": round_number,
             "voi": exported_voi,
@@ -1223,6 +1259,7 @@ class Campaign:
                 {"position": position, "n": int(n), "shrunk_effect": round(float(effect), 4)}
                 for position, (n, effect) in sorted(position_effects.items())
             ],
+            **provenance,
             "active_tools_metadata": active_tools_for_state(
                 round_number=round_number,
                 queries_spent=self._queries_before_round(round_number),
