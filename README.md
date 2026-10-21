@@ -279,3 +279,5 @@ The frozen protocol reports both `wt_pass_fraction` (the pre-fallback WT diagnos
 `qualification_pass_rate` / `qualified_count` (the final frozen threshold outcome). A median
 fallback records `threshold_percentile: 0.5`; ties can make the realized pass rate slightly above
 or below exactly 50%.
+
+2026 Tzu-Shun Chou. All Rights Reserved. Proprietary and confidential.
