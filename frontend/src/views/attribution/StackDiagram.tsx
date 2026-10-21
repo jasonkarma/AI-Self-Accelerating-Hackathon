@@ -66,7 +66,7 @@ export function StackDiagram() {
                     input="the memos' bounded prior + the surrogate"
                     action="merges prediction, uncertainty and the agent prior into a single ranking"
                     output="every candidate, ranked"
-                    note="The agent prior is capped here — agents can re-order the list, never rescale it."
+                    note="The agent prior is capped here — agents can re-order the list, never rescale it. The surrogate is an ensemble of randomized trees over fixed-length residue features, chosen because 5–35 measurements is far too little data for a deep model and too little to fit a meaningful kernel by hand."
                     highlight
                     removed="the heuristic we deleted sat exactly here, nudging every score toward the model's own guess"
                 />

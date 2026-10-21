@@ -214,7 +214,7 @@ for (const label of [
   "What we built, in 30 seconds",
   "The recorded run",
   "Watch it decide, round by round",
-  "Beats the standard UCB baseline",
+  "Beats standard UCB",
   "100 runs, head to head",
   "Works on other targets",
   "Four more public datasets, same code",

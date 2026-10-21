@@ -14,7 +14,7 @@ export type TabKey = "overview" | "lab" | "benchmark" | "cross" | "attribution";
 export const TABS: Array<{ key: TabKey; index: number; title: string; subtitle: string }> = [
   { key: "overview", index: 0, title: "Overview", subtitle: "What we built, in 30 seconds" },
   { key: "lab", index: 1, title: "The recorded run", subtitle: "Watch it decide, round by round" },
-  { key: "benchmark", index: 2, title: "Beats the standard UCB baseline", subtitle: "100 runs, head to head" },
+  { key: "benchmark", index: 2, title: "Beats standard UCB", subtitle: "100 runs, head to head" },
   { key: "cross", index: 3, title: "Works on other targets", subtitle: "Four more public datasets, same code" },
   { key: "attribution", index: 4, title: "Why it works", subtitle: "The ablations, including the nulls" },
 ];

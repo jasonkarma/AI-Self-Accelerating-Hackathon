@@ -81,6 +81,13 @@ export function PlatePanel({
         <div className="flex flex-wrap items-center gap-1.5">
           <span
             className="chip mono"
+            style={{ borderColor: "var(--border)", color: "var(--ink-dim)" }}
+            title="The lab selects from a candidate library that already exists — a deep mutational scan, a phage-display output, or a generated pool. It does not invent sequences from scratch, because that is not the bottleneck: teams can already enumerate thousands of variants, and the hard part is choosing which few to assay."
+          >
+            picks from a pool
+          </span>
+          <span
+            className="chip mono"
             style={{
               borderColor: graduated ? "var(--gold-line)" : "rgba(14,165,233,0.35)",
               color: graduated ? "var(--gold)" : "#0EA5E9",
