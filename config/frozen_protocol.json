@@ -1,33 +1,33 @@
 {
-  "dataset_sequence_sha256": "cae03b6bb7fe77c9f49fbb21ad7796dce09aa35e7960de9f49e0c8eafb6feb67",
-  "is_synthetic": false,
+  "dataset_sequence_sha256": "fb080a4b369c3a67d763fc95ad70fa38bb4d4ac8e5a39b0e7c7bd43d65046475",
+  "is_synthetic": true,
   "normalizer": {
     "maxima": {
-      "aromatic": 0.6923076923076923,
-      "charge": 0.16153846153846155,
-      "cluster": 1.0,
-      "hydro": 1.1538461538461537,
-      "liability": 1.0,
-      "window": 2.3000000000000003
+      "aromatic": 0.46153846153846156,
+      "charge": 0.38461538461538464,
+      "cluster": 3.0,
+      "hydro": 0.49230769230769234,
+      "liability": 2.0,
+      "window": 2.7
     },
     "minima": {
-      "aromatic": 0.0,
+      "aromatic": 0.15384615384615385,
       "charge": 0.0,
       "cluster": 0.0,
-      "hydro": -2.0846153846153848,
+      "hydro": -1.6923076923076925,
       "liability": 0.0,
-      "window": -1.3
+      "window": -1.0
     }
   },
-  "pool_size": 419,
-  "qualification_pass_rate": 0.5011933174224343,
-  "qualified_count": 210,
-  "tau_dev": 0.6478721298495645,
-  "tau_risk": 0.35212787015043545,
-  "threshold_percentile": 0.5,
-  "threshold_source": "pool_median",
+  "pool_size": 160,
+  "qualification_pass_rate": 0.51875,
+  "qualified_count": 83,
+  "tau_dev": 0.6463351732013703,
+  "tau_risk": 0.35366482679862965,
+  "threshold_percentile": 0.51875,
+  "threshold_source": "wild_type",
   "version": "1.2-post-kickoff",
   "wild_type": "SRWGGDGFYAMDY",
-  "wt_pass_fraction": 0.6992840095465394,
-  "wt_risk": 0.3920272028051125
+  "wt_pass_fraction": 0.51875,
+  "wt_risk": 0.35366482679862965
 }
