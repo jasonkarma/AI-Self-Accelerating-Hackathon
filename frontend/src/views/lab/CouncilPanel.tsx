@@ -62,11 +62,14 @@ export function CouncilPanel({ state }: { state: StatePayload }) {
         <div className="min-w-0">
           <div className="label mb-1 flex items-center gap-1.5 text-[9.5px]">
             <BrainCircuit size={10} style={{ color: "#6366F1" }} />
-            Scientist council · {seats.length} seats · one memo each
+            The scientists · {seats.length} specialists · one argument each
           </div>
           <h2 className="text-[14px] font-semibold leading-snug ink">
-            Three specialists read the same tool tables and disagree on purpose
+            Three specialists read the same data and disagree on purpose
           </h2>
+          <p className="mt-0.5 text-[11px] leading-snug ink-faint">
+            Every seat gets the same evidence; the disagreement is what the next batch is chosen from.
+          </p>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           {translated ? (
@@ -78,8 +81,12 @@ export function CouncilPanel({ state }: { state: StatePayload }) {
               <Languages size={9} /> {translated} translated
             </span>
           ) : null}
-          <span className="chip mono" style={{ borderColor: "var(--border)", color: "var(--ink-faint)" }}>
-            <Wrench size={9} /> {metadata.active.length} active drills
+          <span
+            className="chip mono"
+            style={{ borderColor: "var(--border)", color: "var(--ink-faint)" }}
+            title={`${metadata.active.length} of ${metadata.tools.length} analysis tools were switched on for this round by the drill schedule.`}
+          >
+            <Wrench size={9} /> {metadata.active.length} of {metadata.tools.length} tools
           </span>
         </div>
       </header>
@@ -345,8 +352,8 @@ function ToolTable({ tool, outputs }: { tool: string; outputs: ToolOutputs | und
   if (!outputs) {
     return (
       <p className="text-[11px] ink-faint">
-        Tool outputs are only published by <span className="mono">GET /api/state?round=k</span> for
-        reconstructed rounds. This payload predates them.
+        The evidence behind this tool is only stored for rounds rebuilt from the recorded history. This {""}
+        round predates that.
       </p>
     );
   }
@@ -601,11 +608,11 @@ export function FalsificationTracker({ state }: { state: StatePayload }) {
       <section className="panel px-4 py-3.5">
         <div className="label mb-1 flex items-center gap-1.5 text-[9.5px]">
           <CheckCircle2 size={10} style={{ color: "var(--ink-faint)" }} />
-          Falsification tracker
+          Did the lab tell the truth?
         </div>
         <p className="text-[11.5px] leading-relaxed ink-faint">
-          No graded hypotheses in this round — Round 1's hypothesis is graded only after its paired H1/H0
-          batch has been measured.
+          Nothing graded in this round yet. A claim is only marked right or wrong once the matched pair of
+          candidates it predicted has been measured in the same batch.
         </p>
       </section>
     );
@@ -619,15 +626,15 @@ export function FalsificationTracker({ state }: { state: StatePayload }) {
         <div className="min-w-0">
           <div className="label mb-1 flex items-center gap-1.5 text-[9.5px]">
             <CheckCircle2 size={10} style={{ color: "var(--accent)" }} />
-            Falsification tracker
+            Did the lab tell the truth?
           </div>
           <h2 className="text-[13px] font-semibold leading-snug ink">
-            Paired H1 vs H0 — graded by the wet lab, not the model
+            Every idea marked right or wrong by the assay, not by the model
           </h2>
         </div>
         <div className="mono flex items-center gap-2 text-[10.5px]">
-          <span style={{ color: "var(--accent)" }}>{supported}✓</span>
-          <span style={{ color: "#F59E0B" }}>{falsified}✗</span>
+          <span style={{ color: "var(--accent)" }}>{supported} held</span>
+          <span style={{ color: "#F59E0B" }}>{falsified} disproved</span>
         </div>
       </header>
       <ol className="px-4 pb-2">
@@ -679,15 +686,15 @@ export function FalsificationTracker({ state }: { state: StatePayload }) {
                       ) : null}
                       {evidence.inverted_positions.length
                         ? evidence.inverted_positions.map((position) => (
-                            <span
-                              key={position}
-                              className="mono rounded px-1 py-[1px] text-[8.5px]"
-                              style={{ background: "rgba(245,158,11,0.1)", color: "#F59E0B" }}
-                              title="The paired audit refuted this position's declared rule and inverted it for later rounds."
-                            >
-                              P{position} inverted
-                            </span>
-                          ))
+                          <span
+                            key={position}
+                            className="mono rounded px-1 py-[1px] text-[8.5px]"
+                            style={{ background: "rgba(245,158,11,0.1)", color: "#F59E0B" }}
+                            title="The paired audit refuted this position's declared rule and inverted it for later rounds."
+                          >
+                            P{position} inverted
+                          </span>
+                        ))
                         : null}
                     </div>
                     <p className="mt-0.5 line-clamp-2 text-[11px] leading-snug ink">
@@ -700,12 +707,12 @@ export function FalsificationTracker({ state }: { state: StatePayload }) {
             );
           })}
       </ol>
-      <Note summary="Grading rule">
-        A round can only falsify a rule it actually exercised; the audit inverts a position only when the
-        arm's mean residual trails the control's by more than the level tolerance{" "}
-        <span className="mono">0.05</span>, or when the lift is decisive (
-        <span className="mono">&gt; 0.10</span>). p-values are the paired t-test on per-seed differences, not
-        a per-round test.
+      <Note summary="How a claim gets graded">
+        Each idea is tested by two candidates measured in the same batch: one built on the prediction, one
+        built on the plain rule. A round can only disprove a rule it actually used. A position is marked
+        inverted only when the predicted arm trails the control by more than{" "}
+        <span className="mono">0.05</span> on the binding scale, or when the difference is decisive (
+        <span className="mono">&gt; 0.10</span>).
       </Note>
     </section>
   );

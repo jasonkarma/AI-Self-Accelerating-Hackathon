@@ -1,7 +1,8 @@
-import { AlertTriangle, RefreshCw, Star } from "lucide-react";
+import { AlertTriangle, ChevronDown, RefreshCw, Star } from "lucide-react";
 import { useState } from "react";
 import type { ConfigPayload, RoundsPayload, StatePayload } from "../../types/state";
-import { Callout, InfoTip, KpiTile, Note, Panel } from "../../components/Panel";
+import { Callout, InfoTip, KpiTile, Note } from "../../components/Panel";
+import { Headline, TokenChip } from "../../components/Plain";
 import { RoundTimeline } from "../../components/RoundTimeline";
 import { TelemetryBar } from "./TelemetryBar";
 import { CouncilPanel, FalsificationTracker } from "./CouncilPanel";
@@ -9,7 +10,8 @@ import { PlatePanel } from "./PlatePanel";
 import { DiscoveryPanel } from "./DiscoveryPanel";
 import { LiveRoundRunner } from "./LiveRoundRunner";
 import { discoveredBinder, slotSplit } from "../../lib/derive";
-import { int, num, percent, signed } from "../../lib/format";
+import { int, num } from "../../lib/format";
+import { foldText, librarySkipped, shareWhole } from "../../lib/plain";
 import type { Resource } from "../../hooks/useResource";
 
 interface Props {
@@ -26,20 +28,17 @@ interface Props {
 }
 
 /**
- * View 1 — the golden Seed-21 campaign.
+ * View 1 — the recorded campaign.
  *
- * The layout is a workspace, not a report scroll:
+ * The page answers, in order: *what did it find* (one fold-change number), *how
+ * much did that cost* (35 tests out of the library), *did it tell the truth*
+ * (hypotheses it disproved on itself), and *how did it decide* (the plate and
+ * the scientist council).
  *
- * * **Header band** — the claim in one line plus five KPIs.
- * * **Round stepper** — a compact two-line timeline, with the live-round control
- *   embedded in its toolbar so no separate drawer is needed.
- * * **Left 60 %** — the five-slot plate, then the two discovery charts.
- * * **Right 40 %** — the scientist council (tabbed), the falsification tracker
- *   and the loop telemetry.
- *
- * Everything a judge needs to see the *result* sits above the fold; the
- * methodology that used to occupy three paragraphs above the plate is now one
- * `Note` disclosure at the bottom of the page.
+ * The engine's internal gauges (`VoI`, `η_SAR`, SAR maturity, the retired anneal
+ * weights) are real and published, but they are not a demo surface: they live in
+ * the "under the hood" disclosure at the bottom, where a judge who asks "how
+ * does the loop actually pick?" can reach them in one click.
  */
 export function LabView({
   state,
@@ -69,7 +68,7 @@ export function LabView({
     return (
       <div className="panel px-4 py-6">
         <div className="flex items-center gap-2 text-[13px] font-semibold" style={{ color: "var(--danger)" }}>
-          <AlertTriangle size={14} /> Could not load the campaign state
+          <AlertTriangle size={14} /> The campaign isn't loading
         </div>
         <p className="mt-1.5 text-[12px] leading-relaxed ink-dim">{state.error.message}</p>
         <button
@@ -78,7 +77,7 @@ export function LabView({
           className="chip mono mt-3"
           style={{ borderColor: "var(--border)", color: "var(--accent)" }}
         >
-          <RefreshCw size={11} /> retry
+          <RefreshCw size={11} /> try again
         </button>
       </div>
     );
@@ -87,7 +86,7 @@ export function LabView({
   if (!state.data) {
     return (
       <div className="panel flex items-center gap-2 px-4 py-6 text-[12px] ink-faint">
-        <RefreshCw size={13} className="animate-spin" /> Loading campaign state…
+        <RefreshCw size={13} className="animate-spin" /> Loading the campaign…
       </div>
     );
   }
@@ -98,12 +97,14 @@ export function LabView({
   const isLive = payload.current_round === (rounds?.current_round ?? payload.current_round);
   const championSlot = payload.batch_slots.find((slot) => slot.candidate_id === binder?.id);
 
-  // Screening efficiency: assays run vs the assays a full pool sweep would need.
+  // How much of the qualified library the lab never had to test.
   const poolSize = config?.pool_size ?? null;
   const qualified = config?.qualified_count ?? null;
   const spent = payload.kpis.query_budget_spent;
   const screened = qualified ?? poolSize;
-  const efficiency = screened !== null && screened > 0 ? 1 - spent / screened : null;
+  const skipped = librarySkipped(spent, screened);
+  const disproved = payload.kpis.hypotheses_falsified;
+  const graded = payload.kpis.hypotheses_supported + payload.kpis.hypotheses_falsified;
 
   return (
     <div className="space-y-3.5">
@@ -111,95 +112,91 @@ export function LabView({
       <section className="panel hero-wash overflow-hidden">
         <div className="grid gap-5 px-5 py-4 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,1fr)] lg:items-center">
           <div className="min-w-0">
-            <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
+            <div className="mb-2 flex flex-wrap items-center gap-1.5">
               <span
                 className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold"
                 style={{ background: "var(--gold-soft)", color: "var(--gold)", border: "1px solid var(--gold-line)" }}
               >
                 <Star size={10} fill="var(--gold)" />
-                {isLive ? "GLOBAL #1 BINDER FOUND" : `BEST AS OF ROUND ${payload.current_round}`}
+                {isLive ? "BEST CANDIDATE IN THE WHOLE LIBRARY" : `BEST AS OF ROUND ${payload.current_round}`}
               </span>
               <span className="text-[11px] ink-faint">
-                {isLive ? "Live campaign" : `Reconstructed · as of round ${payload.current_round}`} ·{" "}
-                {payload.phase}
+                {isLive ? "the recorded run" : `replay · as of round ${payload.current_round}`} · {payload.phase}
               </span>
             </div>
-            <h2 className="text-[24px] font-semibold leading-tight tracking-[-0.015em] ink sm:text-[27px]">
-              {binder ? (
+
+            <Headline
+              value={foldText(payload.kpis.delta_vs_wt)}
+              label="tighter binding than the antibody we started from"
+              tone="gold"
+              hint={
                 <>
-                  <span className="mono" style={{ color: "var(--gold)" }}>
-                    {num(binder.binding, 3)}
-                  </span>{" "}
-                  −log₁₀ K<sub>D</sub> {isLive ? "in" : "after"}{" "}
-                  <span className="mono">{int(spent)}</span> assays
+                  Binding is measured on a log scale, so the reported improvement of{" "}
+                  <span className="mono">{num(payload.kpis.delta_vs_wt, 3)}</span> means{" "}
+                  <span className="mono">10^{num(payload.kpis.delta_vs_wt, 3)}</span> — that many times tighter
+                  binding than the wild-type reference.
                 </>
-              ) : (
-                <>
-                  {num(payload.kpis.best_qualified_binding, 3)} best qualified after{" "}
-                  <span className="mono">{int(spent)}</span> assays
-                </>
-              )}
-            </h2>
-            <p className="mt-1.5 max-w-[62ch] text-[12.5px] leading-relaxed ink-dim">
-              {binder ? (
-                <>
-                  <span className="mono" style={{ color: "var(--ink)" }}>
-                    {binder.id}
-                  </span>{" "}
-                  is the global #1 in the {config ? int(config.pool_size) : "candidate"} pool, found in slot{" "}
-                  {championSlot?.slot_id ?? "—"} of round {payload.current_round}. Δ vs the frozen reference is{" "}
-                  <span className="mono" style={{ color: "var(--accent)" }}>
-                    {signed(payload.kpis.delta_vs_wt, 3)}
-                  </span>
-                  .
-                </>
-              ) : (
-                <>
-                  Best qualified candidate among the {payload.pareto_data.length} revealed so far. Δ vs the
-                  frozen reference is <span className="mono">{signed(payload.kpis.delta_vs_wt, 3)}</span>.
-                </>
-              )}
-            </p>
+              }
+              support={
+                binder ? (
+                  <>
+                    <span className="mono" style={{ color: "var(--gold)" }}>{binder.id}</span> is the best binder
+                    out of {config ? int(config.pool_size) : "the"} candidates, found in slot{" "}
+                    {championSlot?.slot_id ?? "—"} of round {payload.current_round} — after only{" "}
+                    <span className="mono">{int(spent)}</span> lab tests.
+                  </>
+                ) : (
+                  <>
+                    Best qualifying candidate among the {payload.pareto_data.length} tested so far, after{" "}
+                    <span className="mono">{int(spent)}</span> lab tests.
+                  </>
+                )
+              }
+            />
+
+            <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+              <span
+                className="chip mono !text-[10px]"
+                style={{ borderColor: "var(--gold-line)", color: "var(--gold)", background: "var(--gold-soft)" }}
+              >
+                score {num(payload.kpis.best_qualified_binding, 2)}
+              </span>
+              <span className="text-[10.5px] ink-faint">
+                on the binding scale the assays report · higher is tighter
+              </span>
+              <TokenChip
+                token="10 ^ Δ vs reference"
+                meaning="Binding values are −log₁₀ K_D: one unit is a ten-fold change in binding strength."
+              />
+            </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-2">
             <KpiTile
-              label="Best qualified"
-              value={num(payload.kpis.best_qualified_binding, 3)}
-              caption={`Δ ${signed(payload.kpis.delta_vs_wt, 3)} vs reference`}
-              emphasis="gold"
-              hint="Max measured −log₁₀ K_D among candidates that passed the developability gate."
-            />
-            <KpiTile
-              label="Screening efficiency"
-              value={screened === null ? "—" : `${int(spent)} / ${int(screened)}`}
-              caption={efficiency === null ? "qualified assays" : `saved ${percent(efficiency, 1)} of a full sweep`}
+              label="Library skipped"
+              value={skipped === null ? "—" : shareWhole(skipped)}
+              caption={`${int(spent)} tests out of ${screened === null ? "—" : int(screened)} candidates`}
               emphasis="accent"
-              hint="Assays actually run, against the number of qualified candidates a full pool sweep would require."
+              hint="The loop names the five candidates to test each round, so most of the qualified library never needs an assay."
             />
             <KpiTile
-              label="Hypotheses graded"
-              value={`${payload.kpis.hypotheses_supported}✓ ${payload.kpis.hypotheses_falsified}✗`}
-              caption="paired H1 vs H0, wet-lab graded"
-              hint="Each hypothesis is graded against its own paired negative control in the same batch."
+              label="Rank in library"
+              value="#1"
+              caption={config ? `of ${int(config.pool_size)} candidates` : "best found"}
+              emphasis="gold"
+              hint="The champion is the highest measured binding anywhere in the pool — not merely the best of what was tested."
             />
             <KpiTile
-              label="Candidates revealed"
-              value={int(payload.pareto_data.length)}
-              caption={`of ${config ? int(config.pool_size) : "—"} in the pool`}
-              hint="Assayed candidates visible in the discovery scatter."
+              label="Own ideas disproved"
+              value={`${int(disproved)} of ${int(graded)}`}
+              caption="the lab falsified its own claims"
+              hint="Every hypothesis is graded against its own matched control in the same batch. Publishing the failures is the point."
             />
             <KpiTile
-              label="Batch split"
-              value={split.graduated ? "5 : 0 : 0" : `${split.exploit} : ${split.voi} : ${split.h0}`}
-              caption={split.graduated ? "harvest phase" : "exploit : VoI : control"}
-              hint="Counted from the five selected slots' own rules, not asserted."
-            />
-            <KpiTile
-              label="Round horizon"
-              value={`${payload.current_round}/${totalRounds}`}
-              caption={`${payload.phase} · VoI ${num(payload.voi_diagnostics.voi, 3)}`}
-              hint="Rounds spent against the campaign's budgeted horizon, with the current value of information."
+              label="Rounds so far"
+              value={`${payload.current_round} of ${totalRounds}`}
+              caption={`${payload.phase}`}
+              hint="Rounds completed against the campaign's planned horizon."
             />
           </div>
         </div>
@@ -217,12 +214,12 @@ export function LabView({
       />
 
       {restoreError ? (
-        <Callout tone="danger" title="Restoring the golden ledger failed">
+        <Callout tone="danger" title="Resetting the recorded run failed">
           {restoreError}
         </Callout>
       ) : null}
 
-      {/* ── Split workspace: plate + live record on the left, reasoning right ── */}
+      {/* ── The batch + the scientists who chose it ────────────────────────── */}
       <div className="grid gap-3.5 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] xl:items-start">
         <div className="min-w-0">
           <PlatePanel state={payload} config={config} totalRounds={totalRounds} />
@@ -231,46 +228,61 @@ export function LabView({
         <div className="min-w-0 space-y-3.5">
           <CouncilPanel state={payload} />
           <FalsificationTracker state={payload} />
-          <TelemetryBar state={payload} config={config} />
         </div>
       </div>
 
-      {/* ── The two discovery charts, side by side, beneath the split ─────── */}
+      {/* ── What was found, and at what cost ───────────────────────────────── */}
       <DiscoveryPanel state={payload} config={config} />
 
-      {/* ── Methodology, one disclosure ───────────────────────────────────── */}
-      <Panel eyebrow="Methodology" title="How to read this view" flush={false}>
-        <div className="grid gap-2 sm:grid-cols-3">
-          <MiniNote title="μ_bind is a prediction, not a measurement" tone="#0EA5E9">
-            The surrogate's <span className="mono">μ_bind ± σ_bind</span> is fitted on revealed rows. Only{" "}
-            <span className="mono">−log₁₀ K_D</span> came back from the wet lab; the audit grades the
-            hypothesis on the difference between the two.
-          </MiniNote>
-          <MiniNote title="exploit / explore weights do not steer a_null" tone="#F59E0B">
-            They report what the retired VoI anneal <em>would</em> have done.{" "}
-            <span className="mono">steers_null_objective: false</span> is published by the backend, and the{" "}
-            <span className="mono">no_anneal</span> ablation in View 4 is the evidence.
-          </MiniNote>
-          <MiniNote title="One seed is a demo, not a result" tone="#10B981">
-            This view is a single recorded campaign. The 100-seed panel in View 2 is where the method
-            comparison lives.
-          </MiniNote>
-        </div>
-        <Note summary="Data access and write scope">
-          Selecting an earlier round issues <span className="mono">GET /api/state?round=k</span>, which
-          reconstructs that round from the ledger prefix and never touches the database. The only write
-          exposed here is <span className="mono">POST /api/restore-golden</span>, behind its own button, plus
-          the live-round stream.
-        </Note>
-        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] ink-faint">
-          <span className="mono">payload round {payload.current_round}</span>
-          <span className="mono">{payload.benchmark_curves.length} checkpoints</span>
-          <InfoTip label="Objective law">
-            The shipped objective is <span className="mono">a_null := a_base</span>. The agent prior can
-            re-order candidates but can never alter the metric.
-          </InfoTip>
-        </div>
-      </Panel>
+      {/* ── Under the hood: everything a judge has to ask for ──────────────── */}
+      <div className="space-y-2">
+        <details className="disclosure panel px-4 py-2.5">
+          <summary className="flex cursor-pointer items-center gap-1.5 text-[12px] font-medium ink-dim">
+            <ChevronDown size={12} />
+            Under the hood: live engine telemetry
+          </summary>
+          <div className="mt-3">
+            <TelemetryBar state={payload} config={config} />
+          </div>
+        </details>
+
+        <details className="disclosure panel px-4 py-2.5">
+          <summary className="flex cursor-pointer items-center gap-1.5 text-[12px] font-medium ink-dim">
+            <ChevronDown size={12} />
+            How to read this view
+          </summary>
+          <div className="mt-3 space-y-2">
+            <div className="grid gap-2 sm:grid-cols-3">
+              <MiniNote title="Predictions are not measurements" tone="#0EA5E9">
+                The model's predicted binding is fitted on already-tested candidates. Only the assay result
+                comes back from the lab — and the audit grades the hypothesis on the gap between the two.
+              </MiniNote>
+              <MiniNote title="The scoring rule cannot be bent by the agents" tone="#F59E0B">
+                The scientist council can re-order candidates but can never change the objective itself. The
+                "unbiased objective" ablation in the last tab is the evidence.
+              </MiniNote>
+              <MiniNote title="One run is a demo, not a result" tone="#10B981">
+                This view is a single recorded campaign. The 100-run comparison in the second tab is where the
+                method claim lives.
+              </MiniNote>
+            </div>
+            <Note summary="What is read-only, and what writes">
+              Selecting an earlier round asks the server to rebuild that round from the recorded history — it
+              never touches the database. The only write exposed here is the "reset to recorded run" button,
+              behind its own click, plus the live-round stream.
+            </Note>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] ink-faint">
+              <span className="mono">round {payload.current_round}</span>
+              <span className="mono">{payload.benchmark_curves.length} checkpoints</span>
+              <span className="mono">{split.label}</span>
+              <InfoTip label="Objective">
+                The shipped objective is <span className="mono">a_null := a_base</span>. The agents' prior can
+                re-order candidates but can never alter the score being optimised.
+              </InfoTip>
+            </div>
+          </div>
+        </details>
+      </div>
     </div>
   );
 }

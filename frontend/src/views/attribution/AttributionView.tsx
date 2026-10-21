@@ -13,6 +13,7 @@ import {
   type VariantGroupKey,
 } from "../../lib/derive";
 import { int, methodMeta, num, pvalue, signed } from "../../lib/format";
+import { flukeOdds } from "../../lib/plain";
 import type { Resource } from "../../hooks/useResource";
 
 /**
@@ -96,51 +97,56 @@ function SummaryBand({ payload }: { payload: AttributionPayload }) {
             className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10.5px] font-semibold"
             style={{ background: "var(--gold-soft)", color: "var(--gold)", border: "1px solid var(--gold-line)" }}
           >
-            <Trophy size={11} /> CAUSAL RESULT
+            <Trophy size={11} /> WHY IT WORKS
           </span>
           <span className="text-[11px] ink-faint">
-            {payload.seeds} seeds per cell · 4 measured cells · two-sided paired t-tests
+            {payload.seeds} runs per setting · 4 measured settings · each change compared against the engine it
+            was removed from
           </span>
         </div>
-        <Badge color="#10B981" title="The production objective shipped at e567cd4">
-          a_null := a_base
+        <Badge color="#10B981" title="The scoring rule the engine actually ships">
+          one scoring rule
         </Badge>
       </div>
 
       <h2 className="px-5 pb-1 pt-2 text-[24px] font-semibold leading-tight tracking-[-0.015em] ink sm:text-[26px]">
-        Deleting the VoI anneal improves rank correlation in{" "}
+        We deleted one piece of our own engine and it got better in{" "}
         <span className="mono" style={{ color: "var(--accent)" }}>
-          {rhoGain.length}/{rows.length}
+          {rhoGain.length} of {rows.length}
         </span>{" "}
-        cells, and never lowers AUBQC
+        settings — never worse
       </h2>
+      <p className="px-5 text-[12.5px] leading-relaxed ink-dim">
+        The deleted piece was a heuristic that nudged scores toward the model's own guess. Removing it made the
+        ranking more accurate and did not hurt the best binder found. The engine ships without it.
+      </p>
 
       <div className="grid gap-2.5 px-5 pb-4 pt-2 sm:grid-cols-2 lg:grid-cols-4">
         <KpiTile
-          label="Causal winner"
-          value="no_anneal"
-          caption={bestP ? `strongest p ${pvalue(bestP.rhoP)}` : "shipped configuration"}
+          label="What was removed"
+          value="one heuristic"
+          caption={bestP ? `strongest evidence: ${flukeOdds(bestP.rhoP)}` : "now the shipped rule"}
           emphasis="gold"
-          hint="The engine without the heuristic anneal is byte-identical to the live production row — the variant IS the shipped law."
+          hint="The deleted heuristic is the one thing standing between the engine and the scoring rule it ships with. The shipped configuration is literally this variant."
         />
         <KpiTile
-          label="ρ improved"
-          value={`${rhoGain.length}/${rows.length}`}
-          caption="cells, rank correlation"
+          label="Settings that improved"
+          value={`${rhoGain.length} of ${rows.length}`}
+          caption="on ranking accuracy"
           emphasis="accent"
-          hint="Deletion of the anneal raises Spearman ρ in every measured cell."
+          hint="Removing the heuristic raised ranking accuracy in every measured setting."
         />
         <KpiTile
-          label="AUBQC cost"
-          value={aubqcHurt.length === 0 ? "none" : `${aubqcHurt.length}/${rows.length} cells`}
-          caption={`${aubqcHelped.length} cell(s) improved at α = 0.05`}
-          hint="Cells where deleting the anneal lowers AUBQC at α = 0.05. None does: the ceiling statistic is either unchanged or improved."
+          label="Anything it broke"
+          value={aubqcHurt.length === 0 ? "nothing" : `${aubqcHurt.length} settings`}
+          caption={aubqcHelped.length === 0 ? "best binder unchanged" : `better in ${aubqcHelped.length} setting(s)`}
+          hint="Whether removing the heuristic lowered the best binder found. It never does: the measure is either unchanged or better."
         />
         <KpiTile
-          label="Negative controls"
-          value={`${slotRole.comparisons + sar.comparisons}`}
-          caption={`smallest p ${pvalue(Math.min(slotRole.minP ?? 1, sar.minP ?? 1))}`}
-          hint="Paired comparisons across the slot-role and SAR-capacity families. None reaches α = 0.05."
+          label="Other ideas we tried"
+          value="none mattered"
+          caption={`${slotRole.variants + sar.variants} more changes, ${slotRole.comparisons + sar.comparisons} comparisons, all null`}
+          hint="Re-weighting which slots the model picks, and giving the sequence model more capacity. Neither produced a difference anyone could detect."
         />
       </div>
 
@@ -148,20 +154,20 @@ function SummaryBand({ payload }: { payload: AttributionPayload }) {
         <OutcomePill
           tone="accent"
           icon={<Trophy size={10} />}
-          title="Causal winner"
-          body={`${mechanism.comparisons} mechanism comparisons · smallest p ${pvalue(mechanism.minP)}`}
+          title="This one mattered"
+          body={`${mechanism.comparisons} comparisons · strongest evidence ${flukeOdds(mechanism.minP)}`}
         />
         <OutcomePill
           tone="neutral"
           icon={<Vote size={10} />}
-          title="Slot-role null"
-          body={`${slotRole.comparisons} comparisons across ${slotRole.cells} cells · smallest p ${pvalue(slotRole.minP)}`}
+          title="Who picks the slots: no effect"
+          body={`${slotRole.comparisons} comparisons over ${slotRole.cells} settings · ${flukeOdds(slotRole.minP)}`}
         />
         <OutcomePill
           tone="neutral"
           icon={<FlaskConical size={10} />}
-          title="SAR-capacity null"
-          body={`${sar.comparisons} comparisons across ${sar.cells} cells · smallest p ${pvalue(sar.minP)}`}
+          title="A bigger sequence model: no effect"
+          body={`${sar.comparisons} comparisons over ${sar.cells} settings · ${flukeOdds(sar.minP)}`}
         />
       </div>
     </section>
@@ -215,30 +221,40 @@ function CausalWinner({ payload }: { payload: AttributionPayload }) {
   return (
     <Panel
       tone="gold"
-      eyebrow="Causal winner · what was deleted and what it earned"
-      title="Unbiased Null Objective"
+      eyebrow="The change that mattered · what was removed and what it earned"
+      title="Let the score be the score"
       lede={
         <>
+          The engine used to let a running heuristic nudge every score toward the model's own prediction. We
+          deleted it. This is what that deletion was worth — and it is now the rule the engine ships with{" "}
           <span className="mono" style={{ color: "var(--gold)" }}>
-            no_anneal
-          </span>{" "}
-          — the engine without the heuristic anneal that used to pull{" "}
-          <span className="mono">a_null</span> toward the surrogate prediction.
+            (no_anneal)
+          </span>
+          .
         </>
       }
       actions={
-        <Badge color="#10B981" title="Production law, shipped at e567cd4">
+        <Badge color="#10B981" title="This variant is byte-identical to the shipped configuration">
           SHIPPED
         </Badge>
       }
     >
       <div className="mb-2.5 grid grid-cols-2 gap-2 sm:grid-cols-3">
-        <KpiTile label="ρ gain, every cell" value={`${rows.filter((r) => r.annealRemovalRho > 0).length}/${rows.length}`} caption="rank correlation" emphasis="accent" />
-        <KpiTile label="largest ρ gain" value={worstRho ? signed(Math.max(...rows.map((r) => r.annealRemovalRho)), 4) : "—"} caption={bestP ? `p ${pvalue(bestP.rhoP)} · ${bestP.cell}` : ""} />
         <KpiTile
-          label="AUBQC cost"
-          value={rows.some((row) => row.annealRemovalAubqc < 0 && row.aubqcP < 0.05) ? "present" : "none"}
-          caption={`${rows.filter((row) => row.aubqcP >= 0.05).length}/${rows.length} neutral, rest improved`}
+          label="Settings it improved"
+          value={`${rows.filter((r) => r.annealRemovalRho > 0).length} of ${rows.length}`}
+          caption="on ranking accuracy"
+          emphasis="accent"
+        />
+        <KpiTile
+          label="Biggest improvement"
+          value={worstRho ? `+${Math.max(...rows.map((r) => r.annealRemovalRho)).toFixed(2)}` : "—"}
+          caption={bestP ? `${flukeOdds(bestP.rhoP)} · ${bestP.cell}` : ""}
+        />
+        <KpiTile
+          label="Damage to the best binder"
+          value={rows.some((row) => row.annealRemovalAubqc < 0 && row.aubqcP < 0.05) ? "real" : "none"}
+          caption={`${rows.filter((row) => row.aubqcP >= 0.05).length} of ${rows.length} unchanged, the rest better`}
         />
       </div>
 
@@ -246,7 +262,7 @@ function CausalWinner({ payload }: { payload: AttributionPayload }) {
         <table className="w-full min-w-[520px] border-collapse">
           <thead>
             <tr style={{ background: "var(--panel-2)" }}>
-              {["cell", "Δρ from deleting", "p", "seeds better", "ΔAUBQC", "p"].map((heading) => (
+              {["setting", "ranking accuracy", "odds it's luck", "runs better", "best binder", "odds it's luck"].map((heading) => (
                 <th key={heading} className="label whitespace-nowrap px-2 py-1.5 text-left text-[8.5px]">
                   {heading}
                 </th>
@@ -261,41 +277,43 @@ function CausalWinner({ payload }: { payload: AttributionPayload }) {
                   className="mono px-2 py-1 text-[11px] font-semibold"
                   style={{ color: row.annealRemovalRho >= 0 ? "var(--accent)" : "var(--danger)" }}
                 >
-                  {signed(row.annealRemovalRho, 4)}
+                  {row.annealRemovalRho >= 0 ? "+" : "−"}
+                  {num(Math.abs(row.annealRemovalRho), 2)}
                 </td>
                 <td
-                  className="mono px-2 py-1 text-[10.5px]"
+                  className="px-2 py-1 text-[10px]"
                   style={{ color: row.rhoP < 0.001 ? "var(--accent)" : "var(--ink-dim)" }}
                 >
-                  {pvalue(row.rhoP)}
+                  {flukeOdds(row.rhoP)}
                 </td>
                 <td className="mono px-2 py-1 text-[10px] ink-faint">
-                  {int(row.rhoSeedsDeletionHelped)}/{int(row.rhoN)}
+                  {int(row.rhoSeedsDeletionHelped)} of {int(row.rhoN)}
                 </td>
                 <td
                   className="mono px-2 py-1 text-[10.5px]"
                   style={{
                     color: row.aubqcP >= 0.05 ? "var(--ink-dim)" : row.annealRemovalAubqc >= 0 ? "var(--accent)" : "var(--danger)",
                   }}
-                  title={row.annealRemovalAubqc >= 0 ? "deletion helped" : "deletion hurt"}
+                  title={row.annealRemovalAubqc >= 0 ? "removing it helped" : "removing it hurt"}
                 >
-                  {signed(row.annealRemovalAubqc, 4)}
+                  {row.annealRemovalAubqc >= 0 ? "+" : "−"}
+                  {num(Math.abs(row.annealRemovalAubqc), 2)}
                 </td>
-                <td className="mono px-2 py-1 text-[10px] ink-faint">{pvalue(row.aubqcP)}</td>
+                <td className="px-2 py-1 text-[10px] ink-faint">{flukeOdds(row.aubqcP)}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
 
-      <Note summary={`Sign convention: variant − baseline. Baseline ${rows[0]?.comparisonBasis ?? "—"}.`}>
-        A positive Δ means removing the anneal <em>helped</em>. The per-seed arrays for{" "}
-        <span className="mono">no_anneal</span> are byte-identical to the live production row, which is the
-        point: the variant <em>is</em> the shipped configuration.
+      <Note summary={`Sign convention: a plus means removing the heuristic helped. Compared against ${rows[0]?.comparisonBasis ?? "—"}.`}>
+        Every number is measured per run and paired, so a plus means the change itself did the work rather
+        than the run having been lucky. The per-run results for this variant are identical to the shipped
+        engine — which is the point: the variant <em>is</em> what ships.
         {bestP ? (
           <>
             {" "}
-            Strongest ρ evidence: <span className="mono">{pvalue(bestP.rhoP)}</span> ({bestP.cell}).
+            Strongest evidence: exact p = <span className="mono">{pvalue(bestP.rhoP)}</span> ({bestP.cell}).
           </>
         ) : null}
       </Note>
@@ -335,12 +353,12 @@ function NegativeControlCard({ payload, group }: { payload: AttributionPayload; 
           </span>
         </div>
         <h3 className="text-[13.5px] font-semibold leading-snug ink">
-          {group === "slot_role" ? "Slot-role separation" : "SAR sample efficiency"}
+          {group === "slot_role" ? "Letting the model pick the slots" : "A bigger sequence model"}
         </h3>
         <p className="mt-0.5 text-[11.5px] leading-relaxed ink-dim">
           {group === "slot_role"
-            ? "Re-homing the exploitation slots onto the scoring model does not convert ρ into AUBQC."
-            : "Extra representational capacity in the SAR prior buys nothing measurable."}
+            ? "If better ranking automatically meant a better best binder, re-pointing the picking slots at the model would show it. It doesn't."
+            : "A larger position/residue table changes nothing measurable, which says the engine is already at its ceiling on this representation."}
         </p>
       </header>
       <div className="px-4 pb-3">
@@ -349,14 +367,15 @@ function NegativeControlCard({ payload, group }: { payload: AttributionPayload; 
             {summary.comparisons} paired comparisons · {summary.cells} cells
           </span>
           <InfoTip label="What a null result means here">
-            A variant that ties the engine is not &quot;as good as&quot; it — it is evidence that the
-            component it changes was not doing the work on this target.
+            A change that ties the engine is not "as good as" it — it is evidence that the component being
+            changed was not doing the work on this target. That is a result, and it is why the engine stays
+            simple.
           </InfoTip>
         </div>
         <VariantTable payload={payload} variants={variants} group={group} />
-        <div className="mono mt-1 text-[9px] ink-faint">
-          smallest p {pvalue(summary.minP)}
-          {summary.minAt ? ` · ${summary.minAt.cell} · ${summary.minAt.variant} · ${summary.minAt.metric}` : ""}
+        <div className="mt-1 text-[9px] ink-faint">
+          strongest evidence: {flukeOdds(summary.minP)}
+          {summary.minAt ? ` · ${summary.minAt.cell} · ${summary.minAt.variant}` : ""}
         </div>
       </div>
     </section>
@@ -367,18 +386,18 @@ function MechanismCard({ payload }: { payload: AttributionPayload }) {
   const mechanism = groupSummary(payload, "mechanism");
   return (
     <Panel
-      eyebrow="Mechanism"
-      title="The two variants that change the search itself"
-      lede={`${mechanism.comparisons} comparisons, smallest p ${pvalue(mechanism.minP)} — both measured against the pre-e567cd4 engine, which still carried the anneal.`}
-      actions={<Badge color="#F59E0B">different baseline</Badge>}
+      eyebrow="The other mechanism change"
+      title="The two changes that alter the search itself"
+      lede={`${mechanism.comparisons} comparisons, strongest evidence ${flukeOdds(mechanism.minP)} — both measured against the older engine that still carried the heuristic.`}
+      actions={<Badge color="#F59E0B">older baseline</Badge>}
     >
       <div className="grid gap-3 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
         <VariantTable payload={payload} variants={["no_anneal", "greedy_slots"]} group="mechanism" />
-        <Callout tone="warn" title="Reading the mechanism rows">
-          These are the only rows measured against a <em>different</em> baseline from the live engine
-          (pre-<span className="mono">e567cd4</span>). The slot-role and SAR controls share that baseline, so
-          all six are comparable with each other but not with the live-engine rows in the ledger — which is
-          why every row names its basis.
+        <Callout tone="warn" title="Why these rows say which baseline they use">
+          These rows are measured against an <em>older</em> engine — the one that still had the heuristic. The
+          other two controls share that baseline, so those comparisons are valid with each other, but they are
+          not directly comparable with the current engine's rows in the full table. Every row names its
+          baseline for exactly that reason.
         </Callout>
       </div>
     </Panel>
@@ -393,9 +412,9 @@ function VariantLedger({ payload }: { payload: AttributionPayload }) {
 
   return (
     <Panel
-      eyebrow="Full ledger"
-      title="Every variant, every cell — including the baselines"
-      lede="One row per variant. Δ is `production − variant` on both axes, with the paired p and seeds won."
+      eyebrow="Everything we tried"
+      title="Every change, every setting — including the ones that lost"
+      lede="One row per change, with the paired comparison and how many runs it won. Nothing is filtered out."
       actions={
         <div className="flex flex-wrap gap-1">
           {payload.cells.map((entry, index) => (
@@ -419,27 +438,27 @@ function VariantLedger({ payload }: { payload: AttributionPayload }) {
     >
       <div className="grid gap-x-4 gap-y-2 px-5 py-3 sm:grid-cols-2 lg:grid-cols-4" style={{ background: "var(--panel-2)" }}>
         <KpiTile
-          label="production AUBQC"
-          value={`${num(production?.aubqc ?? null, 3)}`}
-          unit={`± ${num(production?.aubqc_se ?? null, 3)}`}
-          caption={`${int(production?.seeds ?? cell.seeds)} seeds`}
+          label="Best binder found"
+          value={num(production?.aubqc ?? null, 2)}
+          unit={`± ${num(production?.aubqc_se ?? null, 2)}`}
+          caption={`across ${int(production?.seeds ?? cell.seeds)} runs`}
           emphasis="accent"
         />
         <KpiTile
-          label="production ρ"
-          value={num(production?.rho ?? null, 3)}
-          caption={`n = ${int(production?.rho_n ?? null)} defined replicates`}
+          label="Ranking accuracy"
+          value={num(production?.rho ?? null, 2)}
+          caption={`0 = guessing · 1 = perfect · ${int(production?.rho_n ?? null)} runs`}
           emphasis="accent"
         />
         <KpiTile
-          label="protocol"
-          value={`R ${cell.protocol.rounds} · Q ${cell.protocol.total_budget}`}
-          caption={`L ${cell.protocol.seq_len} · N_qual ${int(cell.protocol.n_qualified)}`}
+          label="Test budget"
+          value={`${cell.protocol.rounds} rounds · ${cell.protocol.total_budget} tests`}
+          caption={`${cell.protocol.seq_len}-residue CDR · ${int(cell.protocol.n_qualified)} usable candidates`}
         />
         <KpiTile
-          label="coverage"
-          value={`${(cell.protocol.coverage_pct * 100).toFixed(2)}%`}
-          caption={`target ${(cell.protocol.target_coverage * 100).toFixed(2)}%`}
+          label="Library used"
+          value={`${(cell.protocol.coverage_pct * 100).toFixed(0)}%`}
+          caption={`${(cell.protocol.target_coverage * 100).toFixed(0)}% per round`}
         />
       </div>
       <div className="scroll-thin overflow-x-auto">
@@ -447,15 +466,15 @@ function VariantLedger({ payload }: { payload: AttributionPayload }) {
           <thead>
             <tr style={{ background: "var(--panel-2)" }}>
               {[
-                "variant",
-                "group",
-                "ΔAUBQC (variant − base)",
-                "p",
-                "seeds",
-                "Δρ (variant − base)",
-                "p",
-                "seeds",
-                "baseline AUBQC",
+                "change",
+                "family",
+                "effect on best binder",
+                "odds it's luck",
+                "runs",
+                "effect on ranking",
+                "odds it's luck",
+                "runs",
+                "baseline",
               ].map((heading) => (
                 <th key={heading} className="label whitespace-nowrap px-3 py-1.5 text-left text-[8.5px]">
                   {heading}
@@ -562,7 +581,7 @@ function VariantTable({
       <table className="w-full border-collapse">
         <thead>
           <tr>
-            {["variant", "cell", "ΔAUBQC", "Δρ", "p (ρ)"].map((heading) => (
+            {["change", "setting", "best binder", "ranking accuracy", "odds it's luck"].map((heading) => (
               <th key={heading} className="label whitespace-nowrap px-2 py-1 text-left text-[8.5px]">
                 {heading}
               </th>
@@ -619,8 +638,8 @@ function Provenance({ payload }: { payload: AttributionPayload }) {
   if (!cell) return null;
   return (
     <Panel
-      eyebrow="Provenance"
-      title="How to read a negative result"
+      eyebrow="Why a null result is worth publishing"
+      title="A change that does nothing is a finding, not a failure"
       actions={
         <span className="flex items-center gap-1 text-[10px] ink-faint">
           <ArrowDownUp size={10} /> {int(payload.seeds)} seeds per cell
@@ -637,10 +656,10 @@ function Provenance({ payload }: { payload: AttributionPayload }) {
           </p>
         </div>
         <Callout tone="info" title="What a tie means here">
-          A variant that ties production on both axes is not &quot;as good as production&quot; — it is
-          evidence that the component it removes was not doing the work on this target. The shipped
-          configuration keeps only what survived a paired test. Every p-value is a two-sided paired t-test on
-          per-seed differences, not a per-round test.
+          A change that ties the current engine is not "as good as" it — it is evidence that the component
+          being changed was not doing the work on this target. The shipped configuration keeps only what
+          survived a paired comparison. Every "odds it's luck" column is a two-sided paired test over per-run
+          differences, never a per-round test.
         </Callout>
       </div>
     </Panel>

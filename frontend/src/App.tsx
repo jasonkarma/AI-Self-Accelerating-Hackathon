@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { endpoints } from "./lib/api";
 import { useResource, useTheme } from "./hooks/useResource";
 import { Header, type TabKey } from "./components/Header";
+import { OverviewView } from "./views/overview/OverviewView";
 import { LabView } from "./views/lab/LabView";
 import { BenchmarkView } from "./views/benchmark/BenchmarkView";
 import { CrossTargetView } from "./views/cross/CrossTargetView";
@@ -26,7 +27,9 @@ import type { StatePayload } from "./types/state";
  */
 export default function App() {
   const { theme, toggle } = useTheme();
-  const [tab, setTab] = useState<TabKey>("lab");
+  // The demo opens on the cold open; `overview` is the only tab that is not a
+  // report, and it exists so the first thirty seconds need no narration.
+  const [tab, setTab] = useState<TabKey>("overview");
   const [selectedRound, setSelectedRound] = useState<number | null>(null);
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
@@ -145,6 +148,15 @@ export default function App() {
             exit={{ opacity: 0, y: -4 }}
             transition={{ duration: 0.18, ease: "easeOut" }}
           >
+            {tab === "overview" ? (
+              <OverviewView
+                benchmark={benchmark}
+                cross={crossTarget}
+                state={state}
+                config={config.data}
+                onTab={setTab}
+              />
+            ) : null}
             {tab === "lab" ? (
               <LabView
                 state={state}
@@ -171,13 +183,11 @@ export default function App() {
           className="mt-8 flex flex-wrap items-center justify-between gap-2 border-t pb-8 pt-3 text-[10px] ink-faint"
           style={{ borderColor: "var(--border)" }}
         >
-          <span>
-            Every figure is read from the live API — nothing is hand-entered.
-          </span>
+          <span>Every figure is read from a stored result file or the live API — nothing is hand-entered.</span>
           <span className="mono">
             {currentRound !== null ? `ledger round ${currentRound}` : "ledger…"} ·{" "}
             {benchmark.data ? benchmark.data.source.label : "benchmark…"} ·{" "}
-            {crossTarget.data ? `${crossTarget.data.seeds} seeds per cross-target cell` : "cross-target…"}
+            {crossTarget.data ? `${crossTarget.data.seeds} runs per cross-target setting` : "cross-target…"}
           </span>
         </footer>
       </main>

@@ -1,4 +1,4 @@
-import { Crown, FlaskConical, ShieldCheck, Sparkles, Star } from "lucide-react";
+import { Crown, FlaskConical, ShieldCheck, ShieldX, Sparkles, Star } from "lucide-react";
 import type { ConfigPayload, StatePayload } from "../../types/state";
 import { AlignmentLegend, SequenceAlignment } from "../../components/SequenceAlignment";
 import { InfoTip, Note } from "../../components/Panel";
@@ -12,17 +12,21 @@ import {
 import { num, signed } from "../../lib/format";
 
 /**
- * The wet-lab plate — five rows, one per slot.
+ * The batch of five candidates — one row per slot.
  *
- * A row layout rather than a card grid, because the comparison a reader has to
- * make is *across* slots: slot 1 vs slot 5 is the paired H1/H0 experiment, so
- * `a_h1` and `a_null` sit in the same column and the lift is visible without
- * arithmetic.
+ * A row layout rather than a card grid, because the comparison a reader makes is
+ * *across* slots: slot 1 vs slot 5 is the paired hypothesis/control experiment,
+ * so the two measured results sit in the same column and the difference is
+ * visible without arithmetic.
  *
- * `μ_bind ± σ_bind` is the surrogate prediction made *before* the assay;
- * `−log₁₀ K_D` is what the wet lab returned. Both are shown, side by side, in
- * separate columns — the difference between them is the residual the audit grades
- * the hypothesis on.
+ * Two rules govern the labelling:
+ *
+ * * **The rule name is a role, not a formula.** "Tests the biggest unknown" and
+ *   "control: must show nothing" are what the slots are for; the internal rule
+ *   (`Max Joint Uncertainty`, `a_h1`, `Δ_agent`) stays in the row's tooltip.
+ * * **The safety verdict travels with the candidate.** Each row carries an
+ *   explicit pass/fail badge, because "this candidate would be rejected in a
+ *   real development pipeline" is a fact the audience can read instantly.
  */
 export function PlatePanel({
   state,
@@ -52,24 +56,24 @@ export function PlatePanel({
       <header className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 px-4 pb-2.5 pt-3.5">
         <div className="min-w-0">
           <div className="label mb-1 flex flex-wrap items-center gap-x-1.5 text-[9.5px]">
-            <span>5-slot plate · paired design · round {state.current_round}</span>
+            <span>the five candidates tested in round {state.current_round}</span>
             <span style={{ color: "var(--border-strong)" }}>|</span>
             <span className="mono normal-case tracking-normal">
-              WT <span style={{ color: "var(--ink-dim)" }}>{wildType}</span>
+              starting antibody <span style={{ color: "var(--ink-dim)" }}>{wildType}</span>
             </span>
           </div>
           <h2 className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[14px] font-semibold leading-snug ink">
             {graduated ? (
               <>
-                Harvest phase — <span style={{ color: "var(--gold)" }}>5 exploit : 0 VoI : 0 control</span>
+                Every slot goes after the <span style={{ color: "var(--gold)" }}>best predicted candidate</span>
               </>
             ) : (
               <>
-                <span style={{ color: "var(--accent)" }}>3 exploit</span>
+                <span style={{ color: "var(--accent)" }}>3 to exploit</span>
                 <span className="ink-faint">:</span>
-                <span style={{ color: "#0EA5E9" }}>1 VoI probe</span>
+                <span style={{ color: "#0EA5E9" }}>1 to resolve an unknown</span>
                 <span className="ink-faint">:</span>
-                <span style={{ color: "#F59E0B" }}>1 H0 control</span>
+                <span style={{ color: "#F59E0B" }}>1 control</span>
               </>
             )}
           </h2>
@@ -82,10 +86,15 @@ export function PlatePanel({
               color: graduated ? "var(--gold)" : "#0EA5E9",
               background: graduated ? "var(--gold-soft)" : "rgba(14,165,233,0.07)",
             }}
-            title={`slot_graduation fires when round > ceil(2R/3) = ${harvest - 1}, or when spread(Δ_agent) < the floor.`}
+            title={`After round ${harvest - 1} of ${totalRounds}, the loop stops spending slots on exploration and control.`}
           >
-            {graduated ? "GRADUATED 5:0:0 HARVEST" : `HARVEST FROM R${harvest}`}
+            {graduated ? "ALL-IN PHASE" : `FULL EXPLORATION UNTIL R${harvest}`}
           </span>
+          <InfoTip label="Why the mix changes">
+            Early rounds reserve one slot to resolve the biggest open question and one to check the measure
+            itself. Once the horizon passes two thirds, all five go to the best predicted candidates — because
+            learning is worth less than finding.
+          </InfoTip>
         </div>
       </header>
 
@@ -108,25 +117,40 @@ export function PlatePanel({
         <AlignmentLegend />
         <div className="flex items-center gap-2.5">
           <span className="mono text-[9.5px] ink-faint">
-            {state.batch_slots.filter((slot) => slot.risk_passed).length}/{state.batch_slots.length} risk-qualified ·{" "}
-            {roles.filter((role) => role.revealedBinding !== null).length} revealed
+            {state.batch_slots.filter((slot) => slot.risk_passed).length}/{state.batch_slots.length} pass the safety filter ·{" "}
+            {roles.filter((role) => role.revealedBinding !== null).length} measured
           </span>
           <InfoTip label="Slot graduation rule">
-            Slots graduate when <span className="mono">round &gt; ceil(2R/3)</span> ({harvest - 1} for a{" "}
-            {totalRounds}-round horizon) or when <span className="mono">spread(Δ_agent)</span> falls below the
-            floor{spread !== null ? ` — here ${spread.toFixed(4)}` : ""}. After graduation slots 3 and 5 become
-            pure exploitation picks, so their old rule names are no longer what selected them.
+            Slots stop exploring when <span className="mono">round &gt; ceil(2R/3)</span> ({harvest - 1} for a{" "}
+            {totalRounds}-round horizon) or when the agents' priors stop disagreeing
+            <span className="mono"> (spread(Δ_agent))</span>
+            {spread !== null ? ` — currently ${spread.toFixed(4)}` : ""}. After that, slots 3 and 5 become pure
+            exploitation picks, so their original rule names no longer describe what selected them.
           </InfoTip>
-          <Note summary={`${split.label} · split counted from the slots' own rules`}>
-            <span className="mono">split.exploit</span> is the count of slots whose selection rule is an
-            exploitation rule; <span className="mono">voi</span> and <span className="mono">h0</span> are the
-            uncertainty probe and the paired negative control. Once slot graduation fires, all five are
-            exploitation picks and the split reads 5:0:0.
+          <Note summary={`${split.label} · counted from the slots' own rules`}>
+            <span className="mono">split.exploit</span> counts slots whose rule is an exploitation rule;{" "}
+            <span className="mono">voi</span> and <span className="mono">h0</span> are the uncertainty probe and
+            the paired control. Once graduation fires, all five are exploitation picks and the split reads
+            5:0:0.
           </Note>
         </div>
       </div>
     </section>
   );
+}
+
+/** What each selection rule is *for*, in the words a reader needs. */
+function roleWords(role: SlotRoleView): { label: string; why: string } {
+  if (role.roleBucket === "harvest") {
+    return { label: "Best predicted candidate", why: "Learning is worth less than finding now." };
+  }
+  if (role.roleBucket === "voi") {
+    return { label: "Resolves the biggest unknown", why: "Tests where the two models disagree most." };
+  }
+  if (role.roleBucket === "h0") {
+    return { label: "Control — must show nothing", why: "If this beats its twin, the measurement is broken." };
+  }
+  return { label: "Strong predicted candidate", why: "Exploit what the model already believes." };
 }
 
 function SlotRow({
@@ -141,6 +165,7 @@ function SlotRow({
   champion: boolean;
 }) {
   const { slot } = role;
+  const words = roleWords(role);
   const isH0 = slot.slot_id === 5;
   const isVoi = slot.slot_type === "Max Joint Uncertainty" && role.roleBucket === "voi";
   const lift = slot.a_h1 !== null && slot.a_null !== null ? slot.a_h1 - slot.a_null : null;
@@ -148,9 +173,8 @@ function SlotRow({
 
   return (
     <article
-      className={`grid items-center gap-x-3 gap-y-2 rounded-xl border px-3 py-2.5 transition-colors ${
-        champion ? "gold-row" : ""
-      }`}
+      className={`grid items-center gap-x-3 gap-y-2 rounded-xl border px-3 py-2.5 transition-colors ${champion ? "gold-row" : ""
+        }`}
       style={{
         borderColor: champion ? "var(--gold-line)" : "var(--border)",
         background: champion ? undefined : "var(--panel-2)",
@@ -159,7 +183,7 @@ function SlotRow({
     >
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2 lg:flex-nowrap">
         {/* slot identity */}
-        <div className="flex w-full shrink-0 items-center gap-2 lg:w-[154px]">
+        <div className="flex w-full shrink-0 items-center gap-2 lg:w-[176px]">
           <span
             className="mono flex h-8 w-8 items-center justify-center rounded-lg text-[13px] font-semibold"
             style={{
@@ -172,22 +196,29 @@ function SlotRow({
           </span>
           <div className="min-w-0">
             <div className="flex items-center gap-1">
-              <span className="text-[11.5px] font-semibold leading-tight ink">{role.roleLabel}</span>
+              <span className="text-[11.5px] font-semibold leading-tight ink">{words.label}</span>
               {champion ? <Star size={11} style={{ color: "var(--gold)" }} fill="var(--gold)" /> : null}
             </div>
-            <div className="mono truncate text-[9.5px] leading-tight ink-faint" title={slot.slot_type}>
-              {slot.slot_type}
+            <div className="truncate text-[9.5px] leading-tight ink-faint" title={slot.slot_type}>
+              {words.why}
             </div>
-            {isH0 ? (
-              <div className="mono text-[9px] leading-tight" style={{ color: "#F59E0B" }}>
-                H0: Δ_agent = 0
-              </div>
-            ) : null}
-            {isVoi ? (
-              <div className="mono text-[9px] leading-tight" style={{ color: "#0EA5E9" }}>
-                A_H1 + 0.5·VoI·σ_joint
-              </div>
-            ) : null}
+            <div className="mono flex flex-wrap items-center gap-1 text-[9px] leading-tight ink-faint">
+              <InfoTip label="Internal rule name">
+                <span className="mono">{slot.slot_type}</span>
+                {isH0 ? (
+                  <>
+                    {" "}— the control arm: the agents' prior is forced to zero, so this candidate is picked by
+                    the base rule alone.
+                  </>
+                ) : isVoi ? (
+                  <>
+                    {" "}— the exploration slot: scored as the hypothesis arm plus a bonus for how much the two
+                    models disagree.
+                  </>
+                ) : null}
+              </InfoTip>
+              <span>{slot.slot_type}</span>
+            </div>
           </div>
         </div>
 
@@ -197,45 +228,29 @@ function SlotRow({
             <span className="mono text-[11.5px] font-semibold" style={{ color: champion ? "var(--gold)" : "var(--ink)" }}>
               {slot.candidate_id}
             </span>
-            <span className="mono text-[9.5px] ink-faint">{mutations} mutations</span>
+            <span className="mono text-[9.5px] ink-faint">{mutations} changes from the start</span>
             {champion ? (
               <span
                 className="mono rounded px-1.5 py-[1px] text-[8.5px] font-semibold tracking-wide"
                 style={{ background: "var(--gold-soft)", color: "var(--gold)", border: "1px solid var(--gold-line)" }}
               >
-                BEST SO FAR
+                BEST FOUND
               </span>
             ) : null}
           </div>
           <SequenceAlignment sequence={slot.sequence} wildType={wildType} falsifiedPositions={falsified} />
         </div>
 
-        {/* measured + predicted */}
-        <div className="grid w-full shrink-0 grid-cols-2 gap-x-3 gap-y-1 lg:w-[300px] lg:grid-cols-4">
-          <Cell label="μ ± σ">
+        {/* predicted + measured + safety */}
+        <div className="grid w-full shrink-0 grid-cols-2 gap-x-3 gap-y-1 lg:w-[352px] lg:grid-cols-4">
+          <Cell label="Predicted">
             <span className="mono text-[11px] ink">
               {num(slot.mu_bind, 2)}
               <span className="ink-faint"> ± {num(slot.sigma_bind, 2)}</span>
             </span>
+            <span className="mono block text-[8.5px] leading-tight ink-faint">before the test</span>
           </Cell>
-          <Cell label="Δ_agent">
-            <span
-              className="mono text-[11px]"
-              style={{ color: slot.delta_agent === null ? "var(--ink-faint)" : slot.delta_agent >= 0 ? "var(--accent)" : "var(--danger)" }}
-            >
-              {signed(slot.delta_agent, 3)}
-            </span>
-          </Cell>
-          <Cell label="A_H1 / A_null">
-            <span className="mono text-[11px] ink">{num(slot.a_h1, 3)}</span>
-            <span className="mono text-[11px] ink-faint"> / {num(slot.a_null, 3)}</span>
-            {lift !== null ? (
-              <div className="mono text-[9px] leading-tight" style={{ color: lift >= 0 ? "var(--accent)" : "var(--danger)" }}>
-                lift {signed(lift, 3)}
-              </div>
-            ) : null}
-          </Cell>
-          <Cell label="−log₁₀ K_D">
+          <Cell label="Measured">
             {role.revealedBinding === null ? (
               <span className="mono flex items-center gap-1 text-[10px] ink-faint">
                 <FlaskConical size={9} /> pending
@@ -255,20 +270,45 @@ function SlotRow({
                 ) : null}
               </span>
             )}
+            <span className="mono block text-[8.5px] leading-tight ink-faint">from the assay</span>
           </Cell>
-        </div>
-
-        {/* developability */}
-        <div className="hidden w-[62px] shrink-0 flex-col items-end gap-0.5 xl:flex">
-          <span className="mono text-[10.5px]" style={{ color: slot.risk_passed ? "var(--accent)" : "var(--danger)" }}>
-            {num(slot.risk_score, 2)}
-          </span>
-          <span
-            className="mono flex items-center gap-0.5 text-[8.5px] leading-none"
-            style={{ color: slot.risk_passed ? "var(--ink-faint)" : "var(--danger)" }}
-          >
-            <ShieldCheck size={8} /> {slot.risk_passed ? "ok" : "fail"}
-          </span>
+          <Cell label="Hypothesis vs. control">
+            <span className="mono inline-flex items-center gap-1.5 text-[11px] ink">
+              {num(slot.a_h1, 2)}
+              <span className="ink-faint">vs</span>
+              {num(slot.a_null, 2)}
+            </span>
+            {lift !== null ? (
+              <div
+                className="mono inline-flex items-center gap-1 text-[9px] leading-tight"
+                style={{ color: lift >= 0 ? "var(--accent)" : "var(--danger)" }}
+              >
+                {lift >= 0 ? "control held" : "control beat it"} ({signed(lift, 2)})
+              </div>
+            ) : null}
+            <InfoTip label="The paired experiment">
+              <span className="mono">a_h1</span> is the score with the agents' prior applied;{" "}
+              <span className="mono">a_null</span> is the same candidate under the base rule alone. The two are
+              measured in the same batch, which is what makes the comparison a real experiment.
+            </InfoTip>
+          </Cell>
+          <Cell label="Safety filter">
+            <span
+              className="mono inline-flex items-center gap-1 rounded-full px-1.5 py-[1px] text-[9px] font-semibold"
+              style={{
+                color: slot.risk_passed ? "var(--accent)" : "var(--danger)",
+                background: slot.risk_passed ? "var(--accent-soft)" : "rgba(244,63,94,0.1)",
+                border: `1px solid ${slot.risk_passed ? "var(--accent-line)" : "rgba(244,63,94,0.35)"}`,
+              }}
+              title={`Developability risk ${num(slot.risk_score, 2)} — chemical liabilities that would sink a real drug candidate, independent of how well it binds.`}
+            >
+              {slot.risk_passed ? <ShieldCheck size={9} /> : <ShieldX size={9} />}
+              {slot.risk_passed ? "passes" : "fails"}
+            </span>
+            <span className="mono block text-[8.5px] leading-tight ink-faint">
+              risk {num(slot.risk_score, 2)}
+            </span>
+          </Cell>
         </div>
       </div>
     </article>

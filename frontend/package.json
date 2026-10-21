@@ -12,8 +12,9 @@
     "verify": "tsx scripts/verify-numbers.ts",
     "contract": "tsx scripts/check-contract.ts",
     "audit:literals": "tsx scripts/audit-literals.ts",
+    "audit:copy": "tsx scripts/audit-copy.ts",
     "audit:render": "tsx scripts/render-smoke.tsx",
-    "check": "npm run typecheck && npm run contract && npm run verify && npm run audit:literals && npm run audit:i18n && npm run audit:render",
+    "check": "npm run typecheck && npm run contract && npm run verify && npm run audit:literals && npm run audit:copy && npm run audit:i18n && npm run audit:render",
     "i18n:extract": "tsx scripts/extract-council-zh.ts",
     "audit:i18n": "tsx scripts/audit-council-i18n.ts"
   },

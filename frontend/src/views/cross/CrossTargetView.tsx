@@ -19,7 +19,8 @@ import {
   rhoPairedTest,
   strongestWarmStart,
 } from "../../lib/derive";
-import { int, methodMeta, num, percentOf100, pvalue, signed } from "../../lib/format";
+import { int, methodMeta, num, pExact, percentOf100, pvalue } from "../../lib/format";
+import { countOf, flukeOdds, gainText, methodName, relativeGain } from "../../lib/plain";
 import type { Resource } from "../../hooks/useResource";
 
 /**
@@ -132,7 +133,7 @@ function Scoreboard({
   const boundary = partition.single_round[0] ?? null;
   const boundaryRow = boundary
     ? payload.targets.find((row) => row.dataset === boundary && row.coverage_label === "16.7pct") ??
-      payload.targets.find((row) => row.dataset === boundary)
+    payload.targets.find((row) => row.dataset === boundary)
     : null;
 
   return (
@@ -143,29 +144,33 @@ function Scoreboard({
             className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10.5px] font-semibold"
             style={{ background: "var(--gold-soft)", color: "var(--gold)", border: "1px solid var(--gold-line)" }}
           >
-            <Trophy size={11} /> GENERALIZATION RESULT
+            <Trophy size={11} /> IT WORKS ON OTHER TARGETS
           </span>
           <span className="text-[11px] ink-faint">
-            {partition.directories_enumerated} datasets enumerated · M5 run on {partition.m5_evaluated.length} ·{" "}
-            {payload.seeds} seeds per cell
+            {partition.directories_enumerated} public datasets screened · the lab was run on{" "}
+            {partition.m5_evaluated.length} · {payload.seeds} runs per setting
           </span>
         </div>
-        <span className="chip mono" style={{ borderColor: "var(--border)", color: "var(--ink-faint)" }}>
-          <Filter size={9} /> gate ρ ≥ {payload.learnability_gate.rho_gate}
+        <span
+          className="chip mono"
+          style={{ borderColor: "var(--border)", color: "var(--ink-faint)" }}
+          title={`A dataset only counts as learnable if an ordinary method reaches a ranking accuracy of at least ${payload.learnability_gate.rho_gate} on it. Below that, nobody's method can be compared — including ours.`}
+        >
+          <Filter size={9} /> learnable = accuracy ≥ {payload.learnability_gate.rho_gate}
         </span>
       </div>
 
       <h2 className="px-5 pb-1 pt-2 text-[24px] font-semibold leading-tight tracking-[-0.015em] ink sm:text-[27px]">
-        M5 beats M3 on rank correlation in{" "}
+        More accurate than the standard method on{" "}
         <span className="mono" style={{ color: "var(--accent)" }}>
-          {wins}/{rows.length}
+          {wins} of {rows.length}
         </span>{" "}
-        multi-round targets
+        learnable targets
       </h2>
       <p className="px-5 text-[12.5px] leading-relaxed ink-dim">
-        {allSignificant ? "Every one of them" : `${significant} of ${rows.length}`} at paired{" "}
-        <span className="mono">p ≤ 2×10⁻⁴</span>. The same loop, unchanged modules, re-sized only by the
-        pool's own protocol.
+        {allSignificant ? "Every single one" : `${significant} of ${rows.length}`}, each
+        {allSignificant ? "" : " "}at odds of chance below 1 in 5,000. Same code, same settings — only the
+        library's own budget is resized.
       </p>
 
       <div className="grid gap-2.5 px-5 pb-2 pt-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -192,12 +197,14 @@ function Scoreboard({
               <span className="mono text-[10px] ink-faint">vs M3 {num(row.m3, 3)}</span>
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[9.5px]">
-              <span className="mono" style={{ color: "var(--accent)" }}>
-                Δρ {signed(row.delta, 3)}
+              <span className="mono font-semibold" style={{ color: "var(--accent)" }}>
+                {gainText(relativeGain(row.m5, row.m3))} more accurate
               </span>
-              <span className="mono ink-faint">p {pvalue(row.p)}</span>
-              <span className="mono ink-faint">
-                {row.seedsWon ?? "—"}/{row.n ?? "—"}
+              <span className="ink-faint" title={`Exact p-value ${pExact(row.p)}`}>
+                {flukeOdds(row.p)}
+              </span>
+              <span className="mono ink-faint" title="Runs on which ours ranked the library better">
+                won {countOf(row.seedsWon, row.n)}
               </span>
             </div>
           </div>
@@ -212,46 +219,51 @@ function Scoreboard({
           <div className="flex items-center gap-1.5">
             <Star size={11} style={{ color: "var(--gold)" }} fill="var(--gold)" />
             <span className="text-[11.5px] font-semibold" style={{ color: "var(--gold)" }}>
-              {lockbox ?? "lockbox"} · pre-registered holdout
+              {lockbox ?? "the holdout"} · sealed before we ran anything
             </span>
-            <InfoTip label="What the lockbox measures">
-              {lockbox ?? "The holdout"} has no learnable rank signal, so M5 and M3 tie on ρ there. What
-              separates is the cold start: M5 with a prior-chosen seed batch beats M5 with five random draws,
-              measured on the target the funnel selected before any M5 number existed.
+            <InfoTip label="What the holdout measures">
+              {lockbox ?? "The holdout"} has no learnable ranking signal, so ours and the standard method tie
+              there — a useful control, because it shows the result is not automatic. What does separate is the
+              starting batch: choosing the first five candidates from prior knowledge beats drawing them at
+              random, on the target that was sealed before any of our numbers existed.
             </InfoTip>
           </div>
           <div className="mt-1 flex flex-wrap items-baseline gap-x-2">
             <span className="mono text-[18px] font-semibold" style={{ color: "var(--gold)" }}>
-              {warm ? signed(warm.delta, 3) : "—"}
+              {warm ? (warm.delta >= 0 ? "+" : "−") + num(Math.abs(warm.delta), 3) : "—"}
             </span>
-            <span className="text-[10.5px] ink-dim">AUBQC, warm start vs cold</span>
+            <span className="text-[10.5px] ink-dim">better with a guided first batch</span>
           </div>
           <div className="mt-0.5 mono text-[9.5px] ink-faint">
-            {warm ? `${warm.seedsWon}/${warm.n} seeds · p ${pvalue(warm.p)} · ${warm.coverage} coverage` : "no warm-start cell"}
+            {warm
+              ? `won ${countOf(warm.seedsWon, warm.n)} runs · ${flukeOdds(warm.p)} · ${warm.coverage} of the library`
+              : "no guided-start run measured"}
           </div>
         </div>
 
         <div className="rounded-xl border px-3 py-2.5" style={{ borderColor: "var(--border)", background: "var(--panel-2)" }}>
           <div className="flex items-center gap-1.5">
             <Minus size={11} style={{ color: "#6366F1" }} />
-            <span className="text-[11.5px] font-semibold ink">{boundary ?? "boundary"} · 1-round control</span>
+            <span className="text-[11.5px] font-semibold ink">
+              {boundary ?? "boundary"} · a control where a tie is *required*
+            </span>
             <InfoTip label="Why a tie here is structural">
-              At <span className="mono">R = 1</span> the five-slot batch is identical for M5 and M3 by
-              construction, so AUBQC is bit-identical and <span className="mono">p = 1.0</span>. This is a
-              protocol check, not evidence for the loop.
+              This dataset only allows one round of testing, so the five candidates chosen are identical for
+              both methods by construction — the measure is bit-identical and the p-value is exactly 1. That is
+              a check on the protocol, not evidence for the loop.
             </InfoTip>
           </div>
           <div className="mt-1 flex flex-wrap items-baseline gap-x-2">
             <span className="mono text-[18px] font-semibold ink-dim">
-              {boundaryRow ? `${num(boundaryRow.aubqc.m5_hybrid, 3)} = ${num(boundaryRow.aubqc.m3_ucb, 3)}` : "—"}
+              {boundaryRow ? `${num(boundaryRow.aubqc.m5_hybrid, 2)} = ${num(boundaryRow.aubqc.m3_ucb, 2)}` : "—"}
             </span>
-            <span className="text-[10.5px] ink-dim">AUBQC, M5 ≡ M3</span>
+            <span className="text-[10.5px] ink-dim">identical, as it must be</span>
           </div>
           <div className="mt-0.5 mono text-[9.5px] ink-faint">
             {boundaryRow
-              ? `R = ${boundaryRow.campaign_protocol.rounds} · Q = ${boundaryRow.campaign_protocol.total_budget} · paired p ${pvalue(
-                  boundaryRow.paired.m5_hybrid_minus_m3_ucb.p_value,
-                )}`
+              ? `1 round · ${boundaryRow.campaign_protocol.total_budget} tests · p ${pvalue(
+                boundaryRow.paired.m5_hybrid_minus_m3_ucb.p_value,
+              )}`
               : "no boundary cell"}
           </div>
         </div>
@@ -295,9 +307,9 @@ function TargetExplorer({
 
   return (
     <Panel
-      eyebrow="Target matrix explorer"
-      title="One target at a time"
-      lede="Every method, both axes, and the paired test that decides whether a gap is real."
+      eyebrow="One dataset at a time"
+      title="Pick a target and see the whole comparison"
+      lede="Every method, both measures, and the paired test that decides whether a gap is real."
       actions={
         <div className="flex flex-wrap gap-1">
           {targets.map((target) => {
@@ -314,9 +326,9 @@ function TargetExplorer({
                   color: selected ? "var(--accent)" : "var(--ink-dim)",
                   background: selected ? "var(--accent-soft)" : "transparent",
                 }}
-                title={isRef ? "Reference row: the primary 35-query protocol, not a matrix cell" : undefined}
+                title={isRef ? "The main dataset, measured by the primary 35-test protocol" : undefined}
               >
-                {isRef ? "1N8Z (Reference)" : target}
+                {isRef ? "1N8Z (main)" : shortTarget(target).toUpperCase()}
               </button>
             );
           })}
@@ -352,7 +364,7 @@ function TargetDetail({
   const warm = row.paired.m5_warm_start_minus_m5_hybrid;
   const bars = METHODS.map((method) => ({
     key: method,
-    label: `${methodMeta(method).short} ${methodMeta(method).label}`,
+    label: methodName(method),
     value: row.spearman_rho_at_last_checkpoint[method] ?? 0,
     color: methodMeta(method).color,
     hero: method === "m5_hybrid",
@@ -360,105 +372,106 @@ function TargetDetail({
 
   return (
     <div>
-      <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1.5">
-        <span className="chip mono" style={{ borderColor: "var(--border)", color: "var(--ink-dim)" }}>
-          R = {row.campaign_protocol.rounds}
+      <div className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[10.5px] ink-dim">
+        <span className="chip mono" style={{ borderColor: "var(--border)" }}>
+          {row.campaign_protocol.rounds} test rounds
         </span>
-        <span className="chip mono" style={{ borderColor: "var(--border)", color: "var(--ink-dim)" }}>
-          Q = {row.campaign_protocol.total_budget}
+        <span className="chip mono" style={{ borderColor: "var(--border)" }}>
+          {row.campaign_protocol.total_budget} tests total
         </span>
-        <span className="chip mono" style={{ borderColor: "var(--border)", color: "var(--ink-dim)" }}>
-          L = {row.cdr3_length}
+        <span className="chip mono" style={{ borderColor: "var(--border)" }}>
+          {row.cdr3_length}-residue CDR
         </span>
-        <span className="chip mono" style={{ borderColor: "var(--border)", color: "var(--ink-dim)" }}>
-          N_qual = {int(row.campaign_protocol.n_qualified)}
+        <span className="chip mono" style={{ borderColor: "var(--border)" }}>
+          {int(row.campaign_protocol.n_qualified)} usable candidates
         </span>
         <span
           className="chip mono"
-          style={{ borderColor: "var(--border)", color: "var(--ink-dim)" }}
-          title={`Target coverage ${percentOf100(row.campaign_protocol.target_coverage * 100, 1)}; the integral batch lands at ${percentOf100(
+          style={{ borderColor: "var(--border)" }}
+          title={`${percentOf100(row.campaign_protocol.target_coverage * 100, 1)} of the usable pool is sampled per round; the full run covers ${percentOf100(
             row.campaign_protocol.coverage_pct,
             1,
-          )} of the qualified pool.`}
+          )}.`}
         >
-          coverage {percentOf100(row.campaign_protocol.target_coverage * 100, 0)}
+          {percentOf100(row.campaign_protocol.target_coverage * 100, 0)} of the library per round
         </span>
-        <InfoTip label="Why AUBQC is not comparable across rows">
-          Each target's protocol sizes itself to its pool, so R, Q, η_SAR and the AUBQC normaliser all move
-          with coverage. Compare <em>rank against baselines within a row</em>; never compare AUBQC across
-          rows or datasets.
+        <InfoTip label="Why the raw score is not comparable across targets">
+          Each target sizes its own budget and its own ceiling, so the "best binder found" score means
+          something different in every row. Compare each method <em>against the others within one row</em>,
+          never across rows.
         </InfoTip>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
         <div>
           <div className="mb-1.5 flex items-center justify-between gap-2">
-            <span className="label text-[9.5px]">Spearman ρ at the final checkpoint</span>
+            <span className="label text-[9.5px]">Ranking accuracy · 0 = guessing · 1 = perfect</span>
             <span className="mono text-[9.5px] ink-faint">
-              best {rhoBest ? methodMeta(rhoBest.method).short : "—"} {num(rhoBest?.value ?? null, 3)}
+              best: {rhoBest ? methodName(rhoBest.method) : "—"} {num(rhoBest?.value ?? null, 2)}
             </span>
           </div>
           <HBarChart
             data={bars}
-            format={(value) => value.toFixed(4)}
+            format={(value) => value.toFixed(2)}
             labelWidth={150}
             rowHeight={30}
             showZeroLine
-            zeroLabel="ρ = 0.00"
-            ariaLabel={`Spearman rho per method on ${target}`}
+            zeroLabel="0 · guessing"
+            ariaLabel={`Ranking accuracy per method on ${target}`}
           />
           <div className="mt-2 grid grid-cols-2 gap-2">
             <PairTile
-              label="ρ · M5 − M3"
+              label="Ranking accuracy"
               delta={pairedRho?.meanDiff ?? null}
               p={pairedRho?.p_value ?? null}
               seeds={pairedRho ? `${pairedRho.seeds_won}/${pairedRho.n}` : null}
-              note={pairedRho ? "paired ρ test" : "no paired ρ test"}
+              note={pairedRho ? "head-to-head" : "not measured"}
             />
             <PairTile
-              label="AUBQC · M5 − M3"
+              label="Best binder found"
               delta={pairedAubqc.mean_diff}
               p={pairedAubqc.p_value}
               seeds={`${pairedAubqc.seeds_won}/${pairedAubqc.n}`}
-              note="paired AUBQC test"
+              note="head-to-head"
             />
           </div>
         </div>
 
         <div>
           <div className="mb-1.5 flex items-center justify-between gap-2">
-            <span className="label text-[9.5px]">AUBQC · best binder found</span>
+            <span className="label text-[9.5px]">Best binder found · higher is better</span>
             <span className="mono text-[9.5px] ink-faint">
-              best {best ? methodMeta(best.method).short : "—"} {num(best?.value ?? null, 3)}
+              best: {best ? methodName(best.method) : "—"} {num(best?.value ?? null, 2)}
             </span>
           </div>
           <HBarChart
             data={METHODS.map((method) => ({
               key: method,
-              label: methodMeta(method).short,
+              label: methodName(method),
               value: row.aubqc[method],
               color: methodMeta(method).color,
               hero: method === "m5_hybrid",
             }))}
-            format={(value) => value.toFixed(3)}
-            labelWidth={54}
+            format={(value) => value.toFixed(2)}
+            labelWidth={104}
             rowHeight={30}
             showZeroLine={false}
             domain={[0, Math.max(...METHODS.map((method) => row.aubqc[method])) * 1.18]}
-            ariaLabel={`AUBQC per method on ${target}`}
+            ariaLabel={`Best binder found per method on ${target}`}
           />
           <div className="mt-2 rounded-lg border px-2.5 py-2" style={{ borderColor: "var(--border)", background: "var(--panel-2)" }}>
             <div className="flex items-center justify-between gap-2">
-              <span className="text-[10.5px] ink-dim">Cold-start ablation · warm − cold</span>
+              <span className="text-[10.5px] ink-dim">Guided first batch · vs. a random start</span>
               <span
                 className="mono text-[11px] font-semibold"
                 style={{ color: warm.mean_diff > 0 ? "var(--accent)" : "var(--ink-faint)" }}
               >
-                {signed(warm.mean_diff, 4)}
+                {warm.mean_diff >= 0 ? "+" : "−"}
+                {num(Math.abs(warm.mean_diff), 2)}
               </span>
             </div>
             <div className="mono mt-0.5 text-[9px] ink-faint">
-              {warm.seeds_won}/{warm.n} seeds · p {pvalue(warm.p_value)}
+              won {warm.seeds_won} of {warm.n} runs · {flukeOdds(warm.p_value)}
             </div>
           </div>
         </div>
@@ -467,10 +480,10 @@ function TargetDetail({
       {cells.length > 1 ? (
         <div className="mt-3 border-t pt-2.5" style={{ borderColor: "var(--border)" }}>
           <div className="mb-1.5 flex items-center gap-1.5">
-            <span className="label text-[9px]">Coverage sensitivity · M5 rank within each row</span>
+            <span className="label text-[9px]">Does it still win when the budget changes?</span>
             <InfoTip label="Lower is better">
-              This is M5's rank among the five methods at that coverage, not a score. The sub-label is the
-              absolute comparison the rank was derived from.
+              Our rank among the five methods at each library size, not a score. The same target, run against a
+              larger or smaller share of its library — a method that wins at only one setting is a coincidence.
             </InfoTip>
           </div>
           <div className="flex flex-wrap gap-1.5">
@@ -485,9 +498,9 @@ function TargetDetail({
                 }}
                 title={`AUBQC ${num(cell.aubqc_m5, 4)} vs best baseline ${cell.best_baseline ?? "—"} ${num(cell.aubqc_best_baseline, 4)}`}
               >
-                <span className="ink-faint">{cell.coverage_label}</span>
-                rank {cell.m5_rank ?? "—"}/5
-                <span className="ink-faint">ρ {num(cell.rho_m5, 3)}</span>
+                <span className="ink-faint">{cell.coverage_pct.toFixed(0)}% of library</span>
+                rank {cell.m5_rank ?? "—"} of 5
+                <span className="ink-faint">accuracy {num(cell.rho_m5, 2)}</span>
               </span>
             ))}
           </div>
@@ -519,12 +532,12 @@ function PairTile({
           className="mono text-[13px] font-semibold"
           style={{ color: delta === null ? "var(--ink-faint)" : positive ? "var(--accent)" : "var(--danger)" }}
         >
-          {signed(delta, 4)}
+          {delta === null ? "—" : `${delta >= 0 ? "+" : "−"}${num(Math.abs(delta), 2)}`}
         </span>
-        <span className="mono text-[9px] ink-faint">p {pvalue(p)}</span>
+        <span className="text-[9px] ink-faint">{flukeOdds(p)}</span>
       </div>
       <div className="mono text-[8.5px] leading-tight ink-faint">
-        {seeds ?? "—"} seeds · {note}
+        {seeds ? `won ${seeds.replace("/", " of ")}` : "—"} · {note}
       </div>
     </div>
   );
@@ -537,58 +550,66 @@ function ReferenceDetail({ reference }: { reference: NonNullable<CrossTargetPayl
   return (
     <div>
       <div className="mb-3 flex flex-wrap items-center gap-1.5">
-        <Badge color="#F43F5E" title="Reference only: the primary 35-query protocol over 210 qualified candidates">
-          1N8Z · reference only
+        <Badge color="#F43F5E" title="Reference only: the main 35-test protocol over every usable candidate">
+          1N8Z · the main dataset
         </Badge>
         <span className="chip mono" style={{ borderColor: "var(--border)", color: "var(--ink-dim)" }}>
-          L = {reference.cdr3_length}
+          {reference.cdr3_length}-residue CDR
         </span>
         <span className="chip mono" style={{ borderColor: "var(--border)", color: "var(--ink-dim)" }}>
-          N_qual = {int(reference.qualified_count)}
+          {int(reference.qualified_count)} usable candidates
         </span>
         <span className="chip mono" style={{ borderColor: "var(--border)", color: "var(--ink-dim)" }}>
-          {int(reference.seeds)} seeds
-        </span>
-        <span className="chip mono" style={{ borderColor: "var(--border)", color: "var(--ink-dim)" }}>
-          coverage {reference.coverage_label}
+          {int(reference.seeds)} runs
         </span>
       </div>
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
         <div>
           <div className="mb-1 flex items-center gap-1.5">
-            <span className="label text-[9.5px]">Learning curves · 35-query protocol</span>
+            <span className="label text-[9.5px]">How good the best candidate got · 35-test protocol</span>
           </div>
           <LineChart
             x={x}
             series={METHODS.map((method) => ({
               key: method,
-              label: methodMeta(method).short,
+              label: methodName(method),
               color: methodMeta(method).color,
               values: reference.curves.map((row) => row[method]),
               dashed: method !== "m5_hybrid",
               width: method === "m5_hybrid" ? 2.2 : 1.3,
             }))}
             height={216}
-            xLabel="q"
-            yLabel="best qualified"
+            xLabel="lab tests spent"
+            yLabel="best binder so far"
             formatY={(value) => value.toFixed(2)}
-            ariaLabel="1N8Z reference benchmark curves"
+            ariaLabel="1N8Z reference curves: best binder found per method"
           />
         </div>
         <div className="grid grid-cols-2 gap-2 self-start">
-          <KpiTile label="best AUBQC" value={num(best?.value ?? null, 3)} caption={best ? methodMeta(best.method).label : ""} emphasis="accent" />
           <KpiTile
-            label="M5 / M3 AUBQC"
-            value={`${(reference.aubqc.m5_hybrid / Math.max(reference.aubqc.m3_ucb, 1e-9)).toFixed(3)}×`}
-            caption={`${num(reference.aubqc.m5_hybrid, 3)} / ${num(reference.aubqc.m3_ucb, 3)}`}
+            label="Best binder found"
+            value={num(best?.value ?? null, 2)}
+            caption={best ? `top method: ${methodName(best.method)}` : ""}
+            emphasis="accent"
           />
-          <KpiTile label="final M5 ρ" value={num(last?.m5_hybrid ?? null, 3)} caption="at q = 35" emphasis="accent" />
-          <KpiTile label="M3 ρ" value={num(last?.m3_ucb ?? null, 3)} caption="at q = 35" />
+          <KpiTile
+            label="Our accuracy vs. standard"
+            value={gainText(relativeGain(last?.m5_hybrid ?? null, last?.m3_ucb ?? null))}
+            caption={`${num(last?.m5_hybrid ?? null, 2)} vs ${num(last?.m3_ucb ?? null, 2)} on 0→1`}
+            emphasis="accent"
+          />
+          <KpiTile
+            label="Ranking accuracy, ours"
+            value={num(last?.m5_hybrid ?? null, 2)}
+            caption="0 = guessing · 1 = perfect"
+            emphasis="accent"
+          />
+          <KpiTile label="Ranking accuracy, standard" value={num(last?.m3_ucb ?? null, 2)} caption="0 = guessing · 1 = perfect" />
         </div>
       </div>
-      <Note summary="Why 1N8Z is isolated from the matrix">
-        {reference.note} Checkpoints {reference.checkpoints.join(", ")}. The 16.7 % rate is the same rate the
-        dynamic-sized cells use, which is why the row is comparable in protocol law but not in budget.
+      <Note summary="Why the main dataset is shown separately">
+        {reference.note} Measured at {reference.checkpoints.join(", ")} tests. It uses the same sampling rule
+        as the other datasets, which is why it is comparable in method but not in budget.
       </Note>
     </div>
   );
@@ -617,12 +638,16 @@ function EliminationFunnel({ payload }: { payload: CrossTargetPayload }) {
 
   return (
     <Panel
-      eyebrow="Methodology · pre-registration"
-      title={`How ${metadata.rows.length} datasets became ${finalRows.length}: every elimination rule, fixed before M5 existed`}
-      lede="Metadata only. No M1–M5 curve existed for any of these targets when these clauses were written."
+      eyebrow="Why you can trust the dataset choice"
+      title={`${metadata.rows.length} public datasets went in, ${finalRows.length} came out — chosen by rules written before we ran anything`}
+      lede="Only dataset metadata was used. Not one of our methods had been run on any of these targets when these rules were fixed."
       actions={
-        <span className="chip mono" style={{ borderColor: "var(--border)", color: "var(--ink-faint)" }}>
-          <Telescope size={9} /> N_qual ≥ {int(metadata.min_nqual)}
+        <span
+          className="chip mono"
+          style={{ borderColor: "var(--border)", color: "var(--ink-faint)" }}
+          title={`A dataset needs at least ${int(metadata.min_nqual)} usable candidates after de-duplication to be usable at all.`}
+        >
+          <Telescope size={9} /> at least {int(metadata.min_nqual)} usable candidates
         </span>
       }
       flush
@@ -678,15 +703,15 @@ function EliminationFunnel({ payload }: { payload: CrossTargetPayload }) {
 
       <div className="flex flex-wrap items-center gap-1.5 border-t px-5 py-2.5" style={{ borderColor: "var(--border)" }}>
         <BadgeCheck size={12} style={{ color: "var(--accent)" }} />
-        <span className="text-[11px] ink-dim">Surviving pre-registered target:</span>
+        <span className="text-[11px] ink-dim">The target that survived every rule:</span>
         {finalRows.length ? (
           finalRows.map((row) => (
             <Badge
               key={row.target_id}
               color="#10B981"
-              title={`L = ${row.modal_cdrh3_length_L}, N_qual = ${row.N_qual}, gate ${row.threshold_source}`}
+              title={`${row.modal_cdrh3_length_L}-residue loop, ${int(row.N_qual)} usable candidates, threshold ${row.threshold_source}`}
             >
-              {row.target_id} · L {row.modal_cdrh3_length_L} · N_qual {int(row.N_qual)}
+              {row.target_id} · {row.modal_cdrh3_length_L} residues · {int(row.N_qual)} usable
             </Badge>
           ))
         ) : (
@@ -702,14 +727,14 @@ function EliminationFunnel({ payload }: { payload: CrossTargetPayload }) {
       <details className="disclosure border-t px-5 py-2.5" style={{ borderColor: "var(--border)" }}>
         <summary className="flex items-center gap-1.5 text-[11px] ink-dim">
           <ChevronDown size={11} />
-          Dataset metadata and the two rules that needed a caveat
+          The full table, and the two rules that needed a caveat
         </summary>
         <div className="mt-2 space-y-2">
           <div className="scroll-thin overflow-x-auto">
             <table className="w-full min-w-[620px] border-collapse text-[10.5px]">
               <thead>
                 <tr style={{ background: "var(--panel-2)" }}>
-                  {["target", "L", "rows in source", "collapsed", "distinct CDRH3", "N_qual", "gate", "already used"].map((heading) => (
+                  {["dataset", "length", "rows in source", "collapsed", "distinct loops", "usable", "gate", "already used"].map((heading) => (
                     <th key={heading} className="label px-2 py-1 text-left text-[8.5px]">
                       {heading}
                     </th>
@@ -754,8 +779,8 @@ function ArchitectureNote({ payload }: { payload: CrossTargetPayload }) {
   const classes = partitionClasses(payload, null, null);
   return (
     <Panel
-      eyebrow="Architecture"
-      title="What generalizes, and what is re-sized per target"
+      eyebrow="What carries over"
+      title="The same engine, re-sized to each library"
       lede={detail.generalizes_across}
       actions={
         <span className="chip mono" style={{ borderColor: "var(--border)", color: "var(--ink-faint)" }}>

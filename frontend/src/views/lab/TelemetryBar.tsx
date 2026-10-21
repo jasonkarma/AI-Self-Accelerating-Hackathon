@@ -1,21 +1,19 @@
 import { Gauge, Sigma } from "lucide-react";
 import type { ConfigPayload, StatePayload } from "../../types/state";
 import { InfoTip } from "../../components/Panel";
-import { num, percent } from "../../lib/format";
+import { num } from "../../lib/format";
 
 /**
- * The first-principles telemetry bar.
+ * The engine's internal state.
  *
- * Every gauge here is a *derived* quantity with a published formula, and the
- * formula is printed next to it. The point of the panel is that a judge can
- * check `VoI` against `sar_maturity`, `sar_maturity_target` and `eta_sar`
- * without opening the source.
+ * This panel used to sit in the demo path under the three numbers that matter,
+ * which invited the reader to treat `VoI` and `η_SAR` as results. They are not
+ * results — they are the loop's own decision variables — so the panel now lives
+ * inside the "under the hood" disclosure at the bottom of the view.
  *
- * The `exploit_weight` / `exploration_weight` pair carries an explicit
- * warning. It used to steer `a_null`; the anneal was retired at `e567cd4`, and
- * the payload says so itself (`steers_null_objective: false`). Rendering the
- * number without the badge would invite exactly the reading the backend went out
- * of its way to prohibit.
+ * Each gauge keeps its published formula next to it, because the whole point is
+ * that a sceptical judge can check it. What changed is the *label*: the surface
+ * says what the quantity is for, and the internal name sits in the tooltip.
  */
 export function TelemetryBar({ state, config }: { state: StatePayload; config: ConfigPayload | null }) {
   const diagnostics = state.voi_diagnostics;
@@ -25,15 +23,15 @@ export function TelemetryBar({ state, config }: { state: StatePayload; config: C
   const seqLength = config ? config.wild_type.length : null;
 
   return (
-    <section className="panel px-4 py-3.5">
+    <section className="rounded-xl border px-4 py-3.5" style={{ borderColor: "var(--border)", background: "var(--panel-2)" }}>
       <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-1.5">
           <Gauge size={12} style={{ color: "var(--accent)" }} />
-          <span className="label text-[9.5px]">Loop telemetry · round {diagnostics.round_number}</span>
-          <InfoTip label="Telemetry formulas">
-            Every gauge is a derived quantity with a published formula. VoI scales slot 3's optimism bonus
-            only; SAR maturity is measured against this campaign's own target; η_SAR is the additive prior
-            trust given L, N_qual and Q, computed from t = 0 observables only.
+          <span className="label text-[9.5px]">loop internals · round {diagnostics.round_number}</span>
+          <InfoTip label="What these gauges are">
+            None of these is a result. They are the quantities the loop uses to decide what to test next, and
+            each carries the formula the backend publishes. The value of information, for instance, only
+            scales the exploration slot's optimism bonus.
           </InfoTip>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
@@ -42,7 +40,7 @@ export function TelemetryBar({ state, config }: { state: StatePayload; config: C
             style={{ borderColor: "var(--accent-line)", color: "var(--accent)", background: "var(--accent-soft)" }}
             title={diagnostics.objective_note}
           >
-            OBJECTIVE {diagnostics.objective}
+            objective {diagnostics.objective}
           </span>
           <span
             className="chip mono !text-[9.5px]"
@@ -52,62 +50,68 @@ export function TelemetryBar({ state, config }: { state: StatePayload; config: C
             }}
             title={
               diagnostics.steers_null_objective
-                ? "The anneal is steering a_null. This contradicts the shipped objective law."
-                : "steers_null_objective: false — exploit_weight / exploration_weight are diagnostics of the retired anneal, not coefficients of a_null."
+                ? "The retired anneal is steering the objective. This would contradict the shipped rule."
+                : "The exploit/explore weights are leftovers from a retired heuristic. They do not affect the score."
             }
           >
-            VoI diagnostic only
+            not steering the score
           </span>
         </div>
       </div>
 
       <div className="grid grid-cols-2 gap-x-4 gap-y-3.5 sm:grid-cols-3">
         <GaugeCell
-          label="Value of information"
+          label="How much a test is worth"
           value={num(diagnostics.voi, 4)}
           fraction={null}
           color="#0EA5E9"
           formula="H · (1 − 0.65·C)"
-          hint="Value of information. Scales slot 3's optimism bonus only; it is not a phase switch."
+          token="VoI"
+          hint="Value of information. Only scales the exploration slot's optimism bonus; it is not a phase switch."
         />
         <GaugeCell
-          label="SAR maturity"
+          label="How well the position table is filled"
           value={num(diagnostics.sar_maturity, 4)}
           fraction={maturityFraction}
           color="#A855F7"
           formula={`target ${num(maturityTarget, 1)}`}
-          hint="Empirically corroborated fraction of the hierarchical SAR table, measured against this campaign's own target."
+          token="sar_maturity"
+          hint="The fraction of the position/residue table that has been corroborated by measurements, against this campaign's own target."
         />
         <GaugeCell
-          label="η_SAR prior trust"
+          label="How much the prior is trusted"
           value={num(diagnostics.eta_sar, 3)}
           fraction={null}
           color="#6366F1"
           formula="additive_prior_trust(L, N_qual, Q)"
-          hint="How much the empirical SAR prior is trusted given this pool and this budget. Computed from t = 0 observables only."
+          token="η_SAR"
+          hint="How far the hand-written sequence prior is allowed to move a score, given the library size and the budget. Computed from the starting conditions only."
         />
         <GaugeCell
-          label="Sequence space"
+          label="Sequence length"
           value={seqLength === null ? "—" : `L = ${seqLength}`}
           fraction={null}
           color="var(--ink-dim)"
-          formula={config ? `N_qual ${config.qualified_count} · Q ${state.kpis.total_budget}` : "from the frozen protocol"}
-          hint="L, N_qual and Q come from the frozen protocol and the KPI block — never typed in."
+          formula={config ? `${config.qualified_count} of ${config.pool_size} candidates qualify` : "from the frozen protocol"}
+          token="L · N_qual · Q"
+          hint="The three numbers every other quantity is scaled against, read from the frozen protocol and the campaign totals."
         />
         <GaugeCell
-          label="SAR support"
+          label="Evidence behind the position table"
           value={`${diagnostics.sar_support}`}
           fraction={null}
           color="var(--ink-dim)"
           formula={`${diagnostics.sar_basis} · ${diagnostics.position_tolerance_effects.length} positions`}
-          hint="Number of evidence units behind the SAR table, and the estimator's basis."
+          token="sar_support"
+          hint="How many independent observations the position/residue table is built from, and the estimator's basis."
         />
         <GaugeCell
-          label="Exploit / explore weights"
+          label="Retired heuristic weights"
           value={`${num(diagnostics.exploit_weight, 2)} / ${num(diagnostics.exploration_weight, 2)}`}
           fraction={null}
           color="var(--ink-faint)"
-          formula="retired anneal · diagnostic"
+          formula="kept for audit · does not affect the score"
+          token="exploit_weight · exploration_weight"
           hint={diagnostics.objective_note}
         />
       </div>
@@ -116,12 +120,12 @@ export function TelemetryBar({ state, config }: { state: StatePayload; config: C
         <div className="mt-3 border-t pt-2.5" style={{ borderColor: "var(--border)" }}>
           <div className="mb-1.5 flex items-center gap-1.5">
             <Sigma size={10} style={{ color: "var(--ink-faint)" }} />
-            <span className="label text-[9px]">Position-tolerance effects</span>
-            <InfoTip label="Shrinkage rule">
-              Shrunk <span className="mono">Δy_bind</span> vs the WT median, with shrinkage{" "}
-              <span className="mono">n / (n + 3)</span>. A cell with <span className="mono">n &lt; 2</span>{" "}
-              contributes nothing. Empty positions are not zero-effect positions — they are positions the
-              ledger has no repeated observation for.
+            <span className="label text-[9px]">What each position does on average</span>
+            <InfoTip label="How these are estimated">
+              Each position's typical effect on binding, shrunk toward zero when there are few observations
+              (<span className="mono">n / (n + 3)</span>); a position with <span className="mono">n &lt; 2</span>{" "}
+              contributes nothing. An absent position is one the record has no repeated observation for — not a
+              position with zero effect.
             </InfoTip>
           </div>
           <div className="flex flex-wrap gap-1">
@@ -139,7 +143,7 @@ export function TelemetryBar({ state, config }: { state: StatePayload; config: C
                       color: positive ? "var(--accent)" : "#F59E0B",
                       background: positive ? "var(--accent-soft)" : "rgba(245,158,11,0.07)",
                     }}
-                    title={`Position ${effect.position}: shrunk effect ${effect.shrunk_effect} over n = ${effect.n}`}
+                    title={`Position ${effect.position}: average effect ${effect.shrunk_effect} over n = ${effect.n} observations`}
                   >
                     <span className="ink-faint">P{effect.position}</span>
                     {positive ? "+" : "−"}
@@ -157,14 +161,18 @@ export function TelemetryBar({ state, config }: { state: StatePayload; config: C
           className="mt-2.5 flex flex-wrap items-center gap-x-3.5 gap-y-1 border-t pt-2 text-[9.5px] ink-faint"
           style={{ borderColor: "var(--border)" }}
         >
-          <span>
-            τ_dev <span className="mono">{config.tau_dev.toFixed(4)}</span>
+          <span title="The safety cut-off on developability risk, set at the pool median.">
+            safety cut-off <span className="mono">{config.tau_dev.toFixed(4)}</span>
           </span>
           <span>
-            pass rate <span className="mono">{percent(config.qualification_pass_rate, 1)}</span>
+            pass rate{" "}
+            <span className="mono">{(config.qualification_pass_rate * 100).toFixed(1)}%</span>
           </span>
           <span>
-            qualified <span className="mono">{config.qualified_count}/{config.pool_size}</span>
+            qualified{" "}
+            <span className="mono">
+              {config.qualified_count}/{config.pool_size}
+            </span>
           </span>
           <span className="mono">{config.version}</span>
         </div>
@@ -179,6 +187,7 @@ function GaugeCell({
   fraction,
   color,
   formula,
+  token,
   hint,
 }: {
   label: string;
@@ -186,11 +195,15 @@ function GaugeCell({
   fraction: number | null;
   color: string;
   formula: string;
+  token: string;
   hint: string;
 }) {
   return (
-    <div className="min-w-0" title={hint}>
-      <div className="label mb-0.5 whitespace-normal leading-tight">{label}</div>
+    <div className="min-w-0">
+      <div className="label mb-0.5 flex items-center gap-1 whitespace-normal leading-tight">
+        <span>{label}</span>
+        <InfoTip label={`${token} — what it means`}>{hint}</InfoTip>
+      </div>
       <div className="mono text-[17px] font-semibold leading-tight" style={{ color }}>
         {value}
       </div>
@@ -204,13 +217,13 @@ function GaugeCell({
           aria-valuemax={100}
           aria-label={`${label} as a fraction of target`}
         >
-          <div
-            className="h-full rounded-full transition-[width] duration-500"
-            style={{ width: `${fraction * 100}%`, background: color }}
-          />
+          <div className="h-full rounded-full transition-[width] duration-500" style={{ width: `${fraction * 100}%`, background: color }} />
         </div>
       ) : null}
       <div className="mono mt-1 whitespace-normal text-[9.5px] leading-tight ink-faint">{formula}</div>
+      <div className="mono mt-0.5 text-[8.5px] leading-tight ink-faint" style={{ opacity: 0.75 }}>
+        {token}
+      </div>
     </div>
   );
 }

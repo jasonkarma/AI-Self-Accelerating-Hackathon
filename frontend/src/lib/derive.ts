@@ -92,13 +92,13 @@ function roleForSlotType(slotType: string): {
   const color = meta?.color ?? "#10B981";
   switch (slotType) {
     case "Max Joint Uncertainty":
-      return { label: "VoI Optimistic Probe", color, bucket: "voi" };
+      return { label: "Tests the biggest unknown", color, bucket: "voi" };
     case "Skeptic Falsification Probe":
-      return { label: "Paired H0 Negative Control", color, bucket: "h0" };
+      return { label: "Control — must show nothing", color, bucket: "h0" };
     case "Agent Hypothesis Test":
-      return { label: "H1 Promotion (Exploit)", color, bucket: "exploit" };
+      return { label: "Strong predicted candidate", color, bucket: "exploit" };
     default:
-      return { label: "Exploit / Consensus", color, bucket: "exploit" };
+      return { label: "Consensus pick", color, bucket: "exploit" };
   }
 }
 
@@ -176,7 +176,9 @@ export function slotSplit(state: StatePayload): {
     h0,
     total,
     graduated,
-    label: graduated ? `${exploit}:0:0 Harvest` : `${exploit} Exploit : ${voi} VoI : ${h0} H0`,
+    label: graduated
+      ? `${exploit} × best predicted`
+      : `${exploit} exploit · ${voi} explore · ${h0} control`,
   };
 }
 
@@ -283,29 +285,29 @@ export function benchmarkMetricRows(benchmark: BenchmarkPayload): BenchmarkMetri
     label: string;
     description: string;
   }> = [
-    {
-      key: "aubqc",
-      label: "AUBQC",
-      description:
-        "Mean best qualified binding over the 7 checkpoints (q = 5…35). Tracks one number: the best binder found so far.",
-    },
-    {
-      key: "normalized_aubqc",
-      label: "Normalized AUBQC",
-      description:
-        "The same area with y*(q) rescaled 0 (seed score) → 1 (pool ceiling): the fraction of headroom captured.",
-    },
-    {
-      key: "top5_panel_aubqc",
-      label: "Top-5 panel AUBQC",
-      description: "Mean binding of the best five qualified leads found so far — portfolio depth.",
-    },
-    {
-      key: "top_decile_hit_rate",
-      label: "Top-decile hit rate",
-      description: benchmark.top_decile_definition,
-    },
-  ];
+      {
+        key: "aubqc",
+        label: "Best binder found",
+        description:
+          "The average, over the whole run, of how good the single best candidate found so far was. Tracks one number: the best hit.",
+      },
+      {
+        key: "normalized_aubqc",
+        label: "Share of the possible gain",
+        description:
+          "The same average, rescaled so 0 is where you started and 1 is the best candidate that exists: the fraction of the available headroom captured.",
+      },
+      {
+        key: "top5_panel_aubqc",
+        label: "Depth of the top 5 leads",
+        description: "How good your five best candidates are on average — a portfolio measure, not a single-hit measure.",
+      },
+      {
+        key: "top_decile_hit_rate",
+        label: "Top-decile hit rate",
+        description: benchmark.top_decile_definition,
+      },
+    ];
   return rows.map((row) => {
     const values = benchmark[row.key] as MethodRecord;
     let best: { method: string; value: number } | null = null;
@@ -376,7 +378,7 @@ export function partitionClasses(
 
   const unlearnableGateRows = cross.learnability_gate.rows.filter(
     (row) => partition.unlearnable.includes(row.target_id) && row.max_baseline_rho !== undefined,
-  );  const unlearnableMeasured = partition.unlearnable.flatMap((target) =>
+  ); const unlearnableMeasured = partition.unlearnable.flatMap((target) =>
     cross.targets
       .filter((row) => row.dataset === target)
       .map((row) => ({
@@ -407,23 +409,22 @@ export function partitionClasses(
   return [
     {
       key: "learnable",
-      title: "Class 1 · Learnable, multi-round",
-      subtitle: "M5 leads ρ in every target that has a rank signal",
+      title: "Learnable, multi-round",
+      subtitle: "Our method ranks better in every target that has a signal at all",
       color: "#10B981",
       targets: partition.learnable_multiround,
       evidence:
         measuredRho.length === 0
           ? "no measured cells"
-          : `${measuredRho.length} of ${partition.learnable_multiround.length} measured · Δρ ${formatRange(measuredRho.map((entry) => entry.delta))}${
-              withP.length
-                ? ` · paired p ≤ ${formatP(smallestP)} on the ${withP.length} cell(s) that publish one`
-                : ""
-            }`,
+          : `${measuredRho.length} of ${partition.learnable_multiround.length} measured · Δρ ${formatRange(measuredRho.map((entry) => entry.delta))}${withP.length
+            ? ` · paired p ≤ ${formatP(smallestP)} on the ${withP.length} cell(s) that publish one`
+            : ""
+          }`,
     },
     {
       key: "unlearnable",
-      title: "Class 2 · Unlearnable landscapes",
-      subtitle: "No method ranks the pool; the benchmark has no power here",
+      title: "No signal to learn",
+      subtitle: "No method can rank these libraries, so nothing can be compared",
       color: "#F59E0B",
       targets: partition.unlearnable,
       evidence:
@@ -433,16 +434,16 @@ export function partitionClasses(
     },
     {
       key: "single",
-      title: "Class 3 · Single-round boundary",
-      subtitle: "M5 ≡ M3 on AUBQC by construction at R = 1",
+      title: "Only one round is possible",
+      subtitle: "Both methods must pick the same five candidates, so the result is identical",
       color: "#6366F1",
       targets: partition.single_round,
       evidence: singleRoundEvidence(cross),
     },
     {
       key: "degenerate",
-      title: "Class 4 · Degenerate libraries",
-      subtitle: `≤ 2 distinct CDRH3${aboveTwo.length ? ` (and ${aboveTwo.join(", ")} at ${aboveTwo.map((target) => degenerate.find((row) => row.target_id === target)?.unique_cdrh3_pool_size ?? "?").join("/")})` : ""}: not search problems`,
+      title: "Too few variants to search",
+      subtitle: `Two or fewer distinct loops${aboveTwo.length ? ` (${aboveTwo.join(", ")} have ${aboveTwo.map((target) => degenerate.find((row) => row.target_id === target)?.unique_cdrh3_pool_size ?? "?").join("/")})` : ""} — there is nothing to choose between`,
       color: "#64748B",
       targets: partition.degenerate_1_or_2_cdrh3,
       evidence:
@@ -527,7 +528,7 @@ function singleRoundEvidence(cross: CrossTargetPayload): string {
   const row = cross.targets.find((entry) => entry.dataset === target);
   if (!row) return target;
   const paired = row.paired.m5_hybrid_minus_m3_ucb;
-  return `${target.toUpperCase()} · R = ${row.campaign_protocol.rounds}, Q = ${row.campaign_protocol.total_budget} · paired Δ = ${paired.mean_diff.toFixed(4)}, p = ${paired.p_value.toFixed(2)}`;
+  return `${target.toUpperCase()} · ${row.campaign_protocol.rounds} round, ${row.campaign_protocol.total_budget} tests · ${paired.p_value < 0.05 ? "a real difference" : "identical by construction"}`;
 }
 
 function formatP(p: number | null): string {
@@ -643,26 +644,26 @@ export function funnelStages(
 
   const stages: ReturnType<typeof funnelStages> = [
     {
-      stage: "Enumerated",
-      detail: "every binding_affinity CSV in the corpus",
+      stage: "Every public dataset in the corpus",
+      detail: "enumerated from metadata alone",
       remaining: rows,
       rejected: [],
     },
     {
-      stage: "A real search problem",
-      detail: "≥ 35 distinct CDRH3, ≥ 2 varying positions",
+      stage: "Is it actually a search problem?",
+      detail: "needs at least 35 distinct CDRH3 loops and 2 positions that vary",
       remaining: usable,
       rejected: notUsable,
     },
     {
-      stage: `N_qual ≥ ${minNQual}`,
-      detail: "frozen 0.50 quantile gate",
+      stage: "Enough usable candidates",
+      detail: `at least ${minNQual} survivors after a fixed median cut-off`,
       remaining: candidates,
       rejected: belowFloor,
     },
     {
-      stage: "Not already scored",
-      detail: "no published M1–M5 cell exists yet",
+      stage: "Not already solved by us",
+      detail: "no previous published result on any method",
       remaining: fresh,
       rejected: alreadyScored,
     },
@@ -670,21 +671,21 @@ export function funnelStages(
 
   if (gate) {
     stages.push({
-      stage: "No measured sequence overlap",
-      detail: "excluded on measured overlap with an already-scored pool",
+      stage: "No overlap with a dataset we already used",
+      detail: "overlap is measured from the sequences themselves, not from names",
       remaining: distinct,
       rejected: overlapping,
       note: overlapping.length
         ? `Overlap is a measured quantity (learnability gate), not a naming rule: ${overlapping
-            .map((row) => `${canonicalTargetId(row.target_id)} ${overlapOf(row.target_id).toFixed(2)}%`)
-            .join(", ")}.`
+          .map((row) => `${canonicalTargetId(row.target_id)} ${overlapOf(row.target_id).toFixed(2)}%`)
+          .join(", ")}.`
         : undefined,
     });
   }
 
   stages.push({
-    stage: "Out of distribution",
-    detail: "exclude HER2 — the 1N8Z engine's own paratope pool",
+    stage: "Not the antibody we tuned on",
+    detail: "HER2 is the source of the starting antibody, so it proves nothing",
     remaining,
     rejected: her2,
     note: her2.some((row) => !row.is_her2)
@@ -774,7 +775,7 @@ export const VARIANT_GROUPS: VariantGroup[] = [
     key: "slot_role",
     title: "Slot-role separation (negative controls)",
     description:
-      "Re-home the exploitation slots onto the scoring model. If ρ could be converted into AUBQC by re-weighting, these would win.",
+      "Re-home the exploitation slots onto the scoring model. If better ranking converted into a better best binder, these would win.",
     color: "#6366F1",
     variants: ["slot1_model", "harvest_model", "harvest_slot1", "all_model"],
   },
@@ -895,6 +896,8 @@ export function groupSummary(
   group: VariantGroupKey,
 ): {
   comparisons: number;
+  /** How many distinct changes the group contains. */
+  variants: number;
   minP: number | null;
   minAt: { cell: string; variant: string; metric: string } | null;
   cells: number;
@@ -920,7 +923,7 @@ export function groupSummary(
       }
     }
   }
-  return { comparisons, minP, minAt, cells: seenCells.size };
+  return { comparisons, variants: names.length, minP, minAt, cells: seenCells.size };
 }
 
 /**
@@ -1093,7 +1096,7 @@ export const VARIANT_LABELS: Record<
   no_anneal: {
     name: "Unbiased Null Objective",
     token: "no_anneal",
-    effect: "Removes the heuristic VoI anneal; a_null := a_base is the shipped law.",
+    effect: "Removes the heuristic that nudged scores toward the model's own guess; the shipped rule has no such nudge.",
     kind: "causal",
   },
   greedy_slots: {

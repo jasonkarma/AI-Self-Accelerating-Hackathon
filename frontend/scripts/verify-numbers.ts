@@ -55,6 +55,25 @@ import {
   zeroShotRows,
 } from "../src/lib/derive";
 import { pvalue, signed } from "../src/lib/format";
+import {
+  countOf,
+  flukeOdds,
+  foldOverReference,
+  foldText,
+  gainText,
+  gainWhole,
+  isClear,
+  librarySkipped,
+  methodFull,
+  methodName,
+  noiseMultiple,
+  noiseText,
+  PLAIN,
+  ratio,
+  ratioText,
+  relativeGain,
+  shareWhole,
+} from "../src/lib/plain";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const contractPath = resolve(here, "../../api_contract.json");
@@ -417,7 +436,11 @@ function verifyCrossTarget(): void {
     survivors.length === 1 && survivors[0]!.target_id === "aayl51",
     survivors.map((row) => row.target_id).join(",") || "none",
   );
-  const overlapStage = stages.find((stage) => stage.stage === "No measured sequence overlap");
+  // The stage labels are product copy (`lib/derive.ts` owns them), so the audit
+  // keys on the rule the stage applies — the overlap stage is the only one whose
+  // title mentions overlap — rather than on an exact string that a copy edit
+  // would break.
+  const overlapStage = stages.find((stage) => /overlap/i.test(stage.stage));
   expect("cross: overlap stage exists", overlapStage !== undefined, "no overlap stage");
   expect(
     "cross: aayl49 rejected on measured overlap",
@@ -530,7 +553,7 @@ function verifyAttribution(): void {
         expect(
           `attribution: ${cell.cell}/${variant} baseline differs from live production`,
           !close(published._baseline ?? Number.NaN, production!.aubqc, 1e-9) ||
-            variant === "no_anneal",
+          variant === "no_anneal",
           `${published._baseline} vs ${production!.aubqc}`,
         );
       } else {
@@ -666,12 +689,144 @@ function verifyCrossViewConsistency(): void {
   }
 }
 
+// ═══════════════════ the plain-language layer (`lib/plain.ts`) ═════════════
+
+/**
+ * Every headline figure a judge reads is produced by a function in
+ * `src/lib/plain.ts`. This block asserts each one against the payload it
+ * summarises, so a translation cannot drift from the number it translates.
+ *
+ * Three properties matter more than the arithmetic:
+ *
+ * 1. **The gain is relative to the baseline**, not an absolute difference — the
+ *    two are easy to confuse in prose, and only one of them is what "+91%" means.
+ * 2. **The odds ladder never overstates.** `flukeOdds` may return a weaker claim
+ *    than the p-value supports, never a stronger one, so every tier is checked
+ *    against the boundary it must not cross.
+ * 3. **The fold-change is the inverse of the log scale.** `−log₁₀ K_D` means a
+ *    difference of `d` is `10^d` times tighter, not `d` times.
+ */
+function verifyPlainLanguage(): void {
+  const benchmark = contract.benchmark;
+  const final = finalRho(benchmark.spearman_rho_curves as unknown as Array<Record<string, number | null>>);
+  const m5 = final.m5_hybrid ?? Number.NaN;
+  const m3 = final.m3_ucb ?? Number.NaN;
+  const vsM3 = benchmark.paired_t_tests.m5_hybrid_minus_m3_ucb.metrics.spearman_rho_at_q35;
+
+  // ── the headline gain ──
+  const gain = relativeGain(m5, m3);
+  expect("plain: gain is defined", gain !== null, "null for two finite scores");
+  expectClose("plain: gain = (m5 − m3) / m3", gain ?? Number.NaN, (m5 - m3) / m3, 1e-12);
+  // The gain must not be the absolute difference, which is the classic slip.
+  expect(
+    "plain: gain is relative, not absolute",
+    Math.abs((gain ?? 0) - (m5 - m3)) > 1e-3,
+    `gain ${gain} equals the absolute diff ${m5 - m3}`,
+  );
+  expect("plain: gain rounds to a positive percentage", gainWhole(gain).startsWith("+"), gainWhole(gain));
+  expect("plain: gainWhole is a whole percentage", /^\+[0-9]+%$/.test(gainWhole(gain)), gainWhole(gain));
+  expect("plain: gainText keeps a decimal", /^\+[0-9]+\.[0-9]%$/.test(gainText(gain)), gainText(gain));
+  // "+91.1%" for this artifact — asserted against the payload, never typed in src/.
+  expectClose("plain: gain percent", (gain ?? 0) * 100, 91.11, 0.02);
+
+  const r = ratio(m5, m3);
+  expectClose("plain: ratio = m5 / m3", r ?? Number.NaN, m5 / m3, 1e-12);
+  expect("plain: ratioText has a times sign", ratioText(r).endsWith("×"), ratioText(r));
+  expectClose("plain: ratio ≈ 1.91", r ?? Number.NaN, 1.91, 0.005);
+  // The ratio and the gain are the same claim; they must not disagree.
+  expectClose("plain: ratio = 1 + gain", r ?? Number.NaN, 1 + (gain ?? 0), 1e-12);
+
+  // ── the noise multiple (replaces Δ / SE) ──
+  const noise = noiseMultiple(vsM3.mean_diff, vsM3.se);
+  expectClose("plain: noise multiple = |diff| / se", noise ?? Number.NaN, Math.abs(vsM3.mean_diff) / vsM3.se, 1e-12);
+  expect("plain: noise multiple is well above 1", (noise ?? 0) > 5, String(noise));
+  expect("plain: noiseText is an integer multiple", /^[0-9]+×$/.test(noiseText(noise)), noiseText(noise));
+  expect("plain: noise rejects a zero SE", noiseMultiple(1, 0) === null, "returned a number for se = 0");
+
+  // ── the odds ladder: conservative at every boundary ──
+  // Each tier is checked at its own boundary and just inside it, because an
+  // off-by-one boundary is exactly how a phrase ends up overstating the evidence.
+  expect("plain: p ≥ 0.05 reads as chance", flukeOdds(0.05) === "could easily be chance", flukeOdds(0.05));
+  expect("plain: p = 1 reads as chance", flukeOdds(1) === "could easily be chance", flukeOdds(1));
+  expect("plain: p just under 0.05 is 'unlikely'", flukeOdds(0.049) === "unlikely to be chance", flukeOdds(0.049));
+  // At exactly `p = 1e-3` the true odds are 1 in 1,000 — so "less than 1 in
+  // 1,000" would be an overstatement, and the ladder must round *down* to the
+  // weaker phrase. The tiers therefore start strictly below their boundary, and
+  // these assertions pin that direction.
+  expect("plain: p = 1e-3 does not claim 'less than 1 in 1,000'", flukeOdds(1e-3) === "unlikely to be chance", flukeOdds(1e-3));
+  expect("plain: p just under 1e-3 earns the 1,000 tier", flukeOdds(9.9e-4) === "less than 1 in 1,000", flukeOdds(9.9e-4));
+  expect("plain: p = 1e-6 does not claim 'less than 1 in a million'", flukeOdds(1e-6) === "less than 1 in 1,000", flukeOdds(1e-6));
+  expect("plain: p just under 1e-6 earns the million tier", flukeOdds(9.9e-7) === "less than 1 in a million", flukeOdds(9.9e-7));
+  expect("plain: p = 1e-12 does not claim the trillion tier", flukeOdds(1e-12) === "less than 1 in a million", flukeOdds(1e-12));
+  expect("plain: p just under 1e-12 earns the trillion tier", flukeOdds(9.9e-13) === "less than 1 in a trillion", flukeOdds(9.9e-13));
+  expect("plain: the published p reads as the strongest tier", flukeOdds(vsM3.p_value) === "less than 1 in a trillion", flukeOdds(vsM3.p_value));
+  expect("plain: a missing p is not a phrase", flukeOdds(null) === "—", flukeOdds(null));
+  // The ladder never claims more than the p-value proves: the trillion tier
+  // requires p < 1e-12, and 1/p for this artifact is astronomically larger.
+  expect("plain: trillion tier is honest", (vsM3.p_value ?? 1) < 1e-12, String(vsM3.p_value));
+  expect("plain: clear() agrees with the ladder", isClear(vsM3.p_value) && !isClear(0.5), "isClear disagrees");
+
+  // ── the fold-change (binding is a log scale) ──
+  const delta = contract.state.kpis.delta_vs_wt;
+  expectClose("plain: fold = 10^delta", foldOverReference(delta) ?? Number.NaN, Math.pow(10, delta), 1e-12);
+  expect("plain: fold is not the raw delta", Math.abs((foldOverReference(delta) ?? 0) - delta) > 1, "fold equals the raw log difference");
+  expect("plain: foldText has a times sign", foldText(delta).endsWith("×"), foldText(delta));
+  expect("plain: fold of 0 is 1×", foldText(0) === "1.0×", foldText(0));
+
+  // ── the library-skipped share ──
+  const config = contract.cross_target.cross_target;
+  const skipped = librarySkipped(
+    contract.state.kpis.query_budget_spent,
+    config.qualified_count,
+  );
+  expectClose(
+    "plain: skipped = 1 − spent / qualified",
+    skipped ?? Number.NaN,
+    1 - contract.state.kpis.query_budget_spent / config.qualified_count,
+    1e-12,
+  );
+  expect("plain: skipped is a plausible share", (skipped ?? 0) > 0 && (skipped ?? 0) < 1, String(skipped));
+  expect("plain: skipped rejects a zero pool", librarySkipped(5, 0) === null, "divided by an empty pool");
+  expect("plain: skipped rejects an over-budget run", librarySkipped(500, 100) === null, "returned a negative share");
+  expect("plain: shareWhole is a whole percentage", /^[0-9]+%$/.test(shareWhole(skipped)), shareWhole(skipped));
+
+  // ── counts ──
+  expect("plain: countOf joins with 'of'", countOf(vsM3.seeds_won, vsM3.n) === `${vsM3.seeds_won} of ${vsM3.n}`, countOf(vsM3.seeds_won, vsM3.n));
+  expect("plain: countOf handles a missing half", countOf(null, 5) === "—", countOf(null, 5));
+
+  // ── the vocabulary itself ──
+  // Every statistic the surface names must carry a scale line; a label without
+  // one is the exact failure this redesign exists to prevent.
+  for (const [key, entry] of Object.entries(PLAIN)) {
+    expect(`plain: ${key} has a label`, entry.label.length > 0, "empty label");
+    expect(`plain: ${key} has a scale`, entry.scale.length > 0, "empty scale");
+    expect(`plain: ${key} has a token`, entry.token.length > 0, "empty token");
+    expect(`plain: ${key} has a meaning`, entry.meaning.length > 20, "meaning too short");
+    // Rule 2: the label is plain English, so it must not contain the token.
+    expect(
+      `plain: ${key} label is not its token`,
+      entry.label.toLowerCase() !== entry.token.toLowerCase(),
+      `label "${entry.label}" equals its token`,
+    );
+  }
+
+  // Every method the tables print must have words, and no surface name may be
+  // the bare `M1…M5` token.
+  for (const method of METHODS) {
+    const words = methodName(method);
+    expect(`plain: ${method} has a name`, words.length > 0, "empty name");
+    expect(`plain: ${method} is not shown as its token`, words !== method, `still "${method}"`);
+    expect(`plain: ${method} has a full name`, methodFull(method).length >= words.length, "full name shorter than the short one");
+  }
+}
+
 verifyState();
 verifyRounds();
 verifyBenchmark();
 verifyCrossTarget();
 verifyAttribution();
 verifyCrossViewConsistency();
+verifyPlainLanguage();
 
 if (failures.length) {
   console.error(`\nnumber audit FAILED: ${failures.length} of ${checks} assertions`);

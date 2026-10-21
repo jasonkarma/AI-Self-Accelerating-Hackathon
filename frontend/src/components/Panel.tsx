@@ -110,11 +110,17 @@ export function KpiTile({
   unit?: ReactNode;
   caption?: ReactNode;
   emphasis?: "none" | "accent" | "gold";
-  hint?: string;
+  /**
+   * The definition behind the tile. A plain string becomes the native `title`
+   * tooltip; anything richer (a card with monospace and inline code) is rendered
+   * as an `InfoTip` beside the label, because a native title can only hold text.
+   */
+  hint?: ReactNode;
 }) {
   const color = emphasis === "accent" ? "var(--accent)" : emphasis === "gold" ? "var(--gold)" : "var(--ink)";
   const border =
     emphasis === "accent" ? "var(--accent-line)" : emphasis === "gold" ? "var(--gold-line)" : "var(--border)";
+  const richHint = hint !== undefined && typeof hint !== "string";
   return (
     <div
       className="relative min-w-0 overflow-hidden rounded-xl border px-3.5 py-3"
@@ -127,9 +133,12 @@ export function KpiTile({
               ? "linear-gradient(150deg, var(--accent-soft), transparent 70%)"
               : "linear-gradient(150deg, var(--gold-soft), transparent 70%)",
       }}
-      title={hint}
+      title={typeof hint === "string" ? hint : undefined}
     >
-      <div className="label mb-1 truncate text-[9.5px]">{label}</div>
+      <div className="label mb-1 flex items-center gap-1 text-[9.5px]">
+        <span className="truncate">{label}</span>
+        {richHint ? <InfoTip label={`What ${typeof label === "string" ? label : "this number"} means`}>{hint}</InfoTip> : null}
+      </div>
       <div className="flex items-baseline gap-1">
         <span className="kpi-value mono text-[24px]" style={{ color }}>
           {value}
@@ -280,9 +289,8 @@ export function InfoTip({
       </button>
       <span
         role="tooltip"
-        className={`pointer-events-none invisible absolute top-6 z-40 w-[280px] rounded-xl border px-3 py-2 text-[11px] font-normal normal-case leading-relaxed opacity-0 shadow-xl transition-opacity duration-150 group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100 ${
-          align === "right" ? "right-0" : "left-0"
-        }`}
+        className={`pointer-events-none invisible absolute top-6 z-40 w-[280px] rounded-xl border px-3 py-2 text-[11px] font-normal normal-case leading-relaxed opacity-0 shadow-xl transition-opacity duration-150 group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100 ${align === "right" ? "right-0" : "left-0"
+          }`}
         style={{
           background: "var(--panel-raised)",
           borderColor: "var(--border-strong)",

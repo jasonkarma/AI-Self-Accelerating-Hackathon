@@ -45,8 +45,8 @@ class ResizeObserverShim {
   observe(): void {
     /* charts fall back to their minimum width without layout */
   }
-  unobserve(): void {}
-  disconnect(): void {}
+  unobserve(): void { }
+  disconnect(): void { }
 }
 
 const globalScope = globalThis as unknown as Record<string, unknown>;
@@ -210,17 +210,21 @@ expectIncludes("Self-Accelerating Multi-Agent Virtual Lab", "header");
 // The tab bar is product copy, so the assertion names the strings the header
 // declares: each section's number, title and subtitle must all reach the markup.
 for (const label of [
-  "Live Virtual Lab",
-  "Interactive Replay",
-  "100-Seed Benchmark",
-  "Foundation vs. Loop Showdown",
-  "Multi-Target Generalization",
-  "AbBiBench Audit",
-  "Ablations &amp; Controls",
-  "Mechanism Attribution",
+  "Overview",
+  "What we built, in 30 seconds",
+  "The recorded run",
+  "Watch it decide, round by round",
+  "Beats the standard method",
+  "100 runs, head to head",
+  "Works on other targets",
+  "Four more public datasets, same code",
+  "Why it works",
+  "The ablations, including the nulls",
 ]) {
   expectIncludes(label, `tab ${label}`);
 }
+// The header has to say what the product *does*, not only what it is called.
+expectIncludes("Designs antibody mutations and decides which five to assay next", "header tagline");
 expectIncludes("49fea618", "provenance pill: ledger digest");
 expectIncludes("a_null := a_base", "provenance pill: objective law");
 expectIncludes("VERIFIED", "provenance pill: chain verification");
@@ -229,6 +233,7 @@ if (shellMarkup.length < 5_000) failures.push(`shell markup too small (${shellMa
 // The pages render from `useResource`, which resolves promises after paint; the
 // static render therefore exercises the *loading* branch. Render each view again
 // with the payloads handed in directly to exercise the data branches.
+const { OverviewView } = await import("../src/views/overview/OverviewView");
 const { LabView } = await import("../src/views/lab/LabView");
 const { BenchmarkView } = await import("../src/views/benchmark/BenchmarkView");
 const { CrossTargetView } = await import("../src/views/cross/CrossTargetView");
@@ -241,10 +246,22 @@ const attribution = contract.attribution as never;
 
 const views: Array<[string, string]> = [];
 
-function renderView(label: string, element: Parameters<typeof renderToStaticMarkup>[0]): string {
+/**
+ * Render one view and assert it produced a plausible amount of markup.
+ *
+ * The floor is a *smoke* check — "the component mounted and did not bail out to
+ * an empty shell" — not a size target, so it is set per view: the report views
+ * are long documents (20k+), while the cold open is deliberately short (the
+ * whole point is that it fits on one screen).
+ */
+function renderView(
+  label: string,
+  element: Parameters<typeof renderToStaticMarkup>[0],
+  minChars = 20_000,
+): string {
   try {
     const html = renderToStaticMarkup(element);
-    if (html.length < 20_000) failures.push(`${label}: markup too small (${html.length} chars)`);
+    if (html.length < minChars) failures.push(`${label}: markup too small (${html.length} chars)`);
     return html;
   } catch (error) {
     failures.push(`${label}: threw ${(error as Error).message}`);
@@ -266,6 +283,24 @@ function expectNoMissingValues(label: string, html: string): void {
     if (html.includes(token)) failures.push(`${label}: markup renders ${token}`);
   }
 }
+
+// The cold open renders against the same payloads the other views read, so its
+// three headline numbers are checked against data rather than accepted on trust.
+views.push([
+  "overview",
+  renderView(
+    "overview",
+    createElement(OverviewView, {
+      benchmark: { status: "ready", data: benchmark, error: null } as never,
+      cross: { status: "ready", data: crossTarget, error: null } as never,
+      state: { status: "ready", data: state, error: null } as never,
+      config: ROUTES["/api/config"] as never,
+      onTab: () => undefined,
+    }) as unknown as string,
+    // The cold open is one screen by design; 8k still catches an empty shell.
+    8_000,
+  ),
+]);
 
 views.push([
   "lab",
@@ -417,18 +452,49 @@ for (const [label, html] of views) {
 }
 
 // Spot-check that the real numbers reached the markup.
+const overviewHtml = views.find(([label]) => label === "overview")?.[1] ?? "";
 const labHtml = views.find(([label]) => label === "lab")?.[1] ?? "";
 const benchHtml = views.find(([label]) => label === "benchmark")?.[1] ?? "";
 const crossHtml = views.find(([label]) => label === "cross")?.[1] ?? "";
 const attrHtml = views.find(([label]) => label === "attribution")?.[1] ?? "";
 
+// The cold open must carry the same three derived claims as the views they open.
+const overviewCurves = (contract.benchmark as { spearman_rho_curves: Array<Record<string, number | null>> })
+  .spearman_rho_curves;
+const overviewLast = overviewCurves[overviewCurves.length - 1]!;
+const overviewGain = `${Math.round(
+  ((overviewLast.m5_hybrid! - overviewLast.m3_ucb!) / overviewLast.m3_ucb!) * 100,
+)}%`;
+if (!overviewHtml.includes(overviewGain))
+  failures.push(`overview: headline gain ${overviewGain} not rendered`);
+if (!overviewHtml.includes("A virtual lab that designs antibody mutations"))
+  failures.push("overview: the one-sentence task statement is missing");
+if (!overviewHtml.includes("never needed a test"))
+  failures.push("overview: the library-skipped claim is missing");
+if (!overviewHtml.includes("learnable public targets won"))
+  failures.push("overview: the generalization claim is missing");
+
 const stateKpi = String((contract.state as { kpis: { best_qualified_binding: number } }).kpis.best_qualified_binding);
 if (!labHtml.includes(stateKpi)) failures.push(`lab: best qualified binding ${stateKpi} not rendered`);
 if (!labHtml.includes("a_null := a_base")) failures.push("lab: objective law not rendered");
-if (!labHtml.includes("GRADUATED 5:0:0 HARVEST") && !labHtml.includes("HARVEST FROM"))
-  failures.push("lab: slot-graduation badge not rendered");
+if (!labHtml.includes("ALL-IN PHASE") && !labHtml.includes("FULL EXPLORATION UNTIL"))
+  failures.push("lab: the exploration/exploitation phase badge is not rendered");
 if (!labHtml.includes("SRWGGDGFYAMDY") && !labHtml.includes("ARWPFYGPYNYDY"))
   failures.push("lab: no CDRH3 sequence rendered");
+
+// View 1's plain-language surface: the fold-change hero, the skipped-library
+// tile, the per-candidate safety verdict and the "under the hood" disclosure
+// that keeps the internals out of the demo path.
+const foldHero = Math.pow(10, (contract.state as { kpis: { delta_vs_wt: number } }).kpis.delta_vs_wt).toFixed(1);
+if (!labHtml.includes(`${foldHero}×`)) failures.push(`lab: fold-change hero ${foldHero}× not rendered`);
+if (!labHtml.includes("Library skipped")) failures.push("lab: the library-skipped tile is missing");
+if (!labHtml.includes("passes") && !labHtml.includes("fails"))
+  failures.push("lab: no safety-filter verdict rendered");
+if (!labHtml.includes("Under the hood: live engine telemetry"))
+  failures.push("lab: the telemetry disclosure is missing");
+if (!labHtml.includes("The scientists")) failures.push("lab: the scientist council header is missing");
+if (!labHtml.includes("Did the lab tell the truth?"))
+  failures.push("lab: the falsification tracker header is missing");
 
 const rho = String(
   (contract.benchmark as { spearman_rho_curves: Array<{ m5_hybrid: number }> }).spearman_rho_curves.slice(-1)[0]!
@@ -436,8 +502,28 @@ const rho = String(
 );
 if (!benchHtml.includes(rho)) failures.push(`benchmark: final M5 ρ (${rho}) not rendered`);
 if (!benchHtml.includes("AlphaFold3")) failures.push("benchmark: zero-shot reference not rendered");
-if (!benchHtml.includes("Why AUBQC ties while Spearman ρ separates"))
-  failures.push("benchmark: the AUBQC/ρ tie explanation is missing");
+
+// The plain-language surface. These are the strings a judge reads, so a
+// refactor that quietly drops the headline, the scale anchor or the honest
+// strip is a failure even though every payload field is still present.
+if (!benchHtml.includes("more accurate at ranking candidates"))
+  failures.push("benchmark: the plain-language headline is missing");
+if (!benchHtml.includes("0 · guessing") || !benchHtml.includes("1 · perfect"))
+  failures.push("benchmark: the 0→1 accuracy scale is not anchored");
+if (!benchHtml.includes("The one we didn&#x27;t win") && !benchHtml.includes("The one we didn't win"))
+  failures.push("benchmark: the honest 'did not win' strip is missing");
+if (/Δ\s*\/\s*SE/.test(benchHtml)) failures.push("benchmark: the raw Δ/SE tile is back");
+if (/Spearman\s*ρ/.test(benchHtml.replace(/&rho;/g, "ρ")))
+  failures.push("benchmark: the raw 'Spearman ρ' label leaked back onto the surface");
+
+// The headline must be the *derived* gain, not a typed-in percentage: the smoke
+// test recomputes it from the two published scores and requires that string.
+const rhoCurves = (contract.benchmark as { spearman_rho_curves: Array<Record<string, number | null>> })
+  .spearman_rho_curves;
+const lastRho = rhoCurves[rhoCurves.length - 1]!;
+const derivedGain = `${Math.round(((lastRho.m5_hybrid! - lastRho.m3_ucb!) / lastRho.m3_ucb!) * 100)}%`;
+if (!benchHtml.includes(derivedGain))
+  failures.push(`benchmark: derived headline gain ${derivedGain} not rendered`);
 
 if (!crossHtml.includes("aayl51")) failures.push("cross: holdout target not rendered");
 if (!crossHtml.includes("4d5_her2")) failures.push("cross: HER2 control row not rendered");
@@ -454,5 +540,5 @@ if (failures.length) {
 }
 console.log(
   `render smoke ok: ${views.length} renders (${roundsRendered.join(", ")} + 3 report views + header), ` +
-    `no NaN / undefined, zero CJK in View 1, payload numbers present`,
+  `no NaN / undefined, zero CJK in View 1, payload numbers present`,
 );

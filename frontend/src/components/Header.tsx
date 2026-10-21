@@ -4,13 +4,19 @@ import type { ConfigPayload, HealthPayload, LedgerPayload } from "../types/state
 import { PINNED, shortSha } from "../lib/pinned";
 import type { Theme } from "../hooks/useResource";
 
-export type TabKey = "lab" | "benchmark" | "cross" | "attribution";
+export type TabKey = "overview" | "lab" | "benchmark" | "cross" | "attribution";
 
+/**
+ * The tab bar is the demo's outline, so the labels are sentences rather than
+ * section names: a judge should be able to read the four tabs and know what the
+ * argument is before clicking anything.
+ */
 export const TABS: Array<{ key: TabKey; index: number; title: string; subtitle: string }> = [
-  { key: "lab", index: 1, title: "Live Virtual Lab", subtitle: "Interactive Replay" },
-  { key: "benchmark", index: 2, title: "100-Seed Benchmark", subtitle: "Foundation vs. Loop Showdown" },
-  { key: "cross", index: 3, title: "Multi-Target Generalization", subtitle: "AbBiBench Audit" },
-  { key: "attribution", index: 4, title: "Ablations & Controls", subtitle: "Mechanism Attribution" },
+  { key: "overview", index: 0, title: "Overview", subtitle: "What we built, in 30 seconds" },
+  { key: "lab", index: 1, title: "The recorded run", subtitle: "Watch it decide, round by round" },
+  { key: "benchmark", index: 2, title: "Beats the standard method", subtitle: "100 runs, head to head" },
+  { key: "cross", index: 3, title: "Works on other targets", subtitle: "Four more public datasets, same code" },
+  { key: "attribution", index: 4, title: "Why it works", subtitle: "The ablations, including the nulls" },
 ];
 
 interface Props {
@@ -70,7 +76,7 @@ export function Header({
               Self-Accelerating Multi-Agent Virtual Lab
             </h1>
             <div className="truncate text-[11px] leading-tight ink-faint">
-              Autonomous antibody discovery · CDRH3 design loop
+              Designs antibody mutations and decides which five to assay next
             </div>
           </div>
         </div>
@@ -121,7 +127,8 @@ export function Header({
                   className="mono text-[10px] font-semibold tracking-tight"
                   style={{ color: active ? "var(--accent)" : "var(--ink-faint)" }}
                 >
-                  {String(entry.index).padStart(2, "0")}
+                  {/* The overview is the door, not section 0. */}
+                  {entry.index === 0 ? "→" : String(entry.index).padStart(2, "0")}
                 </span>
                 <span
                   className="whitespace-nowrap text-[12.5px] font-semibold leading-none"

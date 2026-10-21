@@ -4,6 +4,7 @@ import { ScatterPlot, LineChart, type ScatterPoint } from "../../components/char
 import { InfoTip, Legend, Panel } from "../../components/Panel";
 import { bestMethod, METHODS } from "../../lib/derive";
 import { methodMeta, num } from "../../lib/format";
+import { methodName } from "../../lib/plain";
 
 /**
  * The discovery record: two charts, side by side, above the fold.
@@ -55,20 +56,20 @@ export function DiscoveryPanel({ state, config }: { state: StatePayload; config:
   return (
     <div className="grid gap-4 xl:grid-cols-2">
       <Panel
-        eyebrow="Discovery record"
-        title="Revealed pool: binding vs developability risk"
+        eyebrow="What was found"
+        title="Every candidate tested: how well it binds vs. how drug-like it is"
         lede={
           championId
-            ? `${state.pareto_data.length} candidates assayed. ${championId} is the global #1 — ringed in gold.`
-            : `${state.pareto_data.length} candidates assayed so far.`
+            ? `${state.pareto_data.length} candidates tested. ${championId} is the best binder anywhere in the library — ringed in gold.`
+            : `${state.pareto_data.length} candidates tested so far.`
         }
         actions={
           <Legend
             entries={[
-              { label: "champion", color: "#F0B429" },
-              { label: "frontier", color: "#10B981" },
-              { label: "revealed", color: "#64748B" },
-              { label: "WT", color: "#22D3EE" },
+              { label: "best", color: "#F0B429" },
+              { label: "top 10", color: "#10B981" },
+              { label: "tested", color: "#64748B" },
+              { label: "start", color: "#22D3EE" },
             ]}
           />
         }
@@ -77,42 +78,44 @@ export function DiscoveryPanel({ state, config }: { state: StatePayload; config:
           <ScatterPlot
             points={points}
             height={264}
-            xLabel="risk (1 − y_dev)"
-            yLabel="−log₁₀ K_D"
-            ariaLabel="Scatter of revealed candidates: developability risk against measured binding"
-            thresholdY={{ value: best, label: `best qualified ${num(best, 3)}` }}
+            xLabel="safety risk → (further right is worse)"
+            yLabel="binding strength →"
+            ariaLabel="Every tested candidate: safety risk on one axis, measured binding on the other"
+            thresholdY={{ value: best, label: `best found ${num(best, 2)}` }}
           />
         ) : (
-          <p className="text-[12px] ink-faint">No reveals yet at this round.</p>
+          <p className="text-[12px] ink-faint">Nothing measured at this round yet.</p>
         )}
         <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] ink-faint">
           <span>
-            {state.pareto_data.filter((point) => point.status === "pareto_frontier").length} on the top-10
-            frontier
+            {state.pareto_data.filter((point) => point.status === "pareto_frontier").length} in the best-known
+            top 10
           </span>
           {threshold !== null && config ? (
             <span className="mono">
-              τ_dev {config.tau_dev.toFixed(4)} → risk ≤ {threshold.toFixed(2)} qualifies
+              candidates pass the safety filter while risk stays under {threshold.toFixed(2)}
             </span>
           ) : null}
-          <InfoTip label="Why the risk axis matters">
-            A candidate right of the τ_dev threshold cannot enter the top-5 panel or AUBQC, however well it
-            binds. That is why the lab spends slots on qualification rather than chasing raw affinity.
+          <InfoTip label="Why the safety axis matters">
+            A candidate that fails the safety filter cannot enter the shortlist or the headline measure,
+            however tightly it binds. That is why the lab spends slots on drug-likeness rather than chasing
+            raw affinity alone. The exact threshold is{" "}
+            <span className="mono">τ_dev = {config?.tau_dev.toFixed(4) ?? "—"}</span>, the pool median.
           </InfoTip>
         </div>
       </Panel>
 
       <Panel
-        eyebrow="Campaign trajectory"
-        title="Best qualified binding, live vs 100-seed medians"
-        lede="The campaign's own staircase against the benchmark medians carried in the same payload."
+        eyebrow="The climb"
+        title="How good the best candidate got, round by round"
+        lede="The recorded campaign's own staircase, next to what the same loop and its competitors average over 100 runs."
         actions={
           <Legend
             entries={[
-              { label: "live", color: "#22D3EE" },
-              { label: "M5", color: "#10B981" },
-              { label: "M3", color: "#6366F1" },
-              { label: "M2", color: "#F59E0B" },
+              { label: "this run", color: "#22D3EE" },
+              { label: "Virtual Lab", color: "#10B981" },
+              { label: "Standard", color: "#6366F1" },
+              { label: "Greedy", color: "#F59E0B" },
             ]}
           />
         }
@@ -123,49 +126,49 @@ export function DiscoveryPanel({ state, config }: { state: StatePayload; config:
             series={[
               {
                 key: "live",
-                label: "Live campaign",
+                label: "This run",
                 color: "#22D3EE",
                 values: curve.map((point) => point.best_qualified_binding),
                 width: 2.4,
               },
             ]}
             height={182}
-            xLabel="assays spent (q)"
-            yLabel="best qualified −log₁₀ K_D"
+            xLabel="lab tests spent"
+            yLabel="best binder so far"
             formatY={(value) => value.toFixed(2)}
-            ariaLabel="Live campaign best qualified binding by query count"
-            referenceLines={[{ value: best, label: `final ${num(best, 3)}`, color: "#10B981" }]}
+            ariaLabel="Best binder found over the recorded campaign"
+            referenceLines={[{ value: best, label: `final ${num(best, 2)}`, color: "#10B981" }]}
           />
         ) : (
-          <p className="text-[12px] ink-faint">The seed round has no completed batch yet.</p>
+          <p className="text-[12px] ink-faint">The opening batch hasn't completed yet.</p>
         )}
         <div className="mt-2 border-t pt-2" style={{ borderColor: "var(--border)" }}>
           <LineChart
             x={x}
             series={METHODS.map((method) => ({
               key: method,
-              label: methodMeta(method).short,
+              label: methodName(method),
               color: methodMeta(method).color,
               values: benchmark.map((row) => row[method]),
               dashed: method !== "m5_hybrid",
               width: method === "m5_hybrid" ? 2.2 : 1.3,
             }))}
             height={116}
-            xLabel="q"
-            yLabel="100-seed median"
+            xLabel="lab tests spent"
+            yLabel="average over 100 runs"
             formatY={(value) => value.toFixed(2)}
-            ariaLabel="Matched 100-seed median benchmark curves"
+            ariaLabel="Average best binder found over 100 runs, per method"
           />
           <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-[10px] ink-faint">
             <span>
-              best final checkpoint{" "}
+              strongest final average{" "}
               <span className="mono" style={{ color: finalBest ? methodMeta(finalBest.method).color : undefined }}>
-                {finalBest ? `${methodMeta(finalBest.method).short} ${num(finalBest.value, 3)}` : "—"}
+                {finalBest ? `${methodName(finalBest.method)} ${num(finalBest.value, 2)}` : "—"}
               </span>
             </span>
-            <InfoTip label="One seed is a demo, not a result">
-              A single seed beating a 100-seed median proves the loop runs, not that the method wins. The
-              method comparison lives in the 100-seed benchmark panel.
+            <InfoTip label="One run is a demo, not a result">
+              A single run beating a hundred-run average proves the loop works, not that the method wins. The
+              method comparison lives in the second tab.
             </InfoTip>
           </div>
         </div>
