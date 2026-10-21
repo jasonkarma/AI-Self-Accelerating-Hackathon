@@ -1,0 +1,36 @@
+#!/bin/sh
+# Sourced (`.envsh`, not executed) by the image's entrypoint before the envsubst
+# step, so the normalisation below lands in the environment that `envsubst` reads.
+#
+# Two jobs:
+#   1. Fail with an actionable message when API_ORIGIN is missing, instead of
+#      letting nginx exit on a config error that names a line number but not the
+#      variable the reader forgot to set.
+#   2. Strip a trailing slash. `proxy_pass https://host/` is parsed as a URI part
+#      in nginx, so a pasted trailing slash would turn `/api/state` into
+#      `//api/state` and every request would 404.
+
+if [ -z "${API_ORIGIN:-}" ]; then
+  cat >&2 <<'MSG'
+[fatal] API_ORIGIN is not set.
+
+This image proxies the browser's /api/* calls to the FastAPI backend, so it
+needs that backend's public origin at start-up:
+
+    API_ORIGIN=https://<your-backend>.up.railway.app
+
+On Railway: open this service → Variables → add API_ORIGIN, then redeploy.
+MSG
+  exit 1
+fi
+
+case "${API_ORIGIN}" in
+  http://*|https://*) : ;;
+  *)
+    echo "[fatal] API_ORIGIN must start with http:// or https:// (got: ${API_ORIGIN})" >&2
+    exit 1
+    ;;
+esac
+
+API_ORIGIN="${API_ORIGIN%/}"
+export API_ORIGIN

@@ -23,10 +23,11 @@ RUN apk add --no-cache gettext \
 
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf.template /etc/nginx/templates/default.conf.template
-# Runs before the image's own envsubst step, so a missing API_ORIGIN produces an
-# actionable message instead of an nginx syntax error.
-COPY docker-entrypoint.d/10-check-env.sh /docker-entrypoint.d/10-check-env.sh
-RUN chmod +x /docker-entrypoint.d/10-check-env.sh
+# Sourced before the image's own envsubst step: validates and normalises
+# API_ORIGIN so a missing value fails with an actionable message rather than an
+# nginx syntax error, and a trailing slash is stripped.
+COPY docker-entrypoint.d/10-check-env.envsh /docker-entrypoint.d/10-check-env.envsh
+RUN chmod +x /docker-entrypoint.d/10-check-env.envsh
 
 # Railway injects PORT at runtime; API_ORIGIN is the backend's public origin.
 # Both are substituted by the image's own envsubst bootstrap, so one image
