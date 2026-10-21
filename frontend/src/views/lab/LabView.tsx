@@ -194,10 +194,10 @@ export function LabView({
               hint="The champion is the highest measured binding anywhere in the pool — not merely the best of what was tested."
             />
             <KpiTile
-              label="Own ideas disproved"
+              label="Hypotheses disproved"
               value={`${int(disproved)} of ${int(graded)}`}
-              caption="the lab falsified its own claims"
-              hint="Every hypothesis is graded against its own matched control in the same batch. Publishing the failures is the point."
+              caption="by its own control wells"
+              hint="Every hypothesis is graded against a matched control assayed in the same batch, so a wrong guess is caught in the round it was made. Publishing the failures is the point."
             />
             <KpiTile
               label="Rounds so far"

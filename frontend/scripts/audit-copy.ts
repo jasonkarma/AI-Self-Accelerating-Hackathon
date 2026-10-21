@@ -53,6 +53,11 @@ const BANNED: Array<{ pattern: RegExp; replacement: string }> = [
     { pattern: /\bH[01]\s*(?:vs\.?|\/)\s*H[01]\b/, replacement: "“hypothesis vs. control”" },
     { pattern: /\bzero-shot\b/i, replacement: "“off-the-shelf predictors”" },
     { pattern: /\blockbox\b/i, replacement: "“the holdout”" },
+    // The baseline's old product name. Renamed to "Standard UCB" so screen and
+    // speech agree, and enforced here because a rename that is not checked drifts
+    // back the first time someone writes a new caption. "UCB" also makes Beat 3's
+    // "a UCB loop is copyable in a weekend" a callback rather than a new term.
+    { pattern: /\bstandard method\b/i, replacement: "“Standard UCB” (methodName('m3_ucb'))" },
 ];
 
 /**

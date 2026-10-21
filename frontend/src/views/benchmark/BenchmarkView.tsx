@@ -23,7 +23,7 @@ import {
 import type { Resource } from "../../hooks/useResource";
 
 /**
- * View 2 — "Beats the standard method".
+ * View 2 — "Beats standard UCB".
  *
  * The page is ordered as an argument a judge can follow in sixty seconds:
  *
@@ -150,7 +150,7 @@ function Scoreboard({ payload }: { payload: BenchmarkPayload }) {
               ]}
               markers={[
                 { label: "Virtual Lab (ours)", value: m5, color: "#10B981", emphasis: true },
-                { label: "Standard method", value: m3, color: "#6366F1" },
+                { label: "Standard UCB", value: m3, color: "#6366F1" },
               ]}
             />
           </div>

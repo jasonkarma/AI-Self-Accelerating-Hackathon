@@ -279,7 +279,10 @@ function SlotRow({
             )}
             <span className="mono block text-[8.5px] leading-tight ink-faint">from the assay</span>
           </Cell>
-          <Cell label="Hypothesis vs. control">
+          {/* "Hypothesis vs. control" was ~105px in an 88px grid track, so it
+              painted over the neighbouring Safety cell. The tooltip still spells
+              the full pairing out; the label only has to identify the column. */}
+          <Cell label="vs. control">
             <span className="mono inline-flex items-center gap-1.5 text-[11px] ink">
               {num(slot.a_h1, 2)}
               <span className="ink-faint">vs</span>
@@ -299,7 +302,7 @@ function SlotRow({
               measured in the same batch, which is what makes the comparison a real experiment.
             </InfoTip>
           </Cell>
-          <Cell label="Safety filter">
+          <Cell label="safety">
             <span
               className="mono inline-flex items-center gap-1 rounded-full px-1.5 py-[1px] text-[9px] font-semibold"
               style={{
@@ -322,10 +325,21 @@ function SlotRow({
   );
 }
 
+/**
+ * One measurement column inside a plate row.
+ *
+ * `min-w-0` + `overflow-hidden` on the label is the actual fix for a collision
+ * that was visible on a projector: the row is a fixed `lg:w-[352px]` four-column
+ * grid, so each track is 88px, and an unbreakable label longer than that painted
+ * straight through its neighbour. A truncated label is bad; two overlapping
+ * labels are unreadable. The full text lives in the column's tooltip either way.
+ */
 function Cell({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="min-w-0">
-      <div className="label mb-0.5 whitespace-nowrap text-[8.5px]">{label}</div>
+      <div className="label mb-0.5 overflow-hidden text-ellipsis whitespace-nowrap text-[8.5px]" title={label}>
+        {label}
+      </div>
       <div className="leading-none">{children}</div>
     </div>
   );

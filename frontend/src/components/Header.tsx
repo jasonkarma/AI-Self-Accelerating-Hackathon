@@ -76,7 +76,18 @@ export function Header({
               Self-Accelerating Multi-Agent Virtual Lab
             </h1>
             <div className="truncate text-[11px] leading-tight ink-faint">
-              Designs antibody mutations and decides which five to assay next
+              {/* Deliberately carries no number.
+                  The app bar is persistent chrome: it stays on screen across all
+                  five tabs, where the pools are different sizes (210 here, 756
+                  on aayl49_ML, 124 on 2fjg, 486 on aayl51). A count here would
+                  describe one dataset while the reader is looking at another,
+                  and it would go stale on any re-run. The instance number lives
+                  once, in the 83% tile's caption, on the screen where it applies.
+
+                  "Controls for its own reasoning" is the precise claim: the loop
+                  reserves one well per batch for what the baseline would have
+                  picked, so the agent prior is itself the thing under test. */}
+              A virtual lab that decides the next experiment — and controls for its own reasoning
             </div>
           </div>
         </div>

@@ -169,7 +169,7 @@ function Scoreboard({
       </div>
 
       <h2 className="px-5 pb-1 pt-2 text-[24px] font-semibold leading-tight tracking-[-0.015em] ink sm:text-[27px]">
-        More accurate than the standard method on{" "}
+        More accurate than standard UCB on{" "}
         <span className="mono" style={{ color: "var(--accent)" }}>
           {wins} of {rows.length}
         </span>{" "}
@@ -230,7 +230,7 @@ function Scoreboard({
               {lockbox ?? "the holdout"} · sealed before we ran anything
             </span>
             <InfoTip label="What the holdout measures">
-              {lockbox ?? "The holdout"} has no learnable ranking signal, so ours and the standard method tie
+              {lockbox ?? "The holdout"} has no learnable ranking signal, so ours and standard UCB tie
               there — a useful control, because it shows the result is not automatic. What does separate is the
               starting batch: choosing the first five candidates from prior knowledge beats drawing them at
               random, on the target that was sealed before any of our numbers existed.

@@ -73,9 +73,10 @@ export function OverviewView({
                         <span className="text-[11px] ink-faint">antibody engineering · decided by a multi-agent lab</span>
                     </div>
 
-                    <h2 className="max-w-[30ch] text-[30px] font-semibold leading-[1.15] tracking-[-0.025em] ink sm:text-[38px]">
-                        A virtual lab that designs antibody mutations and decides{" "}
-                        <span style={{ color: "var(--accent)" }}>which five to test next</span>.
+                    <h2 className="max-w-[34ch] text-[30px] font-semibold leading-[1.15] tracking-[-0.025em] ink sm:text-[38px]">
+                        AI agents argue over{" "}
+                        <span style={{ color: "var(--accent)" }}>which assay to run next</span> — and the result
+                        decides who was right.
                     </h2>
                     <p className="mt-3 max-w-[70ch] text-[13px] leading-relaxed ink-dim">
                         Thousands of variants are possible. Real assays are expensive. The lab runs a debate between
@@ -118,7 +119,7 @@ export function OverviewView({
                         <BigNumber
                             icon={<Scale size={13} />}
                             value={learnableCount === null ? "—" : countOf(learnableCount, learnableCount)}
-                            label="learnable public targets won"
+                            label="of the targets where learning is possible"
                             caption={
                                 excludedCount === null
                                     ? "same code, no retuning"
@@ -152,7 +153,7 @@ export function OverviewView({
                             ]}
                             markers={[
                                 { label: "Virtual Lab (ours)", value: final.m5_hybrid ?? null, color: "#10B981", emphasis: true },
-                                { label: "Standard method", value: final.m3_ucb ?? null, color: "#6366F1" },
+                                { label: "Standard UCB", value: final.m3_ucb ?? null, color: "#6366F1" },
                                 { label: "Greedy", value: final.m2_greedy ?? null, color: "#F59E0B" },
                             ]}
                         />

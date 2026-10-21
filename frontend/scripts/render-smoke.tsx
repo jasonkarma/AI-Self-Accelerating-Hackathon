@@ -224,7 +224,21 @@ for (const label of [
   expectIncludes(label, `tab ${label}`);
 }
 // The header has to say what the product *does*, not only what it is called.
-expectIncludes("Designs antibody mutations and decides which five to assay next", "header tagline");
+// It must also not overclaim: the loop **selects** from a fixed library, it does
+// not design antibodies, so "designs" must never reappear in the tagline.
+expectIncludes("A virtual lab that decides the next experiment", "header tagline");
+expectIncludes("controls for its own reasoning", "header tagline (falsification clause)");
+// The app bar must not carry an instance number: it persists across tabs whose
+// pools differ in size, so a count there describes one dataset while the reader
+// is looking at another. Scoped to the *tagline* — the provenance drawer below
+// legitimately quotes `config.qualified_count` in its own protocol row.
+const taglineMatch = /A virtual lab that decides the next experiment[^<]*/.exec(shellMarkup);
+if (taglineMatch && /\d/.test(taglineMatch[0])) {
+  failures.push(`header: the tagline carries an instance number (${taglineMatch[0]})`);
+}
+if (/designs antibody/i.test(shellMarkup)) {
+  failures.push('header: the tagline claims the loop "designs antibodies", but it selects from a fixed pool');
+}
 expectIncludes("49fea618", "provenance pill: ledger digest");
 expectIncludes("a_null := a_base", "provenance pill: objective law");
 expectIncludes("VERIFIED", "provenance pill: chain verification");
@@ -467,12 +481,25 @@ const overviewGain = `${Math.round(
 )}%`;
 if (!overviewHtml.includes(overviewGain))
   failures.push(`overview: headline gain ${overviewGain} not rendered`);
-if (!overviewHtml.includes("A virtual lab that designs antibody mutations"))
+if (!overviewHtml.includes("AI agents argue over"))
   failures.push("overview: the one-sentence task statement is missing");
+if (!overviewHtml.includes("the result decides who was right"))
+  failures.push("overview: the falsification clause is missing");
+if (/designs antibody/i.test(overviewHtml))
+  failures.push('overview: the hero claims the loop "designs antibodies", but it selects from a fixed pool');
+// The headline must not credit the agents with revising themselves: each round
+// is a fresh call, and what updates is the surrogate, not the agents.
+if (/revise their reasoning|revises? its own reasoning/i.test(overviewHtml))
+  failures.push("overview: the headline claims the agents revise their own reasoning");
 if (!overviewHtml.includes("never needed a test"))
   failures.push("overview: the library-skipped claim is missing");
-if (!overviewHtml.includes("learnable public targets won"))
+if (!overviewHtml.includes("of the targets where learning is possible"))
   failures.push("overview: the generalization claim is missing");
+
+// The falsification count is a Tab 1 tile, not an Overview card — assert it where
+// it actually lives, and assert the label a reader sees.
+if (!labHtml.includes("Hypotheses disproved"))
+  failures.push("lab: the disproved-hypotheses tile is missing");
 
 const stateKpi = String((contract.state as { kpis: { best_qualified_binding: number } }).kpis.best_qualified_binding);
 if (!labHtml.includes(stateKpi)) failures.push(`lab: best qualified binding ${stateKpi} not rendered`);
