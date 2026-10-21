@@ -214,7 +214,7 @@ for (const label of [
   "What we built, in 30 seconds",
   "The recorded run",
   "Watch it decide, round by round",
-  "Beats the standard method",
+  "Beats the standard UCB baseline",
   "100 runs, head to head",
   "Works on other targets",
   "Four more public datasets, same code",
@@ -477,7 +477,7 @@ if (!overviewHtml.includes("learnable public targets won"))
 const stateKpi = String((contract.state as { kpis: { best_qualified_binding: number } }).kpis.best_qualified_binding);
 if (!labHtml.includes(stateKpi)) failures.push(`lab: best qualified binding ${stateKpi} not rendered`);
 if (!labHtml.includes("a_null := a_base")) failures.push("lab: objective law not rendered");
-if (!labHtml.includes("ALL-IN PHASE") && !labHtml.includes("FULL EXPLORATION UNTIL"))
+if (!/ALL-IN SINCE R\d/.test(labHtml) && !labHtml.includes("FULL EXPLORATION UNTIL"))
   failures.push("lab: the exploration/exploitation phase badge is not rendered");
 if (!labHtml.includes("SRWGGDGFYAMDY") && !labHtml.includes("ARWPFYGPYNYDY"))
   failures.push("lab: no CDRH3 sequence rendered");
@@ -496,11 +496,31 @@ if (!labHtml.includes("The scientists")) failures.push("lab: the scientist counc
 if (!labHtml.includes("Did the lab tell the truth?"))
   failures.push("lab: the falsification tracker header is missing");
 
-const rho = String(
-  (contract.benchmark as { spearman_rho_curves: Array<{ m5_hybrid: number }> }).spearman_rho_curves.slice(-1)[0]!
-    .m5_hybrid,
-);
-if (!benchHtml.includes(rho)) failures.push(`benchmark: final M5 ρ (${rho}) not rendered`);
+// The planner's decision. This is the fourth agent, and it had no UI at all
+// until the backend exposed `state.planner` — so the assertion covers both the
+// contract field and its rendering, and names the fields a regression would drop.
+const plannerRecord = (contract.state as { planner?: Record<string, unknown> }).planner;
+if (!plannerRecord || typeof plannerRecord.hypothesis_id !== "string")
+  failures.push("state: the contract carries no planner record");
+if (!labHtml.includes("The planner&#x27;s decision") && !labHtml.includes("The planner's decision"))
+  failures.push("lab: the planner card is missing");
+if (!labHtml.includes("A fourth agent reads all three arguments"))
+  failures.push("lab: the planner card header is missing");
+if (plannerRecord?.hypothesis_id && !labHtml.includes(String(plannerRecord.hypothesis_id)))
+  failures.push(`lab: the planner's hypothesis id (${plannerRecord.hypothesis_id}) is not rendered`);
+if (plannerRecord?.confidence && !labHtml.includes(String(plannerRecord.confidence)))
+  failures.push("lab: the planner's confidence rating is not rendered");
+
+// The surface shows ranking accuracy at 2 dp on a 0→1 scale; the 4-dp figure
+// lives in the headline's tooltip as the arithmetic behind the percentage. Both
+// are asserted: the plain value must be visible, and the exact published value
+// must still be quoted so a judge can check the division.
+const rhoExact = (contract.benchmark as { spearman_rho_curves: Array<{ m5_hybrid: number }> })
+  .spearman_rho_curves.slice(-1)[0]!.m5_hybrid;
+if (!benchHtml.includes(rhoExact.toFixed(2)))
+  failures.push(`benchmark: ranking accuracy ${rhoExact.toFixed(2)} not rendered on the 0→1 scale`);
+if (!benchHtml.includes(rhoExact.toFixed(4)))
+  failures.push(`benchmark: the exact published value (${rhoExact.toFixed(4)}) is quoted nowhere`);
 if (!benchHtml.includes("AlphaFold3")) failures.push("benchmark: zero-shot reference not rendered");
 
 // The plain-language surface. These are the strings a judge reads, so a

@@ -1,10 +1,10 @@
 import { useMemo } from "react";
-import type { ConfigPayload, StatePayload } from "../../types/state";
+import type { BenchmarkPayload } from "../../types/report";
+import type { ConfigPayload, RoundsPayload, StatePayload } from "../../types/state";
 import { ScatterPlot, LineChart, type ScatterPoint } from "../../components/charts";
 import { InfoTip, Legend, Panel } from "../../components/Panel";
-import { bestMethod, METHODS } from "../../lib/derive";
-import { methodMeta, num } from "../../lib/format";
-import { methodName } from "../../lib/plain";
+import { finalRho, rhoSeries } from "../../lib/derive";
+import { num } from "../../lib/format";
 
 /**
  * The discovery record: two charts, side by side, above the fold.
@@ -15,7 +15,18 @@ import { methodName } from "../../lib/plain";
  * medians carried in the same payload — shown together so a reader cannot mistake
  * one seed for a method result.
  */
-export function DiscoveryPanel({ state, config }: { state: StatePayload; config: ConfigPayload | null }) {
+export function DiscoveryPanel({
+  state,
+  config,
+  rounds,
+  benchmark: benchmarkPayload,
+}: {
+  state: StatePayload;
+  config: ConfigPayload | null;
+  rounds?: RoundsPayload | null;
+  /** The 100-run artifact — the only source of a ranking-accuracy series. */
+  benchmark?: BenchmarkPayload | null;
+}) {
   const threshold = config ? 1 - config.tau_dev : null;
   const best = state.kpis.best_qualified_binding;
 
@@ -38,17 +49,43 @@ export function DiscoveryPanel({ state, config }: { state: StatePayload; config:
     [state.pareto_data, best],
   );
 
-  const curve = state.quality_curve ?? [];
-  const benchmark = state.benchmark_curves;
-  const x = benchmark.map((row) => row.query_count);
+  /*
+   * The live staircase comes from `/api/rounds`, not from `quality_curve`.
+   *
+   * `quality_curve` is only published for reconstructed rounds, so on the live
+   * state it is absent and the chart fell through to its empty branch — which is
+   * why the "best candidate" panel could claim the opening batch hadn't finished
+   * while the hero above it showed a finished campaign. The timeline carries the
+   * same per-round `best_qualified_binding` for every round, including the last,
+   * so it is the honest source for both the staircase and its final point.
+   */
+  const curve: Array<{ query_count: number; best: number }> = (() => {
+    const live = (rounds?.rounds ?? [])
+      .filter((entry) => Number.isFinite(entry.best_qualified_binding))
+      .map((entry) => ({ query_count: entry.query_count, best: entry.best_qualified_binding }));
+    if (live.length) return live;
+    return (state.quality_curve ?? []).map((point) => ({
+      query_count: point.query_count,
+      best: point.best_qualified_binding,
+    }));
+  })();
+  // Ranking accuracy over the 100 runs, per checkpoint. `null` for a live state
+  // with no benchmark artifact loaded, which the panel renders as an explicit
+  // "not published for one run" rather than an empty axis.
+  const accuracySeries = useMemo(
+    () => (benchmarkPayload ? rhoSeries(benchmarkPayload) : []),
+    [benchmarkPayload],
+  );
+  const finalAccuracy = useMemo(
+    () =>
+      benchmarkPayload
+        ? finalRho(
+          benchmarkPayload.spearman_rho_curves as unknown as Array<Record<string, number | null>>,
+        )
+        : null,
+    [benchmarkPayload],
+  );
 
-  const finalBest = useMemo(() => {
-    const lastRow = benchmark[benchmark.length - 1];
-    if (!lastRow) return null;
-    const record: Record<string, number | null> = {};
-    for (const method of METHODS) record[method] = lastRow[method];
-    return bestMethod(record);
-  }, [benchmark]);
 
   // The champion's own draw order, so the scatter can be read as a discovery.
   const championId = state.pareto_data.find((point) => Math.abs(point.binding - best) < 5e-4)?.candidate_id;
@@ -106,16 +143,15 @@ export function DiscoveryPanel({ state, config }: { state: StatePayload; config:
       </Panel>
 
       <Panel
-        eyebrow="The climb"
-        title="How good the best candidate got, round by round"
-        lede="The recorded campaign's own staircase, next to what the same loop and its competitors average over 100 runs."
+        eyebrow="The climb, and what it means"
+        title="Best binder found, and the measure that predicts it"
+        lede="The top chart is this one recorded run. The bottom chart is the axis the method comparison rests on — ranking accuracy, averaged over 100 runs."
         actions={
           <Legend
             entries={[
               { label: "this run", color: "#22D3EE" },
-              { label: "Virtual Lab", color: "#10B981" },
-              { label: "Standard", color: "#6366F1" },
-              { label: "Greedy", color: "#F59E0B" },
+              { label: "ranking accuracy · ours", color: "#10B981" },
+              { label: "ranking accuracy · standard", color: "#6366F1" },
             ]}
           />
         }
@@ -128,11 +164,11 @@ export function DiscoveryPanel({ state, config }: { state: StatePayload; config:
                 key: "live",
                 label: "This run",
                 color: "#22D3EE",
-                values: curve.map((point) => point.best_qualified_binding),
+                values: curve.map((point) => point.best),
                 width: 2.4,
               },
             ]}
-            height={182}
+            height={196}
             xLabel="lab tests spent"
             yLabel="best binder so far"
             formatY={(value) => value.toFixed(2)}
@@ -142,33 +178,76 @@ export function DiscoveryPanel({ state, config }: { state: StatePayload; config:
         ) : (
           <p className="text-[12px] ink-faint">The opening batch hasn't completed yet.</p>
         )}
-        <div className="mt-2 border-t pt-2" style={{ borderColor: "var(--border)" }}>
-          <LineChart
-            x={x}
-            series={METHODS.map((method) => ({
-              key: method,
-              label: methodName(method),
-              color: methodMeta(method).color,
-              values: benchmark.map((row) => row[method]),
-              dashed: method !== "m5_hybrid",
-              width: method === "m5_hybrid" ? 2.2 : 1.3,
-            }))}
-            height={116}
-            xLabel="lab tests spent"
-            yLabel="average over 100 runs"
-            formatY={(value) => value.toFixed(2)}
-            ariaLabel="Average best binder found over 100 runs, per method"
-          />
-          <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-[10px] ink-faint">
+
+        {/*
+         * This used to be a second copy of the same binding curve, averaged over
+         * 100 runs. Two line charts of almost the same number, stacked, invited
+         * exactly the question the panel could not answer ("why is 8.52 not
+         * 8.58?"). The average is still available in the hero's tooltip and in
+         * the metric table; what the lab view was missing is the axis the whole
+         * method claim rests on, which only the benchmark artifact publishes.
+         */}
+        <div className="mt-3 border-t pt-3" style={{ borderColor: "var(--border)" }}>
+          <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-2">
+            <span className="label text-[9.5px]">Ranking accuracy by tests spent · 100-run average</span>
+            <span className="mono text-[9.5px] ink-faint">0 = guessing · 1 = perfect</span>
+          </div>
+          {accuracySeries.length > 1 ? (
+            <LineChart
+              x={accuracySeries.map((row) => row.query_count)}
+              series={[
+                {
+                  key: "m5_hybrid",
+                  label: "Virtual Lab (ours)",
+                  color: "#10B981",
+                  values: accuracySeries.map((row) => row.values.m5_hybrid),
+                  width: 2.4,
+                },
+                {
+                  key: "m3_ucb",
+                  label: "Standard UCB",
+                  color: "#6366F1",
+                  values: accuracySeries.map((row) => row.values.m3_ucb),
+                  dashed: true,
+                  width: 1.5,
+                },
+                {
+                  key: "m2_greedy",
+                  label: "Greedy",
+                  color: "#F59E0B",
+                  values: accuracySeries.map((row) => row.values.m2_greedy),
+                  dashed: true,
+                  width: 1.3,
+                },
+              ]}
+              height={150}
+              xLabel="lab tests spent"
+              yLabel="ranking accuracy"
+              formatY={(value) => value.toFixed(2)}
+              referenceLines={[{ value: 0, label: "0 · guessing", color: "var(--border-strong)" }]}
+              ariaLabel="Ranking accuracy by tests spent, averaged over 100 runs"
+            />
+          ) : (
+            <p className="text-[11px] ink-faint">
+              Ranking accuracy is only published for the 100-run benchmark, not for a single recorded campaign.
+            </p>
+          )}
+          <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 text-[10px] ink-faint">
             <span>
-              strongest final average{" "}
-              <span className="mono" style={{ color: finalBest ? methodMeta(finalBest.method).color : undefined }}>
-                {finalBest ? `${methodName(finalBest.method)} ${num(finalBest.value, 2)}` : "—"}
+              at the final checkpoint{" "}
+              <span className="mono" style={{ color: "#10B981" }}>
+                ours {num(finalAccuracy?.m5_hybrid ?? null, 2)}
+              </span>{" "}
+              vs{" "}
+              <span className="mono" style={{ color: "#6366F1" }}>
+                standard {num(finalAccuracy?.m3_ucb ?? null, 2)}
               </span>
             </span>
-            <InfoTip label="One run is a demo, not a result">
-              A single run beating a hundred-run average proves the loop works, not that the method wins. The
-              method comparison lives in the second tab.
+            <InfoTip label="Why this chart is not about one run">
+              Ranking accuracy is a property of a scoring model across the whole library, not of a single
+              draw, so it is only meaningful averaged over independent runs. This run cannot have its own
+              curve without re-deriving it from the ledger — the honest statement is that the recorded run{" "}
+              <em>used</em> the loop, and the 100-run benchmark measures whether the loop ranks better.
             </InfoTip>
           </div>
         </div>

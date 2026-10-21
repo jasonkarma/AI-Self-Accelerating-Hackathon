@@ -114,9 +114,11 @@ body {
   .ink {
     color: var(--ink);
   }
+
   .ink-dim {
     color: var(--ink-dim);
   }
+
   .ink-faint {
     color: var(--ink-faint);
   }
@@ -164,10 +166,12 @@ body {
     scrollbar-width: thin;
     scrollbar-color: var(--border-strong) transparent;
   }
+
   .scroll-thin::-webkit-scrollbar {
     height: 8px;
     width: 8px;
   }
+
   .scroll-thin::-webkit-scrollbar-thumb {
     background: var(--border-strong);
     border-radius: 999px;
@@ -181,8 +185,17 @@ body {
     background-position: center -1px;
   }
 
+  /*
+   * The hero wash is a *background image*, so `background-clip: padding-box`
+   * already keeps it inside the rounded corner. It therefore does not need
+   * `overflow: hidden` on the section — and that matters, because an absolutely
+   * positioned `InfoTip` card is clipped by the first ancestor with
+   * `overflow: hidden`. Removing the clip is what lets those hint cards escape
+   * the hero instead of being cut off at its edge.
+   */
   .hero-wash {
     background-image: var(--hero-glow);
+    background-clip: padding-box;
   }
 
   .kpi-value {
@@ -197,11 +210,12 @@ body {
   }
 
   /* Disclosure used by the provenance drawer and the methodology notes. */
-  .disclosure > summary {
+  .disclosure>summary {
     cursor: pointer;
     list-style: none;
   }
-  .disclosure > summary::-webkit-details-marker {
+
+  .disclosure>summary::-webkit-details-marker {
     display: none;
   }
 }
@@ -211,6 +225,7 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
+
   *,
   *::before,
   *::after {
@@ -224,9 +239,11 @@ body {
 .prov-body {
   display: none;
 }
+
 .prov[open] .prov-body {
   display: block;
 }
-.prov[open] > summary .prov-chevron {
+
+.prov[open]>summary .prov-chevron {
   transform: rotate(180deg);
 }

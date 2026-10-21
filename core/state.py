@@ -187,5 +187,9 @@ def empty_state(benchmark: dict | None = None) -> dict:
         })
     return {"current_round": 0, "phase": "Cold-Start Tuition", "kpis": {"best_qualified_binding": 0.0, "delta_vs_wt": 0.0, "query_budget_spent": 0, "total_budget": 35, "wet_lab_cost_saved_usd": 0, "hypotheses_supported": 0, "hypotheses_falsified": 0},
             "hcdr3_ribbon": hcdr3_ribbon(),
+            #: The planner's decision record, or ``{}`` for the seed batch — which
+            #: has no planning step, because five candidates are drawn at random
+            #: before any evidence exists. Present from the first round onward.
+            "planner": {},
             "agent_council": [], "batch_slots": [], "pareto_data": [], "benchmark_curves": curves,
             "voi_diagnostics": empty_voi_diagnostics()}

@@ -446,6 +446,14 @@ class Campaign:
         # only is checked by a test, so the richer round view lives behind
         # ``GET /api/state?round=k``.
         self.state["hcdr3_ribbon"] = self._ribbon_for(last_round)
+        # …with one exception: the planner's decision is added to the top-level
+        # state, because it is the one agent whose output the console could not
+        # otherwise show at all. ``agent_council`` carries memos, and the planner
+        # emits a decision record rather than a memo, so without this field the
+        # panel could say "three specialists argued" but never "and here is what
+        # was concluded". It is additive: the contract check requires the
+        # committed contract to be a *subset* of what the endpoint serves.
+        self.state["planner"] = self._planner_record_for(last_round)
         self.state["kpis"].update({
             "best_qualified_binding": round(best, 2),
             "delta_vs_wt": round(best - reference, 3) if reference is not None else 0.0,
@@ -713,6 +721,44 @@ class Campaign:
         _, falsified = self._round_verdicts(round_number)
         return hcdr3_ribbon(declared, falsified)
 
+    def _planner_record_for(self, round_number: int) -> dict:
+        """The planner's decision for ``round_number``, flattened for the UI.
+
+        The planner is the fourth agent: it reads the three memos plus the raw
+        tool tables and emits a ``RoundDecisionRecord``. Its output is structured
+        data, not prose, so it never appeared in ``agent_council`` (which stores
+        memos only) and the console had no way to show it — the panel could say
+        "three specialists argued" but not "and here is what was concluded".
+
+        This surfaces the interpretable half: the hypothesis the planner wrote,
+        its verdict on the *previous* hypothesis, its confidence, and — the field
+        that makes the parallel council legible — its own statement of where the
+        three seats disagreed.
+
+        Returns ``{}`` for a round the ledger has no decision for (the seed
+        batch), so callers can test ``if record`` rather than catching a KeyError.
+        """
+        decisions = self._decision_events(round_number)
+        for entry in reversed(decisions):
+            payload = entry.get("decision") if isinstance(entry, dict) else None
+            if not isinstance(payload, dict):
+                continue
+            return {
+                "round_number": int(entry.get("round_number") or round_number),
+                "hypothesis_id": payload.get("hypothesis_id"),
+                "hypothesis_statement": payload.get("hypothesis_statement"),
+                "previous_verdict": payload.get("previous_hypothesis_verdict"),
+                "confidence": payload.get("confidence_rating"),
+                "disagreement_summary": payload.get("agent_disagreement_summary"),
+                "supporting_candidate_ids": list(payload.get("supporting_candidate_ids") or ()),
+                "targets": {
+                    "explore": payload.get("slot3_uncertainty_target_id"),
+                    "test": payload.get("slot4_hypothesis_target_id"),
+                    "control": payload.get("slot5_falsification_target_id"),
+                },
+            }
+        return {}
+
     def _declared_priors_for(self, round_number: int) -> list[dict]:
         """The priors the council declared for ``round_number``, or ``[]``.
 
@@ -783,6 +829,10 @@ class Campaign:
         state["voi_diagnostics"] = self._voi_diagnostics(round_number, slots, revealed)
         state["hcdr3_ribbon"] = self._ribbon_for(round_number)
         state["declared_priors"] = declared
+        # The same planner block the hydrated state carries, rebuilt from this
+        # round's own decision record — so stepping the timeline shows what *that*
+        # round's planner concluded, not the newest one.
+        state["planner"] = self._planner_record_for(round_number)
         state["agent_council"] = self._annotate_council_memos(
             memos, state["voi_diagnostics"]["active_tools_metadata"]
         )

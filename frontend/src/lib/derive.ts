@@ -817,6 +817,10 @@ export const VARIANT_GROUPS: VariantGroup[] = [
 export interface AttributionRowView {
   variant: string;
   group: VariantGroupKey;
+  /** The variant's own best-binder score, for reading the row in absolute terms. */
+  aubqc: number | null;
+  /** The variant's own ranking accuracy, 0→1. */
+  rho: number | null;
   /** `variant − production`: positive = the variant is better. */
   variantVsProductionAubqc: number;
   aubqcP: number;
@@ -863,6 +867,8 @@ export function attributionRows(cell: AttributionCell): AttributionRowView[] {
     rows.push({
       variant,
       group,
+      aubqc: Number.isFinite(variantRow?.aubqc) ? variantRow.aubqc : null,
+      rho: Number.isFinite(variantRow?.rho) ? (variantRow.rho as number) : null,
       variantVsProductionAubqc: -delta.aubqc.mean_diff,
       aubqcP: delta.aubqc.p_value,
       aubqcSeedsWon: delta.aubqc.seeds_won,

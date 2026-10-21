@@ -305,6 +305,34 @@ export interface QualityPoint {
   best_qualified_binding: number;
 }
 
+/**
+ * The planner's decision for one round.
+ *
+ * The planner is the fourth agent: it reads the three scientist memos plus the
+ * raw tool tables and emits a `RoundDecisionRecord`. Its output is structured
+ * data rather than prose, so it never appears in `agent_council` — and until the
+ * backend exposed this block there was no way for the console to show it.
+ *
+ * `{}` (not `null`) for the seed batch, which has no planning step.
+ */
+export interface PlannerRecord {
+  round_number: number;
+  hypothesis_id: string | null;
+  /** The claim the planner wrote for this round, in its own words. */
+  hypothesis_statement: string | null;
+  /** Its verdict on the *previous* round's hypothesis. */
+  previous_verdict: "N/A (Round 1)" | "SUPPORTED" | "FALSIFIED" | "INCONCLUSIVE" | null;
+  confidence: "Low" | "Medium" | "High" | null;
+  /** Where the planner judged the three seats to have disagreed. */
+  disagreement_summary: string | null;
+  supporting_candidate_ids: string[];
+  targets: {
+    explore: string | null;
+    test: string | null;
+    control: string | null;
+  };
+}
+
 /** `GET /api/state` (and `GET /api/state?round=k`). */
 export interface StatePayload {
   current_round: number;
@@ -312,6 +340,8 @@ export interface StatePayload {
   phase: Phase;
   kpis: Kpis;
   hcdr3_ribbon: RibbonEntry[];
+  /** The planner's decision; `{}` on the seed batch. */
+  planner?: PlannerRecord | Record<string, never>;
   agent_council: CouncilSeat[];
   batch_slots: BatchSlot[];
   pareto_data: ParetoPoint[];

@@ -65,6 +65,23 @@
         "status": "anchor_conserved"
       }
     ],
+    "planner": {
+      "round_number": 6,
+      "hypothesis_id": "HYP-R6-01",
+      "hypothesis_statement": "CAND-119 will measure higher y_bind than CAND-046 for the combined Y4G, Y6G and G8Y substitutions on their otherwise identical background.",
+      "previous_verdict": "SUPPORTED",
+      "confidence": "Low",
+      "disagreement_summary": "Affinity favors F3/P8 despite background confounding, Skeptic rejects causal attribution from fixed-slot comparisons, and Developability flags hydropathy using unvalidated thresholds.",
+      "supporting_candidate_ids": [
+        "CAND-119",
+        "CAND-046"
+      ],
+      "targets": {
+        "explore": "CAND-025",
+        "test": "CAND-124",
+        "control": "CAND-046"
+      }
+    },
     "agent_council": [
       {
         "memo": "**Single-position vs co-mutation:** Only two replicated gains exist: W3F (+0.417, n=2, std 0.039) and G8P (+0.410, n=6, mean 8.015). Both occur only in co-mutated backgrounds \u2014 positional attribution is confounded. Top candidates: **CAND-055** (+0.445; T1/F3/I4/N6/P8/Y10/F11) and **CAND-064** (+0.390; A1/K2/F3/A4/P8/F11/P13), differing outside the shared F3/P8 core. No epistasis clashes at threshold 0.\n\n**Falsifiable hypothesis:** A minimal W3F+G8P construct achieves \u2265+0.35 binding. If it underperforms CAND-055 (8.05) by >0.15, I4/N6 carry epistatic gains; if it fails to beat WT, F3/P8 effects are background-dependent.\n\nW3F is my sole exception to conserving W3/Y11/D12/Y13 \u2014 two consistent replicates. Deprioritize CAND-324 (R12/L13, \u22120.84), consistent with D12/Y13 conservation. Round-1/2 uncertainty high; verify by construction.",

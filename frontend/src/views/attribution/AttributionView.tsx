@@ -14,6 +14,7 @@ import {
 } from "../../lib/derive";
 import { int, methodMeta, num, pvalue, signed } from "../../lib/format";
 import { flukeOdds } from "../../lib/plain";
+import { StackDiagram } from "./StackDiagram";
 import type { Resource } from "../../hooks/useResource";
 
 /**
@@ -59,14 +60,28 @@ export function AttributionView({ attribution }: { attribution: Resource<Attribu
     );
   }
   return (
+    /*
+     * One column, read top to bottom.
+     *
+     * This tab used to split into a 1.35 : 1 grid — a tall causal-winner card on
+     * the left, two short control cards on the right. The right column ran out
+     * of content long before the left one did, and because the grid is
+     * `items-start` the leftover space was simply empty: a large blank rectangle
+     * beside the claim. Moving the stack diagram into that column narrowed the
+     * gap but could not close it, because the imbalance is structural.
+     *
+     * A single column removes the failure mode entirely and fixes the reading
+     * order at the same time. The argument is a sequence — *what changed* →
+     * *where in the engine* → *what did not matter* → *the full ledger* — and a
+     * sequence should not be laid out as two competing columns.
+     */
     <div className="space-y-4">
       <SummaryBand payload={payload} />
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)] xl:items-start">
-        <CausalWinner payload={payload} />
-        <div className="space-y-4">
-          <NegativeControlCard payload={payload} group="slot_role" />
-          <NegativeControlCard payload={payload} group="sar_efficiency" />
-        </div>
+      <CausalWinner payload={payload} />
+      <StackDiagram />
+      <div className="grid gap-4 lg:grid-cols-2">
+        <NegativeControlCard payload={payload} group="slot_role" />
+        <NegativeControlCard payload={payload} group="sar_efficiency" />
       </div>
       <MechanismCard payload={payload} />
       <VariantLedger payload={payload} />
@@ -90,7 +105,7 @@ function SummaryBand({ payload }: { payload: AttributionPayload }) {
   );
 
   return (
-    <section className="panel hero-wash overflow-hidden">
+    <section className="panel hero-wash">
       <div className="flex flex-wrap items-center justify-between gap-2 px-5 pb-1 pt-4">
         <div className="flex flex-wrap items-center gap-2">
           <span
@@ -414,7 +429,13 @@ function VariantLedger({ payload }: { payload: AttributionPayload }) {
     <Panel
       eyebrow="Everything we tried"
       title="Every change, every setting — including the ones that lost"
-      lede="One row per change, with the paired comparison and how many runs it won. Nothing is filtered out."
+      lede={
+        <>
+          One row per change, with the paired comparison and how many runs it won.{" "}
+          <span className="font-semibold ink">One change mattered; every other one did nothing</span> — and
+          every null is still in this table.
+        </>
+      }
       actions={
         <div className="flex flex-wrap gap-1">
           {payload.cells.map((entry, index) => (
@@ -468,12 +489,12 @@ function VariantLedger({ payload }: { payload: AttributionPayload }) {
               {[
                 "change",
                 "family",
-                "effect on best binder",
+                "best binder",
+                "vs production",
                 "odds it's luck",
-                "runs",
-                "effect on ranking",
+                "ranking accuracy",
+                "vs production",
                 "odds it's luck",
-                "runs",
                 "baseline",
               ].map((heading) => (
                 <th key={heading} className="label whitespace-nowrap px-3 py-1.5 text-left text-[8.5px]">
@@ -525,6 +546,8 @@ function LedgerRow({ row }: { row: AttributionRowView }) {
           {group?.title.split(" ")[0] ?? row.group}
         </span>
       </td>
+      {/* absolute score, so the row can be read without doing the arithmetic */}
+      <td className="px-3 py-1.5 mono text-[11px] ink-dim">{num(row.aubqc, 2)}</td>
       <td
         className="px-3 py-1.5 mono text-[11px]"
         style={{
@@ -536,30 +559,26 @@ function LedgerRow({ row }: { row: AttributionRowView }) {
                 : "var(--danger)",
         }}
       >
-        {signed(row.variantVsProductionAubqc, 4)}
+        {signed(row.variantVsProductionAubqc, 2)}
       </td>
-      <td className="px-3 py-1.5 mono text-[10.5px]" style={{ color: row.aubqcP < 0.05 ? "var(--accent)" : "var(--ink-faint)" }}>
-        {pvalue(row.aubqcP)}
+      <td className="px-3 py-1.5 text-[10px]" style={{ color: row.aubqcP < 0.05 ? "var(--accent)" : "var(--ink-faint)" }}>
+        {flukeOdds(row.aubqcP)}
       </td>
-      <td className="px-3 py-1.5 mono text-[10px] ink-faint">
-        {row.aubqcVariantBetter === null ? "—" : `${int(row.aubqcVariantBetter)}/${int(row.aubqcN)}`}
-      </td>
+      {/* the measure the pitch is actually about */}
+      <td className="px-3 py-1.5 mono text-[11px] ink">{num(row.rho, 2)}</td>
       <td
         className="px-3 py-1.5 mono text-[11px]"
         style={{ color: row.variantVsProductionRho >= 0 ? "var(--accent)" : "var(--danger)" }}
       >
-        {signed(row.variantVsProductionRho, 4)}
+        {signed(row.variantVsProductionRho, 2)}
       </td>
       <td
-        className="px-3 py-1.5 mono text-[10.5px]"
+        className="px-3 py-1.5 text-[10px]"
         style={{
           color: row.rhoP < 0.05 ? (row.variantVsProductionRho >= 0 ? "var(--accent)" : "var(--danger)") : "var(--ink-faint)",
         }}
       >
-        {pvalue(row.rhoP)}
-      </td>
-      <td className="px-3 py-1.5 mono text-[10px] ink-faint">
-        {row.rhoVariantBetter === null ? "—" : `${int(row.rhoVariantBetter)}/${int(row.rhoN)}`}
+        {flukeOdds(row.rhoP)}
       </td>
       <td className="px-3 py-1.5 mono text-[10px] ink-faint">{num(row.baselineAubqc, 4)}</td>
     </tr>

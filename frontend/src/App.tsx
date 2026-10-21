@@ -162,6 +162,7 @@ export default function App() {
                 state={state}
                 rounds={rounds.data}
                 config={config.data}
+                benchmark={benchmark.data}
                 selectedRound={effectiveRound ?? 0}
                 onSelectRound={(round) => setSelectedRound(round)}
                 onRestoreGolden={onRestoreGolden}

@@ -33,6 +33,18 @@ const SPECS: PathSpec[] = [
   { path: "state.kpis.hypotheses_supported", type: "number" },
   { path: "state.kpis.hypotheses_falsified", type: "number" },
   { path: "state.hcdr3_ribbon", type: "array" },
+  // The planner's decision. `{}` on the seed batch, so the *presence* of the key
+  // is asserted here and the inner fields are asserted against a real round.
+  { path: "state.planner", type: "object" },
+  { path: "state.planner.round_number", type: "number" },
+  { path: "state.planner.hypothesis_id", type: "string" },
+  { path: "state.planner.hypothesis_statement", type: "string" },
+  { path: "state.planner.previous_verdict", type: "string" },
+  { path: "state.planner.confidence", type: "string" },
+  { path: "state.planner.disagreement_summary", type: "string" },
+  { path: "state.planner.supporting_candidate_ids", type: "array" },
+  { path: "state.planner.targets", type: "object" },
+  { path: "state.planner.targets.control", type: "string" },
   { path: "state.hcdr3_ribbon[0].position", type: "number" },
   { path: "state.hcdr3_ribbon[0].wt_residue", type: "string" },
   { path: "state.hcdr3_ribbon[0].soft_prior_weight", type: "number" },

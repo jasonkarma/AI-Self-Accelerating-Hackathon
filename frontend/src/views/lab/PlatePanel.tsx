@@ -88,7 +88,7 @@ export function PlatePanel({
             }}
             title={`After round ${harvest - 1} of ${totalRounds}, the loop stops spending slots on exploration and control.`}
           >
-            {graduated ? "ALL-IN PHASE" : `FULL EXPLORATION UNTIL R${harvest}`}
+            {graduated ? `ALL-IN SINCE R${harvest} · no control slot` : `FULL EXPLORATION UNTIL R${harvest}`}
           </span>
           <InfoTip label="Why the mix changes">
             Early rounds reserve one slot to resolve the biggest open question and one to check the measure

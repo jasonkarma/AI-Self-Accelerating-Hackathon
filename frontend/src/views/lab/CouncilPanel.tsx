@@ -65,10 +65,11 @@ export function CouncilPanel({ state }: { state: StatePayload }) {
             The scientists · {seats.length} specialists · one argument each
           </div>
           <h2 className="text-[14px] font-semibold leading-snug ink">
-            Three specialists read the same data and disagree on purpose
+            Three specialists read the same data — separately — and disagree on purpose
           </h2>
           <p className="mt-0.5 text-[11px] leading-snug ink-faint">
-            Every seat gets the same evidence; the disagreement is what the next batch is chosen from.
+            They run <em>in parallel</em>, not in sequence: no seat reads another's memo. A fourth agent, the
+            planner, receives all three arguments plus the raw tables and turns them into the batch.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
@@ -91,7 +92,26 @@ export function CouncilPanel({ state }: { state: StatePayload }) {
         </div>
       </header>
 
+      {/*
+       * The seat strip is drawn as three independent columns feeding a fourth
+       * box, not as a chain.
+       *
+       * This is a correction, not a decoration: the Skeptic does **not** read the
+       * Binding or Manufacturability memos — `core/agents.py` runs all three with
+       * `asyncio.gather`, and each seat's context is built from the tool tables
+       * alone. Only the planner sees the three memos together (as
+       * `council_memos`). A left-to-right chain would have implied a review
+       * hierarchy that does not exist, and a judge who asks "so does the Skeptic
+       * see their output?" would catch it immediately.
+       */}
       <div className="px-4">
+        <div className="mb-1.5 flex items-center gap-1.5 text-[9px] ink-faint">
+          <span className="mono">same tool tables</span>
+          <span aria-hidden>→</span>
+          <span className="mono">three parallel seats</span>
+          <span aria-hidden>→</span>
+          <span className="mono">planner merges all three</span>
+        </div>
         <div
           role="tablist"
           aria-label="Council seats"
@@ -101,6 +121,7 @@ export function CouncilPanel({ state }: { state: StatePayload }) {
           {seats.map((seat) => {
             const provider = providerMeta(seat.provider);
             const selected = seat.role === active.role;
+            const stance = seatStance(seat.role);
             return (
               <button
                 key={seat.role}
@@ -124,6 +145,15 @@ export function CouncilPanel({ state }: { state: StatePayload }) {
                   style={{ background: provider.color }}
                 />
                 <span className="truncate">{shortRole(seat.role)}</span>
+                {stance ? (
+                  <span
+                    className="mono shrink-0 rounded px-1 text-[8px] leading-tight"
+                    style={{ background: `${stance.color}1f`, color: stance.color }}
+                    title={stance.hint}
+                  >
+                    {stance.tag}
+                  </span>
+                ) : null}
               </button>
             );
           })}
@@ -142,11 +172,46 @@ export function CouncilPanel({ state }: { state: StatePayload }) {
   );
 }
 
+/**
+ * The seat labels the tab bar shows.
+ *
+ * Two of these are translations of the backend role names, chosen so the tab
+ * matches the words spoken in the pitch: "manufacturability" is what a judge
+ * hears, while `Developability Scientist` is the artifact's own field. "Skeptic"
+ * is left alone — it is the clearest label in the interface and it *is* the
+ * technical story.
+ */
 function shortRole(role: string): string {
-  if (/affinity/i.test(role)) return "Affinity";
-  if (/develop/i.test(role)) return "Developability";
+  if (/affinity/i.test(role)) return "Binding";
+  if (/develop/i.test(role)) return "Manufacturability";
   if (/skeptic/i.test(role)) return "Skeptic";
   return role;
+}
+
+/**
+ * The one-word stance each seat argues from.
+ *
+ * The seats share evidence but not an objective: two of them are trying to find
+ * something worth testing, and one is trying to show the other two are wrong.
+ * Saying that on the tab is what makes the disagreement legible instead of
+ * decorative — and it is why the council is not three copies of the same model
+ * with different prompts.
+ */
+function seatStance(role: string): { tag: string; color: string; hint: string } | null {
+  if (/affinity/i.test(role)) {
+    return { tag: "pro", color: "#10B981", hint: "Argues for the candidates most likely to bind." };
+  }
+  if (/develop/i.test(role)) {
+    return { tag: "pro", color: "#22D3EE", hint: "Argues for the candidates most likely to be manufacturable." };
+  }
+  if (/skeptic/i.test(role)) {
+    return {
+      tag: "con",
+      color: "#F59E0B",
+      hint: "Argues against the other two: which mechanism is wrong, and which pair of candidates would falsify it. Runs independently — it does not read their memos.",
+    };
+  }
+  return null;
 }
 
 function SeatCard({

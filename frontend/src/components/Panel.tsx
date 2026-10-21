@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useCallback, useRef, useState, type ReactNode } from "react";
 
 interface Props {
   title: ReactNode;
@@ -122,30 +122,46 @@ export function KpiTile({
     emphasis === "accent" ? "var(--accent-line)" : emphasis === "gold" ? "var(--gold-line)" : "var(--border)";
   const richHint = hint !== undefined && typeof hint !== "string";
   return (
+    /*
+     * The gradient lives on an absolutely-positioned layer rather than on the
+     * tile itself, so the tile no longer needs `overflow-hidden`.
+     *
+     * That matters for the `InfoTip` beside the label: an absolutely-positioned
+     * tooltip is clipped by the first ancestor with `overflow: hidden`, which is
+     * why the hint cards were being cut off by their own tiles. Clipping the
+     * background layer instead keeps the rounded gradient and lets the tooltip
+     * escape to the panel above.
+     */
     <div
-      className="relative min-w-0 overflow-hidden rounded-xl border px-3.5 py-3"
-      style={{
-        borderColor: border,
-        background:
-          emphasis === "none"
-            ? "var(--panel-2)"
-            : emphasis === "accent"
-              ? "linear-gradient(150deg, var(--accent-soft), transparent 70%)"
-              : "linear-gradient(150deg, var(--gold-soft), transparent 70%)",
-      }}
+      className="relative min-w-0 rounded-xl border px-3.5 py-3"
+      style={{ borderColor: border }}
       title={typeof hint === "string" ? hint : undefined}
     >
-      <div className="label mb-1 flex items-center gap-1 text-[9.5px]">
+      <span
+        aria-hidden
+        className="pointer-events-none absolute inset-0 overflow-hidden rounded-xl"
+        style={{
+          background:
+            emphasis === "none"
+              ? "var(--panel-2)"
+              : emphasis === "accent"
+                ? "linear-gradient(150deg, var(--accent-soft), transparent 70%)"
+                : "linear-gradient(150deg, var(--gold-soft), transparent 70%)",
+        }}
+      />
+      <div className="label relative mb-1 flex items-center gap-1 text-[9.5px]">
         <span className="truncate">{label}</span>
         {richHint ? <InfoTip label={`What ${typeof label === "string" ? label : "this number"} means`}>{hint}</InfoTip> : null}
       </div>
-      <div className="flex items-baseline gap-1">
+      <div className="relative flex items-baseline gap-1">
         <span className="kpi-value mono text-[24px]" style={{ color }}>
           {value}
         </span>
         {unit ? <span className="mono text-[11px] ink-faint">{unit}</span> : null}
       </div>
-      {caption ? <div className="mt-0.5 truncate text-[10.5px] leading-tight ink-faint">{caption}</div> : null}
+      {caption ? (
+        <div className="relative mt-0.5 truncate text-[10.5px] leading-tight ink-faint">{caption}</div>
+      ) : null}
     </div>
   );
 }
@@ -264,22 +280,61 @@ export function Callout({
 /**
  * An `ⓘ` with a hover/focus card.
  *
- * Pure CSS (`group-hover` + `focus-within`), so it works in the static render
- * harness and never needs a portal. The card is capped in width and aligned to
- * the right edge by default because these labels sit near panel headers.
+ * The card is **fixed-positioned at the trigger's measured coordinates**, not
+ * absolutely positioned inside it. That is the only way it can survive the
+ * places these triggers actually live:
+ *
+ * * a horizontally scrolling table (`overflow-x: auto` clips both axes, so a
+ *   card inside the ablation ledger was cut in half);
+ * * a panel with `overflow: hidden` for its rounded corner;
+ * * a trigger near the viewport's left edge, where right-aligning a 280 px card
+ *   pushed it off-screen entirely.
+ *
+ * Measuring at open time also lets the card flip above the trigger when there
+ * is no room below, and clamp itself inside the viewport horizontally. It is
+ * still not a portal — the element stays in this subtree — so the static
+ * render harness keeps working: with no pointer, no card is mounted at all.
  */
 export function InfoTip({
   children,
   label = "More detail",
-  align = "right",
+  align = "left",
 }: {
   children: ReactNode;
   label?: string;
   align?: "left" | "right";
 }) {
+  const [spot, setSpot] = useState<{ left: number; top: number; width: number } | null>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+
+  const place = useCallback(() => {
+    const el = trigger.current;
+    if (!el || typeof window === "undefined") return;
+    const rect = el.getBoundingClientRect();
+    const width = Math.min(300, window.innerWidth - 16);
+    // Anchor to the trigger's leading edge by default; both edges are clamped
+    // into the viewport afterwards, so neither can push the card off-screen.
+    const raw = align === "right" ? rect.right - width : rect.left;
+    const left = Math.min(Math.max(8, raw), Math.max(8, window.innerWidth - width - 8));
+    // 180 px is a conservative height estimate: enough to decide whether the
+    // card fits below the trigger or has to open upwards.
+    const below = rect.bottom + 8;
+    const top = below + 180 > window.innerHeight ? Math.max(8, rect.top - 188) : below;
+    setSpot({ left, top, width });
+  }, [align]);
+
+  const clear = useCallback(() => setSpot(null), []);
+
   return (
-    <span className="group relative inline-flex align-middle">
+    <span
+      className="inline-flex align-middle"
+      onMouseEnter={place}
+      onMouseLeave={clear}
+      onFocus={place}
+      onBlur={clear}
+    >
       <button
+        ref={trigger}
         type="button"
         aria-label={label}
         className="focus-ring inline-flex h-4 w-4 items-center justify-center rounded-full border text-[9px] font-semibold ink-faint transition-colors hover:border-[color:var(--accent-line)] hover:text-[color:var(--accent)]"
@@ -287,19 +342,26 @@ export function InfoTip({
       >
         i
       </button>
-      <span
-        role="tooltip"
-        className={`pointer-events-none invisible absolute top-6 z-40 w-[280px] rounded-xl border px-3 py-2 text-[11px] font-normal normal-case leading-relaxed opacity-0 shadow-xl transition-opacity duration-150 group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100 ${align === "right" ? "right-0" : "left-0"
-          }`}
-        style={{
-          background: "var(--panel-raised)",
-          borderColor: "var(--border-strong)",
-          color: "var(--ink-dim)",
-          letterSpacing: "normal",
-        }}
-      >
-        {children}
-      </span>
+      {spot ? (
+        <span
+          role="tooltip"
+          className="pointer-events-none fixed z-[80] rounded-xl border px-3 py-2 text-[11px] font-normal normal-case leading-relaxed shadow-xl"
+          style={{
+            left: spot.left,
+            top: spot.top,
+            width: spot.width,
+            background: "var(--panel-raised)",
+            borderColor: "var(--border-strong)",
+            color: "var(--ink-dim)",
+            letterSpacing: "normal",
+            // Long unbroken tokens (field names, `a_null := a_base`) must wrap
+            // rather than push the card wider than its measured box.
+            overflowWrap: "anywhere",
+          }}
+        >
+          {children}
+        </span>
+      ) : null}
     </span>
   );
 }

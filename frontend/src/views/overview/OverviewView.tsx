@@ -61,7 +61,7 @@ export function OverviewView({
     return (
         <div className="space-y-4">
             {/* ── The one-sentence task ─────────────────────────────────────────── */}
-            <section className="panel hero-wash overflow-hidden">
+            <section className="panel hero-wash">
                 <div className="px-6 pb-6 pt-7">
                     <div className="mb-3 flex flex-wrap items-center gap-2">
                         <span
@@ -88,7 +88,7 @@ export function OverviewView({
                             icon={<Target size={13} />}
                             value={gain === null ? "—" : gainWhole(gain)}
                             label="more accurate at ranking candidates"
-                            caption="than the standard published method, over 100 independent runs"
+                            caption="than the standard UCB baseline, over 100 independent runs"
                             hint={
                                 gain === null ? undefined : (
                                     <>
@@ -142,7 +142,7 @@ export function OverviewView({
                             <span className="mono text-[10px] ink-faint">0 = guessing · 1 = perfect</span>
                         </div>
                         <ScaleMarker
-                            ariaLabel={`Ranking accuracy: Virtual Lab ${num(final.m5_hybrid ?? null, 2)}, standard method ${num(final.m3_ucb ?? null, 2)}`}
+                            ariaLabel={`Ranking accuracy: Virtual Lab ${num(final.m5_hybrid ?? null, 2)}, standard UCB ${num(final.m3_ucb ?? null, 2)}`}
                             leftLabel="0 · guessing"
                             rightLabel="1 · perfect"
                             ticks={[
@@ -158,7 +158,7 @@ export function OverviewView({
                         />
                         {vsM3 ? (
                             <p className="mt-2 text-[10.5px] ink-faint">
-                                Ours beat the standard method on {countOf(vsM3.seedsWon, vsM3.n)} runs;{" "}
+                                Ours beat the standard UCB baseline on {countOf(vsM3.seedsWon, vsM3.n)} runs;{" "}
                                 {flukeOdds(vsM3.p)} that the result is chance.
                             </p>
                         ) : null}
@@ -176,7 +176,7 @@ export function OverviewView({
                 />
                 <RouteCard
                     index="02"
-                    title="Beats the standard method"
+                    title="Beats the standard UCB baseline"
                     body="100 independent runs, head to head, plus every measure we lose on."
                     onClick={() => onTab("benchmark")}
                 />

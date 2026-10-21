@@ -1,12 +1,15 @@
 import { AlertTriangle, ChevronDown, RefreshCw, Star } from "lucide-react";
 import { useState } from "react";
+import type { BenchmarkPayload } from "../../types/report";
 import type { ConfigPayload, RoundsPayload, StatePayload } from "../../types/state";
 import { Callout, InfoTip, KpiTile, Note } from "../../components/Panel";
 import { Headline, TokenChip } from "../../components/Plain";
 import { RoundTimeline } from "../../components/RoundTimeline";
 import { TelemetryBar } from "./TelemetryBar";
 import { CouncilPanel, FalsificationTracker } from "./CouncilPanel";
+import { PlannerCard } from "./PlannerCard";
 import { PlatePanel } from "./PlatePanel";
+import { Hcdr3Ribbon } from "./Hcdr3Ribbon";
 import { DiscoveryPanel } from "./DiscoveryPanel";
 import { LiveRoundRunner } from "./LiveRoundRunner";
 import { discoveredBinder, slotSplit } from "../../lib/derive";
@@ -18,6 +21,8 @@ interface Props {
   state: Resource<StatePayload>;
   rounds: RoundsPayload | null;
   config: ConfigPayload | null;
+  /** Loaded alongside the lab so the ranking-accuracy chart has a source. */
+  benchmark?: BenchmarkPayload | null;
   selectedRound: number;
   onSelectRound: (round: number) => void;
   onRestoreGolden: () => Promise<void>;
@@ -44,6 +49,7 @@ export function LabView({
   state,
   rounds,
   config,
+  benchmark,
   selectedRound,
   onSelectRound,
   onRestoreGolden,
@@ -109,7 +115,7 @@ export function LabView({
   return (
     <div className="space-y-3.5">
       {/* ── Hero band ─────────────────────────────────────────────────────── */}
-      <section className="panel hero-wash overflow-hidden">
+      <section className="panel hero-wash">
         <div className="grid gap-5 px-5 py-4 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,1fr)] lg:items-center">
           <div className="min-w-0">
             <div className="mb-2 flex flex-wrap items-center gap-1.5">
@@ -162,7 +168,8 @@ export function LabView({
                 score {num(payload.kpis.best_qualified_binding, 2)}
               </span>
               <span className="text-[10.5px] ink-faint">
-                on the binding scale the assays report · higher is tighter
+                every binding value is a measured assay from a published dataset — the model never grades
+                itself
               </span>
               <TokenChip
                 token="10 ^ Δ vs reference"
@@ -221,18 +228,22 @@ export function LabView({
 
       {/* ── The batch + the scientists who chose it ────────────────────────── */}
       <div className="grid gap-3.5 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] xl:items-start">
-        <div className="min-w-0">
+        <div className="min-w-0 space-y-3.5">
+          <Hcdr3Ribbon state={payload} wildType={config?.wild_type ?? "SRWGGDGCYAMDY"} />
           <PlatePanel state={payload} config={config} totalRounds={totalRounds} />
         </div>
 
         <div className="min-w-0 space-y-3.5">
           <CouncilPanel state={payload} />
+          {/* The decision the three memos feed into — placed directly under the
+              debate so the reading order is argument → conclusion. */}
+          <PlannerCard state={payload} />
           <FalsificationTracker state={payload} />
         </div>
       </div>
 
       {/* ── What was found, and at what cost ───────────────────────────────── */}
-      <DiscoveryPanel state={payload} config={config} />
+      <DiscoveryPanel state={payload} config={config} rounds={rounds} benchmark={benchmark} />
 
       {/* ── Under the hood: everything a judge has to ask for ──────────────── */}
       <div className="space-y-2">

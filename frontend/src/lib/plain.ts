@@ -130,8 +130,14 @@ export function plainToken(key: string): string {
 export const METHOD_WORDS: Record<string, { name: string; full: string; role: string }> = {
     m1_random: { name: "Random", full: "Random picking", role: "The floor: no model at all." },
     m2_greedy: { name: "Greedy", full: "Greedy (always take the top prediction)", role: "Uses the model but never explores." },
-    m3_ucb: { name: "Standard method", full: "Standard method (M3, UCB)", role: "The published active-learning baseline." },
-    m4_fixed_prior: { name: "Fixed-prior", full: "Fixed-prior variant", role: "The standard method plus a hand-written bias." },
+    // "Standard UCB" is the name spoken in the pitch and printed on every card,
+    // so the surface and the script cannot disagree during a demo.
+    m3_ucb: {
+        name: "Standard UCB",
+        full: "Standard UCB baseline",
+        role: "The active-learning baseline every paper in this field compares against.",
+    },
+    m4_fixed_prior: { name: "Fixed-prior", full: "Fixed-prior variant", role: "The standard baseline plus a hand-written bias." },
     m5_hybrid: { name: "Virtual Lab", full: "Virtual Lab (ours)", role: "This work." },
     m5_warm_start: { name: "Virtual Lab, guided start", full: "Virtual Lab with a guided first batch", role: "Same loop, smarter first five candidates." },
     live_m5: { name: "The recorded run", full: "The recorded run", role: "The single campaign the demo replays." },

@@ -98,7 +98,7 @@ function Scoreboard({ payload }: { payload: BenchmarkPayload }) {
   const m3 = final.m3_ucb ?? null;
 
   return (
-    <section className="panel hero-wash overflow-hidden">
+    <section className="panel hero-wash">
       <div className="grid gap-5 px-5 py-5 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
         <div className="min-w-0">
           <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -115,11 +115,12 @@ function Scoreboard({ payload }: { payload: BenchmarkPayload }) {
 
           <Headline
             value={gainWhole(gain)}
-            label="more accurate at ranking candidates than the standard method"
+            label="more accurate at ranking candidates than the standard UCB baseline"
             tone="accent"
             hint={
               <>
-                The improvement in {PLAIN.spearman_rho.label.toLowerCase()} relative to the standard method:
+                The improvement in {PLAIN.spearman_rho.label.toLowerCase()} relative to the standard UCB
+                baseline:
                 <span className="mono"> ({num(m5, 4)} − {num(m3, 4)}) ÷ {num(m3, 4)}</span>. Both values are
                 read from the published artifact, not typed in.
               </>
@@ -127,7 +128,7 @@ function Scoreboard({ payload }: { payload: BenchmarkPayload }) {
             support={
               <>
                 {PLAIN.spearman_rho.label} measures whether a method puts the genuinely better candidates on
-                top. The standard method gets the order {shareWhole(m3)} of the way to perfect; ours gets{" "}
+                top. The standard UCB baseline gets the order {shareWhole(m3)} of the way to perfect; ours gets{" "}
                 {shareWhole(m5)}.
               </>
             }
@@ -139,7 +140,7 @@ function Scoreboard({ payload }: { payload: BenchmarkPayload }) {
               <span className="mono text-[10px] ink-faint">{PLAIN.spearman_rho.scale}</span>
             </div>
             <ScaleMarker
-              ariaLabel={`Ranking accuracy: Virtual Lab ${num(m5, 2)}, standard method ${num(m3, 2)}, on a scale from 0 (guessing) to 1 (perfect)`}
+              ariaLabel={`Ranking accuracy: Virtual Lab ${num(m5, 2)}, standard UCB ${num(m3, 2)}, on a scale from 0 (guessing) to 1 (perfect)`}
               leftLabel="0 · guessing"
               rightLabel="1 · perfect"
               ticks={[
@@ -171,7 +172,7 @@ function Scoreboard({ payload }: { payload: BenchmarkPayload }) {
             value={countOf(vsM3.seedsWon, vsM3.n)}
             caption="head-to-head, same starting candidates"
             emphasis="accent"
-            hint={`On how many of the ${int(vsM3.n)} runs our ranking accuracy exceeded the standard method's, measured on the identical candidate set.`}
+            hint={`On how many of the ${int(vsM3.n)} runs our ranking accuracy exceeded the standard UCB baseline's, measured on the identical candidate set.`}
           />
           <KpiTile
             label="Gap vs. noise"
@@ -239,7 +240,7 @@ function RankingEvidence({ payload }: { payload: BenchmarkPayload }) {
       label: "Virtual Lab (ours)",
       value: final.m5_hybrid ?? 0,
       color: "#10B981",
-      note: `${gainText(gain)} over the standard method`,
+      note: `${gainText(gain)} over the standard UCB baseline`,
       hero: true,
     },
   ];
@@ -305,6 +306,16 @@ function HonestAxis({ payload }: { payload: BenchmarkPayload }) {
     (acc, method) => (payload.aubqc[method] > payload.aubqc[acc] ? method : acc),
     METHODS[0],
   );
+  // Where each method's curve actually lands, and the highest value the pool
+  // contains. Quoting both is what makes "they both saturate" checkable rather
+  // than asserted: the curves average below the pool maximum, which is the
+  // ceiling a single pick is competing against.
+  const finalCurve = payload.curves[payload.curves.length - 1];
+  const poolCeiling = finalCurve
+    ? Math.max(...METHODS.map((method) => finalCurve[method]))
+    : null;
+  const m5Final = finalCurve?.m5_hybrid ?? null;
+  const m3Final = finalCurve?.m3_ucb ?? null;
 
   return (
     <div className="space-y-2">
@@ -325,6 +336,15 @@ function HonestAxis({ payload }: { payload: BenchmarkPayload }) {
           </span>
         }
       />
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-xl border px-3.5 py-2.5" style={{ borderColor: "var(--accent-line)", background: "var(--accent-soft)" }}>
+        <span className="text-[11.5px] font-semibold" style={{ color: "var(--accent)" }}>
+          And it transferred:
+        </span>
+        <span className="text-[11.5px] leading-relaxed ink-dim">
+          the same code, with no retuning, also beat the standard UCB baseline on the other two public targets
+          with a learnable signal — HIV-1 gp120 and lysozyme.
+        </span>
+      </div>
       <details
         className="disclosure rounded-xl border px-3.5 py-2"
         style={{ borderColor: "var(--border)", background: "var(--panel-2)" }}
@@ -357,6 +377,14 @@ function HonestAxis({ payload }: { payload: BenchmarkPayload }) {
               {PLAIN.aubqc.meaning} The ceiling is reached within the first few rounds, so every method that
               reaches it is tied by construction — a bare average of this number invites reading noise as a
               win.
+            </p>
+            <p>
+              Concretely, at the final checkpoint ours and the baseline both land on{" "}
+              <span className="mono ink-dim">{num(m5Final, 2)}</span> and{" "}
+              <span className="mono ink-dim">{num(m3Final, 2)}</span>: identical to two decimals, against a
+              best-observed value of <span className="mono ink-dim">{num(poolCeiling, 2)}</span>. When the
+              single-pick measure is the same number for every method, it has stopped carrying information —
+              which is a fact about the measure, not a result for or against either method.
             </p>
             <p>
               Best {PLAIN.aubqc.label.toLowerCase()}:{" "}
@@ -637,6 +665,9 @@ function SameSeedPanel({ payload }: { payload: BenchmarkPayload }) {
 // ─────────────────────────────── provenance ───────────────────────────────
 
 function Provenance({ payload }: { payload: BenchmarkPayload }) {
+  const final = finalRho(
+    payload.spearman_rho_curves as unknown as Array<Record<string, number | null>>,
+  );
   return (
     <Panel
       eyebrow="Where these numbers come from"
@@ -661,10 +692,34 @@ function Provenance({ payload }: { payload: BenchmarkPayload }) {
             </p>
           ) : null}
         </div>
+        <div className="rounded-lg border px-3 py-2 sm:col-span-2" style={{ borderColor: "var(--border)" }}>
+          <div className="label text-[9px]">the exact published figures</div>
+          <p className="mt-0.5 text-[11.5px] leading-relaxed ink-dim">
+            Ranking accuracy at the final checkpoint: ours{" "}
+            <span className="mono" style={{ color: "var(--ink)" }}>
+              {num(final.m5_hybrid ?? null, 4)}
+            </span>
+            , Standard UCB{" "}
+            <span className="mono" style={{ color: "var(--ink)" }}>
+              {num(final.m3_ucb ?? null, 4)}
+            </span>
+            , on a 0→1 scale. The headline percentage is exactly{" "}
+            <span className="mono" style={{ color: "var(--ink)" }}>
+              {gainText(relativeGain(final.m5_hybrid ?? null, final.m3_ucb ?? null))}
+            </span>
+            : ({num(final.m5_hybrid ?? null, 4)} − {num(final.m3_ucb ?? null, 4)}) ÷{" "}
+            {num(final.m3_ucb ?? null, 4)}. Quoted here at full precision so the arithmetic can be checked
+            without hovering anything.
+          </p>
+        </div>
         <div className="rounded-lg border px-3 py-2" style={{ borderColor: "var(--border)" }}>
-          <div className="label text-[9px]">decision policy</div>
-          <p className="mono mt-0.5" style={{ color: "var(--ink)" }}>{payload.m5_policy_mode}</p>
+          <div className="label text-[9px]">how the 100 runs were produced</div>
+          <p className="mt-0.5 text-[11.5px] leading-relaxed" style={{ color: "var(--ink)" }}>
+            The decision rules run deterministically here, so every p-value is reproducible from the stored
+            file. The first tab is where the agents actually deliberate.
+          </p>
           <p className="mt-1 text-[10.5px] ink-faint">
+            Policy <span className="mono">{payload.m5_policy_mode}</span> ·{" "}
             {int(Object.keys(payload.matched_initial_seeds).length)} starting batches are carried in the file
             so the same-start comparison can be reproduced exactly.
           </p>
