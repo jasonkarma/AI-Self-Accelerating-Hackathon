@@ -1,0 +1,58 @@
+# Substituted by /docker-entrypoint.d/20-envsubst-on-templates.sh at container
+# start: ${PORT} and ${API_ORIGIN} only. Nginx's own variables are written
+# brace-less ($uri, $host, ...) so envsubst leaves them untouched.
+server {
+    listen ${PORT};
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # The bundle is ~1.6 MB of JS + CSS; gzip takes it under 500 kB.
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css application/javascript application/json image/svg+xml;
+
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # Hashed build assets are immutable by construction.
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    # The API is proxied rather than baked in: the browser only ever talks to
+    # this origin, so there is no CORS preflight, no mixed-content risk, and the
+    # backend URL can change without rebuilding the image.
+    location /api/ {
+        proxy_pass ${API_ORIGIN};
+        proxy_http_version 1.1;
+        proxy_set_header Host $proxy_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+
+        # GET /api/stream-round is an SSE stream: buffering would hold every
+        # event until the round finished, which is the one thing the live view
+        # exists to avoid.
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        chunked_transfer_encoding on;
+    }
+
+    # SPA fallback. The app has no client-side router today (tabs are state), so
+    # this only matters for a deep link or a future route.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # index.html must never be cached, or a redeploy serves a stale bundle hash.
+    location = /index.html {
+        add_header Cache-Control "no-store, must-revalidate";
+    }
+}

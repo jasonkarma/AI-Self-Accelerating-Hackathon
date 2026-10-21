@@ -1,0 +1,12 @@
+# Dependencies are installed inside the image (linux binaries from the lockfile).
+node_modules
+# Build output is produced inside the image; a committed dist/ would be stale.
+dist
+dist-ssr
+# Local-only scratch: sandbox preview harness and the superseded scratch dir.
+.preview
+.trash
+.DS_Store
+*.local
+.vite
+*.tsbuildinfo

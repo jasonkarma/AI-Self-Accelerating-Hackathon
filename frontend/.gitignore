@@ -1,0 +1,20 @@
+# Build output and local caches — none of this belongs in the repository.
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Vite / TypeScript incremental state
+.vite/
+*.tsbuildinfo
+
+# Scratch files moved aside during the build. The directory is disposable; see
+# README §"What could not be verified in the development sandbox" for what is in
+# it and why it was not deleted in place.
+.trash/
+
+# Sandbox-only preview harness (static render shim + generated HTML). Not part of
+# the app, not needed to build, and contains no source the bundle imports.
+.preview/
+.sucrase-loader.mjs
+.sucrase-reg.mjs

@@ -1,0 +1,38 @@
+{
+  "name": "virtual-lab-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Bio-computational telemetry console for the Self-Accelerating Multi-Agent Virtual Lab (FastAPI backend at app/server.py).",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --port 4173",
+    "typecheck": "tsc --noEmit --pretty false",
+    "verify": "tsx scripts/verify-numbers.ts",
+    "contract": "tsx scripts/check-contract.ts",
+    "audit:literals": "tsx scripts/audit-literals.ts",
+    "audit:render": "tsx scripts/render-smoke.tsx",
+    "check": "npm run typecheck && npm run contract && npm run verify && npm run audit:literals && npm run audit:i18n && npm run audit:render",
+    "i18n:extract": "tsx scripts/extract-council-zh.ts",
+    "audit:i18n": "tsx scripts/audit-council-i18n.ts"
+  },
+  "dependencies": {
+    "framer-motion": "^11.11.17",
+    "lucide-react": "^0.454.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.14",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  }
+}
