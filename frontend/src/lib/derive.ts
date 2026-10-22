@@ -948,7 +948,7 @@ export interface EvaluatedVerdict {
    * Whether the **loop** produced the ranking advantage.
    *
    * `beatsUcb` alone is not enough on a single-round cell. At R=1 both methods
-   * select the same batch, so best-binder-found is bit-identical (1MLC:
+   * select the identical batch, so best-binder-found is bit-identical (1MLC:
    * 3.0663 = 3.0663, paired p exactly 1.0). The ρ gap that remains comes from
    * the two *scoring* rules ordering the library before any test happens — a
    * property of the surrogate, not of a closed loop. Counting it as a win would
@@ -956,6 +956,27 @@ export interface EvaluatedVerdict {
    * for that exact run.
    */
   loopAttributableWin: boolean;
+  /**
+   * Plain-language statement of whether the lab works on this library, and if
+   * not, why not.
+   *
+   * The card's job is to say where the lab applies *and where it doesn't*, with
+   * the reason attached — a bare "no better" reads as a failure of the method,
+   * when in the holdout's case the library genuinely has no signal for anyone
+   * to find. The distinction is the whole point of having run it.
+   */
+  verdict: "works" | "no-signal" | "single-round";
+  /**
+   * The warm-start ablation on this cell, when the artifact publishes one.
+   *
+   * Both arms are our method (`m5_warm_start` vs `m5_hybrid`), so it is an
+   * internal ablation and never a us-vs-baseline result. On the holdout it is
+   * the only separated effect: +0.0828 over 42/50 runs at 5% coverage,
+   * p = 2.4e-05. Reported on the row so a reader who saw that number on the
+   * scoreboard does not find this card calling the same dataset a flat tie
+   * without explanation.
+   */
+  warmStart: { delta: number; p: number; seedsWon: number; n: number; coverage: string } | null;
   note: string | null;
 }
 
@@ -999,6 +1020,8 @@ export function evaluatedVerdicts(
       rounds: number,
       label: string,
       note: string | null,
+      // The warm-start ablation for this exact cell, if one was measured.
+      warm: EvaluatedVerdict["warmStart"] = null,
     ): EvaluatedVerdict {
       const m5 = record.m5_hybrid ?? null;
       const ucb = record.m3_ucb ?? null;
@@ -1045,12 +1068,26 @@ export function evaluatedVerdicts(
         bestBaselineMethod: best?.method ?? null,
         beatsBestBaseline: m5 !== null && best ? m5 > best.value : null,
         loopAttributableWin,
+        verdict:
+          classification === "single-round"
+            ? "single-round"
+            : beatsUcb === true
+              ? "works"
+              : // A multi-round library where we fail to beat the baseline has no
+              // separable signal — that is the holdout's role, and it is a
+              // statement about the library, not a defect in the method.
+              "no-signal",
+        warmStart: warm,
         note:
           rounds <= 1 && beatsUcb === true
             ? "ranks better on the same picks — with one round both methods query the identical batch, so the gap is the scoring rule, not the loop"
-            : strongerThanUcb
-              ? `${best.method} is stronger than m3_ucb on this library (${best.value.toFixed(2)} vs ${ucb.toFixed(2)}) — we do not beat it${note ? ` · ${note}` : ""}`
-              : note,
+            : beatsUcb === false && classification === "unlearnable"
+              ? // The holdout has no separable signal for anyone. Say that, rather
+              // than leaving a bare loss that reads as the method failing.
+              "no method separates here — the library declares no usable ranking signal, so every method ties at guessing. This is the control that makes the other results meaningful."
+              : strongerThanUcb
+                ? `${best.method} is stronger than m3_ucb on this library (${best.value.toFixed(2)} vs ${ucb.toFixed(2)}) — we do not beat it${note ? ` · ${note}` : ""}`
+                : note,
       };
     }
 
@@ -1071,11 +1108,25 @@ export function evaluatedVerdicts(
         (entry) => entry.dataset === target && entry.coverage_label === coverageLabel,
       ) ?? cross.targets.find((entry) => entry.dataset === target);
     const rounds = row?.campaign_protocol.rounds ?? 0;
+    const warmPaired = row?.paired.m5_warm_start_minus_m5_hybrid;
+    // Prefer the strongest warm-start cell for this dataset: the effect is not
+    // constant across coverage and the scoreboard quotes the largest positive
+    // Δ, so the row must not quote a weaker one and imply the effect is smaller.
+    const warmBest = strongestWarmStart(cross, target);
     return build(
       (row?.spearman_rho_at_last_checkpoint ?? {}) as unknown as Record<string, number | null>,
       rounds,
       row?.label ?? target,
       rounds <= 1 ? "one round — the loop has no second round to act on" : null,
+      warmBest ?? (warmPaired
+        ? {
+          delta: warmPaired.mean_diff,
+          p: warmPaired.p_value,
+          seedsWon: warmPaired.seeds_won,
+          n: warmPaired.n,
+          coverage: row?.coverage_label ?? coverageLabel,
+        }
+        : null),
     );
   });
 }

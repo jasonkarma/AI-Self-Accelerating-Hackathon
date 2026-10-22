@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowRight, BadgeCheck, ChevronDown, Filter, Minus, ShieldQuestion, Sparkles, Star, Telescope, Trophy } from "lucide-react";
+import { AlertTriangle, ArrowRight, BadgeCheck, ChevronDown, Filter, ShieldQuestion, Sparkles, Star, Telescope, Trophy } from "lucide-react";
 import { useMemo, useState } from "react";
 import type {
   AttributionPayload,
@@ -30,7 +30,7 @@ import {
   TOGGLE_COVERAGE,
   type ToggleCoverage,
 } from "../../lib/derive";
-import { int, methodMeta, num, pExact, percentOf100, pvalue } from "../../lib/format";
+import { int, methodMeta, num, pExact, percentOf100 } from "../../lib/format";
 import { countOf, flukeOdds, gainText, methodName, relativeGain } from "../../lib/plain";
 import type { Resource } from "../../hooks/useResource";
 
@@ -149,10 +149,10 @@ function Scoreboard({
   const wins = rows.filter((row) => (row.delta ?? 0) > 0).length;
   const lockbox = partition.unlearnable.includes("aayl51") ? "aayl51" : partition.unlearnable[0] ?? null;
   const warm = lockbox ? strongestWarmStart(payload, lockbox) : null;
-  const boundary = partition.single_round[0] ?? null;
-  const boundaryRow = boundary
-    ? payload.targets.find((row) => row.dataset === boundary && row.coverage_label === "16.7pct") ??
-    payload.targets.find((row) => row.dataset === boundary)
+  // The holdout's own ranking-accuracy row, so the tile can state the null
+  // rather than only the warm-start number beside it.
+  const holdoutRow = lockbox
+    ? evaluatedVerdicts(payload, partition, "16.7pct").find((entry) => entry.target === lockbox) ?? null
     : null;
 
   return (
@@ -230,61 +230,64 @@ function Scoreboard({
         ))}
       </div>
 
-      <div className="grid gap-2.5 px-5 pb-4 pt-1 sm:grid-cols-2">
+      {/*
+       * One holdout tile, stating the null rather than dressing it up.
+       *
+       * The warm start does separate on this library — but on `best binder
+       * found`, where it is +0.0437 at 16.7% coverage, while on ranking accuracy
+       * it is **−0.035**: the same intervention helps the best single hit and
+       * hurts the ordering. Claiming "we win on the unlearnable target" would be
+       * true only on the axis this redesign demoted, so the tile reports both
+       * and does not count either as a win over the baseline.
+       *
+       * The previous second tile was the single-round control (1MLC). That is a
+       * check on the harness, not a fact about where the lab applies, so it is
+       * gone from the scoreboard and lives only in the dataset funnel.
+       */}
+      <div className="px-5 pb-4 pt-1">
         <div
           className="rounded-xl border px-3 py-2.5"
           style={{ borderColor: "var(--gold-line)", background: "var(--gold-soft)" }}
         >
-          <div className="flex items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
             <Star size={11} style={{ color: "var(--gold)" }} fill="var(--gold)" />
             <span className="text-[11.5px] font-semibold" style={{ color: "var(--gold)" }}>
-              {lockbox ?? "the holdout"} · sealed before we ran anything
+              {lockbox ?? "the holdout"} · sealed before we ran anything, and it correctly shows no win
             </span>
             <InfoTip label="What the holdout measures">
-              {lockbox ?? "The holdout"} has no learnable ranking signal, so ours and standard UCB tie
-              there — a useful control, because it shows the result is not automatic. What does separate is the
-              starting batch: choosing the first five candidates from prior knowledge beats drawing them at
-              random, on the target that was sealed before any of our numbers existed.
+              {lockbox ?? "The holdout"} has no learnable ranking signal, so no method — ours included — beats
+              standard UCB on it. That is the point: it shows the result on the other targets is not automatic.
+              One thing does separate there, and it is a different question: choosing the first five candidates
+              from prior knowledge beats drawing them at random on <em>best binder found</em>. On ranking
+              accuracy that same change is slightly negative. Both numbers are stated rather than the one that
+              flatters.
             </InfoTip>
           </div>
-          <div className="mt-1 flex flex-wrap items-baseline gap-x-2">
-            <span className="mono text-[18px] font-semibold" style={{ color: "var(--gold)" }}>
-              {warm ? (warm.delta >= 0 ? "+" : "−") + num(Math.abs(warm.delta), 3) : "—"}
-            </span>
-            <span className="text-[10.5px] ink-dim">better with a guided first batch</span>
-          </div>
-          <div className="mt-0.5 mono text-[9.5px] ink-faint">
-            {warm
-              ? `won ${countOf(warm.seedsWon, warm.n)} runs · ${flukeOdds(warm.p)} · ${warm.coverage} of the library`
-              : "no guided-start run measured"}
-          </div>
-        </div>
-
-        <div className="rounded-xl border px-3 py-2.5" style={{ borderColor: "var(--border)", background: "var(--panel-2)" }}>
-          <div className="flex items-center gap-1.5">
-            <Minus size={11} style={{ color: "#6366F1" }} />
-            <span className="text-[11.5px] font-semibold ink">
-              {boundary ?? "boundary"} · a control where a tie is required
-            </span>
-            <InfoTip label="Why a tie here is structural">
-              This dataset only allows one round of testing, so the five candidates chosen are identical for
-              both methods by construction — the measure is bit-identical and the p-value is exactly 1. That is
-              a check on the protocol, not evidence for the loop.
-            </InfoTip>
-          </div>
-          <div className="mt-1 flex flex-wrap items-baseline gap-x-2">
-            <span className="mono text-[18px] font-semibold ink-dim">
-              {boundaryRow ? `${num(boundaryRow.aubqc.m5_hybrid, 2)} = ${num(boundaryRow.aubqc.m3_ucb, 2)}` : "—"}
-            </span>
-            <span className="text-[10.5px] ink-dim">identical, as it must be</span>
-          </div>
-          <div className="mt-0.5 mono text-[9.5px] ink-faint">
-            {boundaryRow
-              ? `${int(boundaryRow.campaign_protocol.n_qualified)} candidates · clamped to ${boundaryRow.campaign_protocol.rounds
-              } round · ${boundaryRow.campaign_protocol.total_budget} tests · p ${pvalue(
-                boundaryRow.paired.m5_hybrid_minus_m3_ucb.p_value,
-              )}`
-              : "no boundary cell"}
+          <div className="mt-1.5 grid gap-x-4 gap-y-1 sm:grid-cols-2">
+            <div>
+              <div className="flex flex-wrap items-baseline gap-x-2">
+                <span className="mono text-[18px] font-semibold ink-dim">
+                  {holdoutRow ? `${num(holdoutRow.m5, 2)} vs ${num(holdoutRow.ucb, 2)}` : "—"}
+                </span>
+                <span className="text-[10.5px] ink-dim">ranking accuracy · no win, as expected</span>
+              </div>
+              <div className="mono mt-0.5 text-[9.5px] ink-faint">
+                ours vs standard UCB · no signal exists to rank
+              </div>
+            </div>
+            <div>
+              <div className="flex flex-wrap items-baseline gap-x-2">
+                <span className="mono text-[18px] font-semibold" style={{ color: "var(--gold)" }}>
+                  {warm ? (warm.delta >= 0 ? "+" : "−") + num(Math.abs(warm.delta), 3) : "—"}
+                </span>
+                <span className="text-[10.5px] ink-dim">best binder, guided vs random start</span>
+              </div>
+              <div className="mono mt-0.5 text-[9.5px] ink-faint">
+                {warm
+                  ? `won ${countOf(warm.seedsWon, warm.n)} runs · ${flukeOdds(warm.p)} · both arms are our method · ${warm.coverage} of the library`
+                  : "no guided-start run measured"}
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -822,15 +825,23 @@ function EliminationFunnel({ payload }: { payload: CrossTargetPayload }) {
    * different question: it disqualifies `1n8z`, `aayl49_ML` and `2fjg` from
    * being blind tests precisely because they had already been run.
    */
-  const measured = payload.learnability_gate.partition.m5_evaluated;
-  const verdicts = evaluatedVerdicts(payload, payload.learnability_gate.partition, "16.7pct");
+  /*
+   * The single-round control is excluded from this card on purpose.
+   *
+   * 1MLC's protocol allows one round, so both methods query the identical batch
+   * and every acted-on metric is bit-identical. It is a check that the harness
+   * is fair, not a library where the loop applies — and leaving it in forced an
+   * asterisk caveat that made a datapoint out of a protocol check. It stays on
+   * the scoreboard as the boundary tile, where "a tie is required" is the point.
+   */
+  const verdicts = evaluatedVerdicts(payload, payload.learnability_gate.partition, "16.7pct").filter(
+    (entry) => entry.classification !== "single-round",
+  );
   // Counted as `loopAttributableWin`, not raw `beatsUcb`: the single-round cell
   // ranks better on an identical batch, which the boundary tile on this page
   // already describes as a structural tie. Counting it here would make the two
   // cards disagree about the same run.
   const beaten = verdicts.filter((entry) => entry.loopAttributableWin).length;
-  const rankedBetter = verdicts.filter((entry) => entry.beatsUcb === true).length;
-  const multiRound = verdicts.filter((entry) => entry.rounds > 1).length;
   const tougherThanUcb = verdicts.filter(
     (entry) => entry.bestBaselineMethod !== null && entry.bestBaselineMethod !== "m3_ucb" && entry.beatsBestBaseline === false,
   );
@@ -839,8 +850,8 @@ function EliminationFunnel({ payload }: { payload: CrossTargetPayload }) {
   return (
     <Panel
       eyebrow="Where the lab applies"
-      title={`Ran on ${measured.length} datasets · the loop beat standard UCB on ${beaten} · ran a closed loop on ${multiRound}`}
-      lede={`The lab was pointed at ${measured.length} libraries, out of the ${workable} in the corpus that are searchable at all. On ${beaten} of them the loop ranked candidates better than standard UCB — the comparison every other tab argues from. On ${multiRound} a closed loop actually ran; the fifth allows only a single round, and is reported as a boundary control rather than a result. No run here ever trained on the library it was scoring: every number is a fresh run of the same untuned rule.`}
+      title={`What the lab handles, and what it does not — ${beaten} of ${verdicts.length} libraries beaten, one with no signal to beat`}
+      lede={`Of the ${metadata.rows.length} public datasets in the corpus, ${workable} are real search problems — the other ${metadata.rows.length - workable} collapse to one or two distinct loops, so no algorithm has anything to rank. We ran on ${verdicts.length} of those ${workable}, and all of them are listed below, including the one that failed: "where does this work?" is only answerable next to "where doesn't it?". One is the pre-registered holdout — 486 usable candidates, 15 rounds — where no method, ours included, separates. That is a fact about the library, not a defect in the loop, and it is the control that keeps the other three honest. 1MLC is excluded: one round only, so it tests the harness rather than the lab.`}
       actions={
         /*
          * Two thresholds, and they are not the same number.
@@ -962,15 +973,47 @@ function EliminationFunnel({ payload }: { payload: CrossTargetPayload }) {
 
               <div className="w-[118px] shrink-0 text-right">
                 <div className="mono text-[9.5px] font-semibold" style={{ color: accent }}>
-                  {attributable ? "the loop wins" : wins ? "ranks better*" : entry.beatsUcb === false ? "no better" : "—"}
+                  {attributable ? "works" : wins ? "ranks better*" : entry.verdict === "no-signal" ? "no signal here" : "—"}
                 </div>
                 <div className="mono text-[8px] leading-tight ink-faint">
-                  {entry.beatsBestBaseline === false && entry.bestBaselineMethod !== "m3_ucb"
-                    ? `vs UCB · ${methodName(entry.bestBaselineMethod ?? "")} leads`
-                    : "vs standard UCB"}
+                  {entry.verdict === "no-signal"
+                    ? "no method can rank it"
+                    : entry.beatsBestBaseline === false && entry.bestBaselineMethod !== "m3_ucb"
+                      ? `vs UCB · ${methodName(entry.bestBaselineMethod ?? "")} leads`
+                      : "vs standard UCB"}
                 </div>
               </div>
 
+              {/*
+               * The warm start gets its own line, and only where it separated.
+               *
+               * It is a different comparison from the one above — guided first
+               * batch vs random first batch, both arms being our method — so it
+               * must not be folded into the UCB verdict. Leaving it out is what
+               * made the holdout read as a flat tie while the scoreboard three
+               * panels up reported +0.0828 with 42/50 runs behind it.
+               */}
+              {/*
+               * Only a *positive*, separated warm-start effect is stated as a
+               * gain. A significant negative Δ (2FJG at 33%: −0.0118, 11/50)
+               * means the guided batch did worse, and rendering that as
+               * "+-0.01 from a guided first batch" would invert the finding.
+               */}
+              {entry.warmStart && entry.warmStart.p < 0.05 ? (
+                <div className="w-full pl-[86px] text-[8.5px] leading-tight">
+                  <span style={{ color: entry.warmStart.delta > 0 ? "var(--gold)" : "var(--ink-dim)" }}>
+                    {entry.warmStart.delta > 0
+                      ? `+${num(entry.warmStart.delta, 2)} from a guided first batch`
+                      : `${num(entry.warmStart.delta, 2)} — the guided first batch did worse`}
+                  </span>
+                  <span className="ink-faint">
+                    {" "}
+                    · won {entry.warmStart.seedsWon} of {entry.warmStart.n} runs ·{" "}
+                    {flukeOdds(entry.warmStart.p)} · both arms are our method, at{" "}
+                    {coverageLabelShort(entry.warmStart.coverage)} of the library
+                  </span>
+                </div>
+              ) : null}
               {entry.note ? (
                 <div className="w-full pl-[86px] text-[8.5px] leading-tight ink-faint">{entry.note}</div>
               ) : null}
@@ -983,15 +1026,6 @@ function EliminationFunnel({ payload }: { payload: CrossTargetPayload }) {
         35-test benchmark rather than a resized cell. The same rule, a different budget — its score is
         comparable in method, not in spend.
       </p>
-      {rankedBetter > beaten ? (
-        <p className="px-5 pb-2 text-[9.5px] leading-relaxed ink-faint">
-          <span className="text-[10px]">*</span> Ranks better than standard UCB, but not because of the loop. With
-          one round both methods query the identical batch, so best binder found is bit-identical between them
-          (shown as a tie in the scoreboard above) and the ranking gap comes from how each method orders the
-          library before any test is run. It is a real property of the scoring rule; it is not evidence the loop
-          learned anything.
-        </p>
-      ) : null}
       {tougherThanUcb.length ? (
         <p className="px-5 pb-3 text-[9.5px] leading-relaxed ink-faint">
           Standard UCB is the comparator this page is built around, but it is not always the strongest ordinary

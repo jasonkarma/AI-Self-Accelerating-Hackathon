@@ -50,6 +50,7 @@ import {
   rhoPairedTest,
   rhoRankAtCoverage,
   rhoRatio,
+  strongestWarmStart,
   rowMatchesTarget,
   belowHoldoutFloor,
   canonicalTargetId,
@@ -513,15 +514,18 @@ function verifyCrossTarget(): void {
   // The comparator is **standard UCB**, matching the wording every other panel
   // on this tab uses. The stronger-of-M1-M4 comparison is carried per row, not
   // folded into this count.
-  const beaten = verdicts.filter((entry) => entry.loopAttributableWin).length;
-  const rankedBetter = verdicts.filter((entry) => entry.beatsUcb === true).length;
-  const multiRound = verdicts.filter((entry) => entry.rounds > 1).length;
+  // The card excludes the single-round control, so its counts are over 4.
+  const shown = verdicts.filter((entry) => entry.classification !== "single-round");
+  const beaten = shown.filter((entry) => entry.loopAttributableWin).length;
+  const multiRound = shown.filter((entry) => entry.rounds > 1).length;
+  expect("cross: card shows four libraries", shown.length === 4, shown.map((e) => e.target).join(","));
   expect("cross: headline loop-win count is 3", beaten === 3, String(beaten));
-  expect("cross: headline closed-loop count is 4", multiRound === 4, String(multiRound));
+  // With 1MLC excluded, every remaining row is multi-round (AAYL51 runs 15).
+  expect("cross: all four shown libraries ran a closed loop", multiRound === 4, String(multiRound));
   expect(
-    "cross: the first two headline counts differ",
-    evaluatedAll.length > beaten,
-    `${evaluatedAll.length} ran vs ${beaten} loop wins`,
+    "cross: the single-round control is not on this card",
+    shown.every((entry) => entry.classification !== "single-round"),
+    shown.map((e) => e.classification).join(","),
   );
 
   /*
@@ -554,13 +558,123 @@ function verifyCrossTarget(): void {
       `Δ ${cell.aubqc.m5_hybrid - cell.aubqc.m3_ucb}, p ${cell.paired.m5_hybrid_minus_m3_ucb.p_value}`,
     );
   }
-  // A row may rank better without the loop being responsible, but the surface
-  // must then say so — that is what the asterisk footnote keys off.
+  /*
+   * The card says both what the lab handles and what it does not. Assert the
+   * verdict is derived, so "no signal here" cannot be printed over a library
+   * that actually had a signal — and cannot become a silent loss either.
+   */
+  for (const entry of verdicts) {
+    const expected =
+      entry.classification === "single-round"
+        ? "single-round"
+        : entry.beatsUcb === true
+          ? "works"
+          : "no-signal";
+    expect(
+      `cross: ${entry.target} verdict is derived from its own numbers`,
+      entry.verdict === expected,
+      `${entry.verdict} vs ${expected}`,
+    );
+  }
+  /*
+   * A "no-signal" verdict has to be a fact about the library, and the evidence
+   * differs per target — which is why this checks the right source for each.
+   *
+   * The holdout was deliberately **withheld from the learnability gate** so it
+   * stayed blind, so it has no gate row at all; its only evidence is its own
+   * measured ρ, which must be below the gate threshold on every coverage cell.
+   * Other unlearnable targets do have gate rows. Asserting a gate row for the
+   * holdout would fail — as it did — on a target that is correctly absent from
+   * that file.
+   */
+  for (const entry of verdicts.filter((row) => row.verdict === "no-signal")) {
+    const gateRows = cross.learnability_gate.rows.filter(
+      (row) => canonicalTargetId(row.target_id) === canonicalTargetId(entry.target),
+    );
+    if (gateRows.length > 0) {
+      expect(
+        `cross: ${entry.target} labelled no-signal has a low measured baseline`,
+        gateRows.every((row) => (row.max_baseline_rho ?? 1) < cross.learnability_gate.rho_gate),
+        gateRows.map((row) => row.max_baseline_rho).join(","),
+      );
+    } else {
+      // No gate row — the holdout path. Its own ρ cells must all sit below the
+      // threshold, on every coverage level the artifact publishes.
+      const cells = cross.targets.filter((row) => row.dataset === entry.target);
+      expect(
+        `cross: ${entry.target} has measured cells to justify no-signal`,
+        cells.length > 0,
+        "no cells",
+      );
+      for (const cell of cells) {
+        const bestBaseline = Math.max(
+          ...METHODS.filter((method) => method !== "m5_hybrid").map(
+            (method) => cell.spearman_rho_at_last_checkpoint[method] ?? Number.NEGATIVE_INFINITY,
+          ),
+        );
+        expect(
+          `cross: ${entry.target}@${cell.coverage_label} no method separates`,
+          bestBaseline < cross.learnability_gate.rho_gate,
+          `best baseline ρ ${bestBaseline} vs gate ${cross.learnability_gate.rho_gate}`,
+        );
+      }
+      // And it must be flagged as the withheld holdout, not merely unmeasured.
+      expect(
+        `cross: ${entry.target} with no gate row is the pre-registered holdout`,
+        partition.unlearnable.includes(entry.target),
+        entry.target,
+      );
+    }
+  }
+  // And the converse: a "works" verdict must actually beat its UCB comparator.
+  for (const entry of verdicts.filter((row) => row.verdict === "works")) {
+    expect(
+      `cross: ${entry.target} labelled works really beats UCB`,
+      entry.m5 !== null && entry.ucb !== null && entry.m5 > entry.ucb,
+      `${entry.m5} vs ${entry.ucb}`,
+    );
+  }
+
+  // Now that the single-round control is off the card, every displayed row that
+  // ranks better must have the loop to thank for it — there is no asterisk case
+  // left, so `beatsUcb` and `loopAttributableWin` must agree exactly.
+  for (const entry of shown) {
+    expect(
+      `cross: ${entry.target} displayed win is loop-attributable`,
+      entry.beatsUcb === entry.loopAttributableWin,
+      `beatsUcb=${entry.beatsUcb} loopWin=${entry.loopAttributableWin}`,
+    );
+  }
+  // The warm start is a different comparison and must be carried separately, or
+  // the holdout reads as a flat tie while the scoreboard reports +0.0828.
+  const holdout = shown.find((entry) => entry.target === "aayl51");
+  expect("cross: the holdout is on the card", holdout !== undefined, "aayl51 missing");
   expect(
-    "cross: one row ranks better without loop attribution",
-    rankedBetter > beaten,
-    `${rankedBetter} ranked better vs ${beaten} attributed`,
+    "cross: the holdout carries its warm-start ablation",
+    holdout?.warmStart !== null && holdout?.warmStart !== undefined,
+    "no warm-start block",
   );
+  if (holdout?.warmStart) {
+    expect(
+      "cross: holdout warm start separated",
+      holdout.warmStart.delta > 0 && holdout.warmStart.p < 0.001,
+      `Δ ${holdout.warmStart.delta} p ${holdout.warmStart.p}`,
+    );
+    // It must be the strongest cell, matching `strongestWarmStart` — otherwise
+    // the row quotes a weaker effect than the scoreboard above it.
+    const strongest = strongestWarmStart(cross, "aayl51");
+    expect(
+      "cross: holdout warm start is the strongest cell",
+      strongest !== null && Math.abs(strongest.delta - holdout.warmStart.delta) < 1e-9,
+      `${holdout.warmStart.delta} vs ${strongest?.delta}`,
+    );
+    // And it must never be mistaken for a win over the baseline.
+    expect(
+      "cross: warm start is not counted as beating UCB",
+      holdout.beatsUcb === false,
+      `beatsUcb=${holdout.beatsUcb}`,
+    );
+  }
   // Every row must carry the UCB number it is compared against.
   for (const entry of verdicts) {
     expect(
