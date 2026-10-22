@@ -191,7 +191,7 @@ together or not at all.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `aayl49_ML` | 11 | 756 | 16.53 % | 24 | 125 | 2.3109 ± 0.0126 | 2.3254 (M3) | 3/5 |
 | `2fjg` | 13 | 124 | 16.13 % | 3 | 20 | 0.0782 ± 0.0029 | 0.0799 (M4) | 2/5 |
-| **`aayl51`** | **12** | **486** | 16.46 % | 15 | 80 | **1.9726 ± 0.0060** | 1.9774 (M4) | 3/5 |
+| **`aayl51`** | **12** | **487** | 16.43 % | 15 | 80 | **1.9726 ± 0.0060** | 1.9774 (M4) | 3/5 |
 
 **The lockbox is a negative result for M5 on AUBQC**, and it is published as one. It was selected by
 `scripts/audit_lockbox_metadata.py` from all 17 AbBiBench targets **before** any M1–M5 number existed
@@ -222,10 +222,27 @@ Two blind stages selected the holdouts; neither used an M5 number. Stage A
 | Target | L | rounds | M5 ρ | M3 ρ | Δ | p | seeds won |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `1n8z` | 13 | 6 | 0.6578 | 0.3442 | **+0.3136** | **8.4e-32** | 98/100 |
-| `aayl49_ML` | 11 | 24 | 0.2694 | 0.1907 | **+0.0787** | **2.4e-10** | — |
+| `aayl49_ML` | 11 | 24 | 0.2981 | 0.1760 | **+0.1101** | **1.4e-06** | 39/50 |
 | `2fjg` | 13 | 3 | 0.2327 | −0.0530 | **+0.2857** | **6.2e-06** | — |
-| `aayl51` | 12 | 15 | 0.0098 | 0.0112 | −0.0014 | 0.68 | — |
+| `aayl51` | 12 | 15 | 0.0234 | 0.0232 | −0.0036 | 0.66 | 23/50 |
 | `1mlc` | 9 | **1** | 0.3814 | 0.3541 | +0.0273 | — | — |
+
+**Gate revision (`aayl49_ML`, `aayl51` re-measured).** `core/developability.py`'s
+5-residue hydropathy window previously scanned `range(9)`, which is only correct at
+13 residues; it is now `range(len(s) - 4)`. `2fjg` and `1mlc` are **bit-identical**
+after the fix, which is the check that it was scoped correctly. The two affected
+targets were re-run at 50 seeds per coverage (`--merge`, published cells replaced):
+
+| Target | τ_dev (old → new) | N_qual | M5 ρ (old → new) | M5−M3 Δρ (old → new, p) |
+| --- | --- | --- | --- | --- |
+| `aayl49_ML` | 0.69764 → 0.69572 | 756 → 756 | 0.2694 → **0.2981** | +0.0785 (4.5e-05) → **+0.1101 (1.4e-06)** |
+| `aayl51` | 0.67212 → 0.66208 | 486 → **487** | 0.0098 → 0.0234 | −0.0014 (0.68) → −0.0036 (0.66) |
+
+`N_qual` is pinned to 50 % of the pool by `pool_median`, so it barely moves; the
+`aayl51` 486 → 487 shift is a median tie-break, not a gate change. What does move is
+*which* sequences qualify (`threshold_source` stays `pool_median` in both). The
+headline conclusion is unchanged: `aayl51` remains a **null** for M5 (Δρ = +0.0002,
+p = 0.96), and `aayl49_ML`'s lead is marginally larger, not smaller.
 
 **Read this as:** M5's rank model beats standard UCB wherever a rank signal exists, and
 neither wins nor loses where none does. Two caveats travel with it:
@@ -239,6 +256,78 @@ neither wins nor loses where none does. Two caveats travel with it:
 
 Raw gate output: `results/learnability_gate.json`, also served by
 `/api/cross-target` as `learnability_gate`.
+
+### When does the agent layer actually activate?
+
+`Δ_agent` is not always non-zero, and the condition is measurable **before** any
+M1–M5 number exists. `positional_priors_from_revealed` declares a position only when
+
+```
+mode( best-5 revealed residue at p )  !=  reference[p]
+```
+
+and `reference` is the pool's own per-position mode. So a pool that is
+"wild-type plus sparse independent mutations" makes the rule a **no-op**: the best
+molecules' modal residue *is* the reference at every position, nothing is declared,
+`Δ_agent ≡ 0`, and `A_H1 ≡ A_base`. M5 then selects the same five slots as M3.
+
+`scripts/probe_delta_agent_conditions.py` measures the fire rate directly (uncapped,
+best-5 of the reveal, 40 draws per size); `scripts/probe_candidate_pool.py` applies the
+same test to any candidate CSV. 1N8Z is the positive control and confirms the probe:
+
+| Target | L | N_qual | R | mean subst/variant | **agent fire rate @reveal=5** |
+| --- | --- | --- | --- | --- | --- |
+| **`1n8z`** | 13 | 210 | 6 | **5.71** / 13 | **100 %** |
+| `aayl49_ML` | 11 | 756 | 24 | — | 88 % |
+| `adams2017` (FLAb2, L=9) | 9 | 431 | 13 | 1.89 / 9 | 12 % |
+| **`2fjg`** | 13 | 124 | 3 | **1.00** / 13 | **0 %** |
+| `koenig2017 g6` (FLAb2) | 13 | 124 | 3 | 1.00 / 13 | 0 % |
+| `makowski2022` (emibetuzumab) | 8 | 37 / 21 | **1** | 2.24 / 8 | 98 % / 80 % |
+
+**Read this as a boundary condition, not a set of failures.** The agent layer is
+conditional on library *density*, and density and pool size are in tension by
+construction: combinatorial libraries enumerate a few CDR positions (dense, but capped at
+a few hundred distinct sequences → `R` collapses to 1), while whole-loop scans stay near
+the modal residue (large, but `Δ_agent = 0`). 1N8Z is the narrow overlap — combinatorial
+*and* deep. `2fjg`'s published **+0.2857** ρ lead survives at a 0 % fire rate: with
+`Δ_agent ≈ 0`, `A_H1 ≡ A_base`, so M5 can only differ from M3 through the surrogate and
+the VoI/control slot rules. That is the sharpest available reminder that a ρ win is not
+by itself evidence about the multi-agent hypothesis.
+
+Report the fire rate beside ρ for any new target. Without it, an inert-agent cell and a
+working-agent cell are indistinguishable in the table.
+
+### Results: `adams2017` (FLAb2) — exploratory, **not** confirmatory
+
+`python scripts/run_adams2017_ablation.py --seeds 50`. L=9, N_qual=431, R=13 at the
+pre-registered 16.7 % rate. Chosen because it is the only real non-13-mer pool in FLAb2
+with genuine positional diversity **and** multi-round sizing. It is **not** a holdout —
+the sole pre-registered lockbox (`aayl51`) is consumed, so nothing here may be described
+as confirmatory generalisation.
+
+| coverage | R | Q | M2 ρ | M3 ρ | M4 ρ | **M5 ρ** | M5 rank | M5−M3 ρ (p, seeds won) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 5 % | 3 | 20 | 0.2702 | 0.2193 | 0.2677 | 0.2581 | 3/4 | n/a (Q < 35) |
+| **16.7 %** | **13** | **70** | 0.4041 | 0.3721 | 0.3822 | **0.4215** | **1/4** | +0.0285 (0.057, 36/50) |
+| 33 % | 27 | 140 | 0.3037 | 0.2723 | 0.2509 | **0.3317** | **1/4** | +0.0251 (0.146, 37/50) |
+
+M5 leads ρ in both multi-round cells, directionally consistent (36/50 and 37/50 seeds),
+but **neither reaches p < 0.05**. Three things must travel with that number:
+
+- **It is not an agent result.** Fire rate is 12 %, so `Δ_agent ≈ 0` in most rounds and
+  M5's AUBQC is nearly bit-identical to M3's (1.7473 vs 1.7464 at 16.7 %). The ρ
+  difference comes from pool-level scoring, not from the council's hypotheses.
+- **The label needed both a sign and a scale fix.** `fitness` is the *raw* Kd in molar
+  (measured: Spearman +1.0000 against the `Kd (Tite-Seq) [M]` column), so it is
+  higher-is-worse. Negating it linearly is dimensionally right and numerically useless —
+  Kd spans 3.2e-10 … 1.0e-5 M, so `-Kd` is ~1e-5 and AUBQC underflows to `0.0000`. The
+  transform used is `-log10(Kd)`; the first, linear attempt returned five tied methods.
+- **The pool is partly saturated at the assay ceiling.** 4 of 5 seed labels are exactly
+  5.000 (= Kd 1e-5 M); >50 % of the `Kd` column sits at that detection limit, which caps
+  the resolvable dynamic range.
+
+Falsification control: flipping the direction moves ρ from +0.3637 to −0.3787, so the
+direction handling is load-bearing rather than cosmetic.
 
 ### API contract
 

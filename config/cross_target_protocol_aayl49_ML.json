@@ -8,7 +8,7 @@
       "cluster": 2.0,
       "hydro": 1.6727272727272726,
       "liability": 1.0,
-      "window": 4.35
+      "window": 3.96
     },
     "minima": {
       "aromatic": 0.0,
@@ -22,12 +22,12 @@
   "pool_size": 1510,
   "qualification_pass_rate": 0.5006622516556292,
   "qualified_count": 756,
-  "tau_dev": 0.6976400653532566,
-  "tau_risk": 0.30235993464674343,
+  "tau_dev": 0.6957181377568435,
+  "tau_risk": 0.3042818622431565,
   "threshold_percentile": 0.5,
   "threshold_source": "pool_median",
   "version": "1.2-post-kickoff",
   "wild_type": "SRWGGDGFYAMDY",
-  "wt_pass_fraction": 0.8615894039735099,
-  "wt_risk": 0.38839482469562414
+  "wt_pass_fraction": 0.8887417218543047,
+  "wt_risk": 0.3957354006836907
 }
