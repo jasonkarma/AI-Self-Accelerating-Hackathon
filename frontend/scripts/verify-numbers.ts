@@ -704,14 +704,21 @@ function verifyCrossTarget(): void {
    * The card says both what the lab handles and what it does not. Assert the
    * verdict is derived, so "no signal here" cannot be printed over a library
    * that actually had a signal — and cannot become a silent loss either.
+   *
+   * `unlearnable` is checked before `beatsUcb`, mirroring `derive.ts`. A raw
+   * float comparison cannot distinguish a real lead from noise: aayl51 at 16.7%
+   * coverage leads UCB by 0.0002 with a paired p of 0.34, and printing "works"
+   * for that would contradict the holdout tile on the same page.
    */
   for (const entry of verdicts) {
     const expected =
       entry.classification === "single-round"
         ? "single-round"
-        : entry.beatsUcb === true
-          ? "works"
-          : "no-signal";
+        : entry.classification === "unlearnable"
+          ? "no-signal"
+          : entry.beatsUcb === true
+            ? "works"
+            : "no-signal";
     expect(
       `cross: ${entry.target} verdict is derived from its own numbers`,
       entry.verdict === expected,
@@ -777,15 +784,30 @@ function verifyCrossTarget(): void {
     );
   }
 
-  // Now that the single-round control is off the card, every displayed row that
-  // ranks better must have the loop to thank for it — there is no asterisk case
-  // left, so `beatsUcb` and `loopAttributableWin` must agree exactly.
+  /*
+   * Now that the single-round control is off the card, every displayed row that
+   * ranks better must have the loop to thank for it.
+   *
+   * `beatsUcb` and `loopAttributableWin` are no longer the same test: on a
+   * library the learnability gate already called unlearnable, a nominal lead is
+   * noise and must not be promoted to a win. So a learnable row must convert its
+   * lead into a win, and an unlearnable row must never do so — which is the
+   * property that actually keeps the two cards agreeing.
+   */
   for (const entry of shown) {
+    const expectedWin = entry.beatsUcb === true && entry.classification !== "unlearnable";
     expect(
       `cross: ${entry.target} displayed win is loop-attributable`,
-      entry.beatsUcb === entry.loopAttributableWin,
-      `beatsUcb=${entry.beatsUcb} loopWin=${entry.loopAttributableWin}`,
+      entry.loopAttributableWin === expectedWin,
+      `beatsUcb=${entry.beatsUcb} class=${entry.classification} loopWin=${entry.loopAttributableWin}`,
     );
+    if (entry.classification === "unlearnable") {
+      expect(
+        `cross: ${entry.target} is unlearnable and shows no win`,
+        entry.loopAttributableWin === false,
+        `loopWin=${entry.loopAttributableWin} at ${entry.m5} vs ${entry.ucb}`,
+      );
+    }
   }
   // The warm start is a different comparison and must be carried separately, or
   // the holdout reads as a flat tie while the scoreboard reports +0.0828.

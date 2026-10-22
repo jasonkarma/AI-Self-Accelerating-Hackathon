@@ -86,7 +86,12 @@ export function DatasetStrip({
     { label: "binds", value: identity.antigen ?? dash },
     {
       label: "region optimised",
-      value: identity.cdr3Length === null ? dash : `CDR3-H3 · ${identity.cdr3Length} residues`,
+      // CDRH3, not "CDR3-H3": the latter fuses the Kabat loop label with the
+      // IMGT label and names a region that does not exist. This is the one
+      // place in the repo that had it wrong — every other reference (README,
+      // LOCKBOX_PREREGISTRATION.md, derive.ts, SequenceAlignment.tsx) already
+      // uses `CDRH3`, and the field itself is `cdr3Length`.
+      value: identity.cdr3Length === null ? dash : `CDRH3 · ${identity.cdr3Length} residues`,
       mono: true,
     },
     {

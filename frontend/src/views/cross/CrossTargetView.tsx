@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowRight, BadgeCheck, ChevronDown, Filter, ShieldQuestion, Sparkles, Star, Telescope, Trophy } from "lucide-react";
+import { AlertTriangle, ArrowRight, BadgeCheck, ChevronDown, Filter, ShieldQuestion, Sparkles, Telescope, Trophy } from "lucide-react";
 import { useMemo, useState } from "react";
 import type {
   AttributionPayload,
@@ -245,13 +245,24 @@ function Scoreboard({
        * gone from the scoreboard and lives only in the dataset funnel.
        */}
       <div className="px-5 pb-4 pt-1">
+        {/*
+         * Neutral, not gold.
+         *
+         * Gold is this page's "achievement" channel: the primary 1N8Z row and
+         * the learnable tiles above are gold because they are wins. This tile
+         * reports the opposite — a library where nothing separates — and
+         * dressing a null result in the win colour was the visual half of the
+         * same bug that printed "works" on this row. The warm-start figure stays
+         * gold because *that* number is a real separated effect; the tile itself
+         * must not read as a trophy.
+         */}
         <div
           className="rounded-xl border px-3 py-2.5"
-          style={{ borderColor: "var(--gold-line)", background: "var(--gold-soft)" }}
+          style={{ borderColor: "var(--border-strong)", background: "var(--panel-2)" }}
         >
           <div className="flex flex-wrap items-center gap-1.5">
-            <Star size={11} style={{ color: "var(--gold)" }} fill="var(--gold)" />
-            <span className="text-[11.5px] font-semibold" style={{ color: "var(--gold)" }}>
+            <ShieldQuestion size={11} className="ink-faint" />
+            <span className="text-[11.5px] font-semibold ink-dim">
               {lockbox ?? "the holdout"} · sealed before we ran anything, and it correctly shows no win
             </span>
             <InfoTip label="What the holdout measures">
@@ -973,7 +984,22 @@ function EliminationFunnel({ payload }: { payload: CrossTargetPayload }) {
 
               <div className="w-[118px] shrink-0 text-right">
                 <div className="mono text-[9.5px] font-semibold" style={{ color: accent }}>
-                  {attributable ? "works" : wins ? "ranks better*" : entry.verdict === "no-signal" ? "no signal here" : "—"}
+                  {/*
+                    * `no-signal` is tested before `wins`, not after.
+                    *
+                    * On an unlearnable library the nominal ρ comparison can land
+                    * on our side by noise — aayl51 at 16.7% is +0.0002 against a
+                    * paired p of 0.34 — so falling through to "ranks better*"
+                    * would print a six-decimal precision the data does not have
+                    * and contradict the holdout tile above.
+                    */}
+                  {entry.verdict === "no-signal"
+                    ? "no signal here"
+                    : attributable
+                      ? "works"
+                      : wins
+                        ? "ranks better*"
+                        : "—"}
                 </div>
                 <div className="mono text-[8px] leading-tight ink-faint">
                   {entry.verdict === "no-signal"

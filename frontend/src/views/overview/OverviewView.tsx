@@ -3,9 +3,9 @@ import type { BenchmarkPayload, CrossTargetPayload } from "../../types/report";
 import type { ConfigPayload, StatePayload } from "../../types/state";
 import type { TabKey } from "../../components/Header";
 import { DatasetStrip, InfoTip } from "../../components/Panel";
-import { ScaleMarker } from "../../components/Plain";
+import { HBarChart } from "../../components/charts";
 import { datasetIdentity, finalRho, pairedDelta } from "../../lib/derive";
-import { int, num } from "../../lib/format";
+import { int, methodMeta, num } from "../../lib/format";
 import { countOf, flukeOdds, gainWhole, librarySkipped, methodName, shareWhole } from "../../lib/plain";
 import type { Resource } from "../../hooks/useResource";
 
@@ -68,8 +68,8 @@ export function OverviewView({
         <div className="space-y-4">
             {/* ── The one-sentence task ─────────────────────────────────────────── */}
             <section className="panel hero-wash">
-                <div className="px-6 pb-6 pt-7">
-                    <div className="mb-3 flex flex-wrap items-center gap-2">
+                <div className="px-6 pb-4 pt-4">
+                    <div className="mb-2 flex flex-wrap items-center gap-2">
                         <span
                             className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10.5px] font-semibold"
                             style={{ background: "var(--gold-soft)", color: "var(--gold)", border: "1px solid var(--gold-line)" }}
@@ -85,20 +85,32 @@ export function OverviewView({
                      * A reader could finish the page unable to say what the
                      * numbers described.
                      */}
-                    <DatasetStrip identity={identity} className="mb-4 mt-1" />
+                    <DatasetStrip identity={identity} className="mb-3 mt-0.5" />
 
                     <h2 className="max-w-[34ch] text-[30px] font-semibold leading-[1.15] tracking-[-0.025em] ink sm:text-[38px]">
                         AI agents argue over{" "}
                         <span style={{ color: "var(--accent)" }}>which assay to run next</span> — and the result
                         decides who was right.
                     </h2>
-                    <p className="mt-3 max-w-[70ch] text-[13px] leading-relaxed ink-dim">
-                        Thousands of variants are possible. Real assays are expensive. The lab runs a debate between
-                        specialist AI agents, picks the five candidates most worth testing, and updates its beliefs from
-                        what comes back — round after round, without a human choosing the candidates.
+                    {/*
+                     * One line, not three.
+                     *
+                     * The paragraph restated three things the page already shows:
+                     * that assays are expensive (the 83% tile), that agents pick
+                     * the batch (the recorded run behind it), and that the
+                     * surrogate updates (the headline). Only the economics framing
+                     * is unique to it, and that survives in the first clause.
+                     *
+                     * `max-w` is deliberately gone: the old 70ch box wrapped this
+                     * to three lines on a laptop. Constraining width was working
+                     * against the one thing this sentence now has to do.
+                     */}
+                    <p className="mt-2 text-[13px] leading-relaxed ink-dim">
+                        Real assays are expensive, so the lab decides which assay to run next — round after round, with no
+                        human choosing the candidates.
                     </p>
 
-                    <div className="mt-5 grid gap-3 sm:grid-cols-3">
+                    <div className="mt-4 grid gap-3 sm:grid-cols-3">
                         <BigNumber
                             icon={<Target size={13} />}
                             value={gain === null ? "—" : gainWhole(gain)}
@@ -178,27 +190,67 @@ export function OverviewView({
                         className="border-t px-6 py-4"
                         style={{ borderColor: "var(--border)", background: "var(--panel-2)" }}
                     >
-                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                        <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
                             <span className="label text-[9.5px]">the headline number, on its own scale</span>
                             <span className="mono text-[10px] ink-faint">0 = guessing · 1 = perfect</span>
                         </div>
-                        <ScaleMarker
-                            ariaLabel={`Ranking accuracy: Virtual Lab ${num(final.m5_hybrid ?? null, 2)}, standard UCB ${num(final.m3_ucb ?? null, 2)}`}
-                            leftLabel="0 · guessing"
-                            rightLabel="1 · perfect"
-                            ticks={[
-                                { value: 0.25, label: "0.25" },
-                                { value: 0.5, label: "0.5" },
-                                { value: 0.75, label: "0.75" },
+                        {/*
+                         * Bars, not the marker track that used to be here.
+                         *
+                         * The track drew three dots on one 26px rule, so the entire
+                         * comparison had to be read off their horizontal positions, and
+                         * the values were then repeated in a legend row underneath —
+                         * two renderings of the same three numbers, neither of them
+                         * obviously "more is better". A bar's *length* carries the
+                         * quantity, so 0.66 against 0.34 is legible at a glance.
+                         *
+                         * The domain is pinned to [0, 1] rather than fitted to the data:
+                         * "guessing → perfect" is the frame the caption promises, and a
+                         * fitted domain would rescale between runs and destroy the
+                         * cross-run comparison this card exists to support.
+                         *
+                         * `showZeroLine` is cheap insurance rather than a present need:
+                         * this card reads the *final* checkpoint, where all three quoted
+                         * methods are positive (0.66 / 0.34 / 0.51). But `m4_fixed_prior`
+                         * is −0.0992 at q=5, so the rho curves genuinely do go negative
+                         * and a future edit that reads an earlier checkpoint must not
+                         * clamp a negative bar into looking like 0.
+                         */}
+                        <HBarChart
+                            data={[
+                                {
+                                    key: "m5_hybrid",
+                                    label: "Virtual Lab (ours)",
+                                    value: final.m5_hybrid ?? 0,
+                                    color: methodMeta("m5_hybrid").color,
+                                    hero: true,
+                                    negative: (final.m5_hybrid ?? 0) < 0,
+                                },
+                                {
+                                    key: "m3_ucb",
+                                    label: "Standard UCB",
+                                    value: final.m3_ucb ?? 0,
+                                    color: "#6366F1",
+                                    negative: (final.m3_ucb ?? 0) < 0,
+                                },
+                                {
+                                    key: "m2_greedy",
+                                    label: "Greedy",
+                                    value: final.m2_greedy ?? 0,
+                                    color: "#F59E0B",
+                                    negative: (final.m2_greedy ?? 0) < 0,
+                                },
                             ]}
-                            markers={[
-                                { label: "Virtual Lab (ours)", value: final.m5_hybrid ?? null, color: "#10B981", emphasis: true },
-                                { label: "Standard UCB", value: final.m3_ucb ?? null, color: "#6366F1" },
-                                { label: "Greedy", value: final.m2_greedy ?? null, color: "#F59E0B" },
-                            ]}
+                            format={(value) => value.toFixed(2)}
+                            domain={[0, 1]}
+                            labelWidth={132}
+                            rowHeight={26}
+                            showZeroLine
+                            zeroLabel="0 · guessing"
+                            ariaLabel={`Ranking accuracy out of 1 (0 = guessing, 1 = perfect): Virtual Lab ${num(final.m5_hybrid ?? null, 2)}, standard UCB ${num(final.m3_ucb ?? null, 2)}, greedy ${num(final.m2_greedy ?? null, 2)}`}
                         />
                         {vsM3 ? (
-                            <p className="mt-2 text-[10.5px] ink-faint">
+                            <p className="mt-1.5 text-[10.5px] ink-faint">
                                 Ours beat the standard UCB baseline on {countOf(vsM3.seedsWon, vsM3.n)} runs;{" "}
                                 {flukeOdds(vsM3.p)} that the result is chance.
                             </p>

@@ -1043,6 +1043,25 @@ export function evaluatedVerdicts(
       const beatsUcb = m5 !== null && ucb !== null ? m5 > ucb : null;
 
       /*
+       * The learnability gate has to reach the verdict, not just the scoreboard.
+       *
+       * `beatsUcb` is a bare float comparison, so a library the gate already
+       * certified as carrying no usable ranking signal can still register a
+       * "win" smaller than the printed precision. aayl51 at 16.7% coverage is
+       * exactly that case: 0.0234 against UCB's 0.0232 is +0.0002, both render
+       * as `0.02` at two decimals, the paired AUBQC test puts it at p = 0.34,
+       * and the strongest ordinary baseline (m4_fixed_prior, 0.0309) is ahead
+       * of us. Awarding that row a green "works" contradicts the holdout tile
+       * three panels above it, which says the same run has no signal for anyone.
+       *
+       * Using the partition here is not a post-hoc filter: `learnability_gate`
+       * is computed from the *baselines* before any M5 number exists, so it
+       * cannot have been chosen to flatter this result — and it is the same gate
+       * the scoreboard counts against, so the two cards cannot disagree.
+       */
+      const unlearnable = classification === "unlearnable";
+
+      /*
        * The count the headline is allowed to use.
        *
        * A single-round cell cannot attribute its ranking edge to the loop: both
@@ -1053,7 +1072,7 @@ export function evaluatedVerdicts(
        * it "the loop beat the baseline" would contradict the boundary tile
        * three panels above this one, which prints "3.07 = 3.07" for the same run.
        */
-      const loopAttributableWin = beatsUcb === true && rounds > 1;
+      const loopAttributableWin = beatsUcb === true && rounds > 1 && !unlearnable;
 
       return {
         target,
@@ -1071,20 +1090,29 @@ export function evaluatedVerdicts(
         verdict:
           classification === "single-round"
             ? "single-round"
-            : beatsUcb === true
-              ? "works"
-              : // A multi-round library where we fail to beat the baseline has no
-              // separable signal — that is the holdout's role, and it is a
-              // statement about the library, not a defect in the method.
-              "no-signal",
+            : unlearnable
+              ? // Checked before `beatsUcb` on purpose: on an unlearnable library
+              // a nominal lead is noise, and the row must say so rather than
+              // print a win the significance test does not support.
+              "no-signal"
+              : beatsUcb === true
+                ? "works"
+                : // A multi-round library where we fail to beat the baseline has no
+                // separable signal — that is the holdout's role, and it is a
+                // statement about the library, not a defect in the method.
+                "no-signal",
         warmStart: warm,
         note:
           rounds <= 1 && beatsUcb === true
             ? "ranks better on the same picks — with one round both methods query the identical batch, so the gap is the scoring rule, not the loop"
-            : beatsUcb === false && classification === "unlearnable"
+            : unlearnable
               ? // The holdout has no separable signal for anyone. Say that, rather
-              // than leaving a bare loss that reads as the method failing.
-              "no method separates here — the library declares no usable ranking signal, so every method ties at guessing. This is the control that makes the other results meaningful."
+              // than leaving a bare loss that reads as the method failing — and
+              // when the nominal comparison happens to land on our side, name
+              // the margin as noise instead of letting a +0.0002 become a win.
+              beatsUcb === true && m5 !== null && ucb !== null
+                ? `no usable ranking signal on this library, so a ${(m5 - ucb).toFixed(4)} edge over UCB is inside the noise${best ? ` — ${best.method} still leads at ${best.value.toFixed(2)}` : ""}. This is the control, not a win`
+                : "no method separates here — the library declares no usable ranking signal, so every method ties at guessing. This is the control that makes the other results meaningful."
               : strongerThanUcb
                 ? `${best.method} is stronger than m3_ucb on this library (${best.value.toFixed(2)} vs ${ucb.toFixed(2)}) — we do not beat it${note ? ` · ${note}` : ""}`
                 : note,
