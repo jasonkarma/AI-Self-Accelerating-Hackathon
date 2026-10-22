@@ -11,14 +11,20 @@ import { Badge, Callout, EmptyState, InfoTip, KpiTile, Note, Panel } from "../..
 import { HBarChart, LineChart } from "../../components/charts";
 import {
   bestMethod,
+  belowHoldoutFloor,
+  CAPABILITY_MIN_LOOPS,
+  capabilityCount,
   coverageCells,
   coverageLabelShort,
+  evaluatedTargetRoster,
+  evaluatedVerdicts,
   funnelStages,
   learnableRhoEvidence,
   METHODS,
   partitionClasses,
   rhoPairedTest,
   rhoRankAtCoverage,
+  rowMatchesTarget,
   strongestWarmStart,
   targetRow,
   TOGGLE_COVERAGE,
@@ -796,94 +802,362 @@ function EliminationFunnel({ payload }: { payload: CrossTargetPayload }) {
   const stages = funnelStages(metadata, metadata.min_nqual, payload.learnability_gate);
   const finalRows = stages[stages.length - 1]?.remaining ?? [];
   const total = Math.max(1, metadata.rows.length);
+  const roster = evaluatedTargetRoster(metadata, payload.learnability_gate.partition, stages);
+  const workable = capabilityCount(stages);
+  const boundaryIndex = stages.findIndex((stage) => stage.phase === "holdout");
+  const belowFloor = belowHoldoutFloor(metadata, payload.learnability_gate.partition);
+  /*
+   * The answer this card exists to give: the datasets the lab was actually run
+   * on. `m5_evaluated` is that set, and it is **five**, 1N8Z included.
+   *
+   * 1N8Z belongs here even though it is published under `reference_targets` on
+   * a different protocol (the frozen 35-test benchmark rather than a
+   * dynamic-sized cell). It is the primary dataset — 100 seeds, 416 distinct
+   * loops, 208 qualified — so excluding it from "where the lab applies" would
+   * answer the title with a list that omits the one dataset everything else is
+   * calibrated against. The protocol difference is a caveat on comparing its
+   * *budget*, not on whether the lab ran on it.
+   *
+   * The funnel below is the *method* that picked the holdout, and it is a
+   * different question: it disqualifies `1n8z`, `aayl49_ML` and `2fjg` from
+   * being blind tests precisely because they had already been run.
+   */
+  const measured = payload.learnability_gate.partition.m5_evaluated;
+  const verdicts = evaluatedVerdicts(payload, payload.learnability_gate.partition, "16.7pct");
+  // Counted as `loopAttributableWin`, not raw `beatsUcb`: the single-round cell
+  // ranks better on an identical batch, which the boundary tile on this page
+  // already describes as a structural tie. Counting it here would make the two
+  // cards disagree about the same run.
+  const beaten = verdicts.filter((entry) => entry.loopAttributableWin).length;
+  const rankedBetter = verdicts.filter((entry) => entry.beatsUcb === true).length;
+  const multiRound = verdicts.filter((entry) => entry.rounds > 1).length;
+  const tougherThanUcb = verdicts.filter(
+    (entry) => entry.bestBaselineMethod !== null && entry.bestBaselineMethod !== "m3_ucb" && entry.beatsBestBaseline === false,
+  );
+  const isPrimary = (target: string) => target === "1n8z";
 
   return (
     <Panel
-      eyebrow="Why you can trust the dataset choice"
-      title={`${metadata.rows.length} public datasets went in, ${finalRows.length} came out — chosen by rules written before we ran anything`}
-      lede="Only dataset metadata was used. Not one of our methods had been run on any of these targets when these rules were fixed."
+      eyebrow="Where the lab applies"
+      title={`Ran on ${measured.length} datasets · the loop beat standard UCB on ${beaten} · ran a closed loop on ${multiRound}`}
+      lede={`The lab was pointed at ${measured.length} libraries, out of the ${workable} in the corpus that are searchable at all. On ${beaten} of them the loop ranked candidates better than standard UCB — the comparison every other tab argues from. On ${multiRound} a closed loop actually ran; the fifth allows only a single round, and is reported as a boundary control rather than a result. No run here ever trained on the library it was scoring: every number is a fresh run of the same untuned rule.`}
       actions={
+        /*
+         * Two thresholds, and they are not the same number.
+         *
+         * `35` distinct loops is what makes a dataset a search problem for any
+         * method — that is the capability bar, and it is what produces the 7 in
+         * the headline. `${min_nqual}` (150) is the *holdout* floor: a dataset
+         * can be perfectly workable and still fail it, which is exactly what
+         * happens to 1mlc (67) and 2fjg (124).
+         *
+         * Quoting only the 150 was a small version of the same error the whole
+         * card had: stating a holdout rule as if it limited where the lab works.
+         */
         <span
           className="chip mono"
           style={{ borderColor: "var(--border)", color: "var(--ink-faint)" }}
-          title={`A dataset needs at least ${int(metadata.min_nqual)} usable candidates after de-duplication to be usable at all.`}
+          title={`A dataset is a search problem once it has at least ${CAPABILITY_MIN_LOOPS} distinct loops across 2 varying positions. The separate ${int(metadata.min_nqual)}-candidate floor below applies only to choosing a holdout.`}
         >
-          <Telescope size={9} /> at least {int(metadata.min_nqual)} usable candidates
+          <Telescope size={9} /> ≥ {CAPABILITY_MIN_LOOPS} distinct loops to search · ≥{" "}
+          {int(metadata.min_nqual)} to be a holdout
         </span>
       }
       flush
     >
-      <ol className="px-5">
-        {stages.map((stage, index) => {
-          const count = stage.remaining.length;
-          const width = Math.max(3, (count / total) * 100);
-          const isLast = index === stages.length - 1;
+      {/*
+       * The conclusion, stated before the method.
+       *
+       * These are the datasets the lab actually ran on, with the role each one
+       * plays. Naming them here is the point of the card: a reader who takes
+       * only the headline away should know the lab applies to four real
+       * antibody libraries covering the three possible outcomes, not that it
+       * "eliminated 16 datasets".
+       */}
+      {/*
+       * The comparison, not an inventory.
+       *
+       * The earlier version listed five datasets with a role label and no
+       * number, so the card asserted "we ran here" without showing what
+       * happened. Each row now carries the one comparison the whole tab rests
+       * on: our ranking accuracy versus the best ordinary baseline on that
+       * same library, plus how many rounds the protocol actually allowed —
+       * because a single round cannot demonstrate a loop that closes.
+       */}
+      <div className="space-y-1 px-5 pb-3">
+        <div className="flex items-center gap-2 pb-0.5">
+          <span className="label text-[9px] w-[86px] shrink-0">dataset</span>
+          <span className="label text-[9px] flex-1">ranking accuracy vs. standard UCB</span>
+          <span className="label text-[9px] w-[74px] shrink-0 text-right">verdict</span>
+        </div>
+        {verdicts.map((entry) => {
+          const corpusRow = metadata.rows.find((row) => rowMatchesTarget(row, entry.target));
+          const isPrimaryRow = isPrimary(entry.target);
+          const wins = entry.beatsUcb === true;
+          const attributable = entry.loopAttributableWin;
+          // Gold for the primary row, accent only where the *loop* is what won,
+          // muted for "ranks better but the batch was identical" and for ties.
+          const accent = isPrimaryRow
+            ? "var(--gold)"
+            : attributable
+              ? "var(--accent)"
+              : "var(--ink-faint)";
+          const border = isPrimaryRow
+            ? "var(--gold-line)"
+            : attributable
+              ? "var(--accent-line)"
+              : "var(--border)";
+          const background = isPrimaryRow
+            ? "var(--gold-soft)"
+            : attributable
+              ? "var(--accent-soft)"
+              : "var(--panel-2)";
+          // Bar geometry: the comparison is on the 0→1 accuracy scale both
+          // numbers already live on, so the two bars are directly readable.
+          // A negative baseline (2FJG's UCB) clamps to a sliver rather than
+          // rendering a backwards bar.
+          const scale = 1;
+          const m5Width = Math.max(2, Math.min(100, ((entry.m5 ?? 0) / scale) * 100));
+          const baseWidth = Math.max(2, Math.min(100, ((entry.ucb ?? 0) / scale) * 100));
           return (
-            <li key={stage.stage} className="border-t py-2 first:border-t-0" style={{ borderColor: "var(--border)" }}>
-              <div className="flex items-center gap-3">
-                <span className="mono w-5 shrink-0 text-[9.5px] ink-faint">{String(index + 1).padStart(2, "0")}</span>
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-baseline justify-between gap-x-2">
-                    <span className="text-[11.5px] font-medium ink">{stage.stage}</span>
-                    <span className="mono text-[10px] shrink-0" style={{ color: isLast ? "var(--accent)" : "var(--ink-dim)" }}>
-                      {count} left
-                      {stage.rejected.length ? <span style={{ color: "var(--danger)" }}> · −{stage.rejected.length}</span> : null}
-                    </span>
-                  </div>
-                  <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full" style={{ background: "var(--border)" }}>
-                    <div
-                      className="h-full rounded-full"
-                      style={{
-                        width: `${width}%`,
-                        background: isLast ? "linear-gradient(90deg,#10B981,#22D3EE)" : "var(--border-strong)",
-                      }}
-                    />
-                  </div>
-                  <div className="mt-1 flex flex-wrap items-center gap-1">
-                    <span className="text-[9.5px] ink-faint">{stage.detail}</span>
-                    {stage.rejected.slice(0, 12).map((row) => (
-                      <span
-                        key={row.target_id}
-                        className="mono rounded px-1 py-[1px] text-[8.5px]"
-                        style={{ background: "rgba(244,63,94,0.08)", color: "#FB7185" }}
-                        title={`${row.target_id}: ${stage.stage}`}
-                      >
-                        {row.target_id.replace(/_benchmarking_data(_trimmed)?$/, "")}
-                      </span>
-                    ))}
-                    {stage.rejected.length > 12 ? (
-                      <span className="mono text-[8.5px] ink-faint">+{stage.rejected.length - 12}</span>
-                    ) : null}
-                  </div>
+            <div
+              key={entry.target}
+              className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border px-2 py-1.5"
+              style={{ borderColor: border, background }}
+            >
+              <div className="w-[86px] shrink-0">
+                <div className="mono truncate text-[11px] font-semibold uppercase ink">
+                  {shortTarget(entry.target)}
+                  {isPrimaryRow ? <span style={{ color: "var(--gold)" }}> *</span> : null}
+                </div>
+                <div className="mono text-[8px] leading-tight ink-faint">
+                  {entry.rounds > 0 ? `${entry.rounds} round${entry.rounds === 1 ? "" : "s"}` : "—"}
+                  {corpusRow ? ` · ${int(corpusRow.N_qual)} usable` : ""}
                 </div>
               </div>
-            </li>
+
+              <div className="min-w-[140px] flex-1">
+                <div className="flex items-center gap-1">
+                  <span className="mono w-[26px] shrink-0 text-[8px] ink-faint">ours</span>
+                  <div className="h-2 flex-1 overflow-hidden rounded-sm" style={{ background: "var(--border)" }}>
+                    <div className="h-full rounded-sm" style={{ width: `${m5Width}%`, background: accent }} />
+                  </div>
+                  <span className="mono w-[34px] shrink-0 text-right text-[9px]" style={{ color: accent }}>
+                    {num(entry.m5, 2)}
+                  </span>
+                </div>
+                <div className="mt-0.5 flex items-center gap-1">
+                  <span className="mono w-[26px] shrink-0 text-[8px] ink-faint">best</span>
+                  <div className="h-2 flex-1 overflow-hidden rounded-sm" style={{ background: "var(--border)" }}>
+                    <div
+                      className="h-full rounded-sm"
+                      style={{ width: `${baseWidth}%`, background: "var(--border-strong)" }}
+                    />
+                  </div>
+                  <span className="mono w-[34px] shrink-0 text-right text-[9px] ink-dim">
+                    {num(entry.ucb, 2)}
+                  </span>
+                </div>
+              </div>
+
+              <div className="w-[118px] shrink-0 text-right">
+                <div className="mono text-[9.5px] font-semibold" style={{ color: accent }}>
+                  {attributable ? "the loop wins" : wins ? "ranks better*" : entry.beatsUcb === false ? "no better" : "—"}
+                </div>
+                <div className="mono text-[8px] leading-tight ink-faint">
+                  {entry.beatsBestBaseline === false && entry.bestBaselineMethod !== "m3_ucb"
+                    ? `vs UCB · ${methodName(entry.bestBaselineMethod ?? "")} leads`
+                    : "vs standard UCB"}
+                </div>
+              </div>
+
+              {entry.note ? (
+                <div className="w-full pl-[86px] text-[8.5px] leading-tight ink-faint">{entry.note}</div>
+              ) : null}
+            </div>
           );
         })}
-      </ol>
-
-      <div className="flex flex-wrap items-center gap-1.5 border-t px-5 py-2.5" style={{ borderColor: "var(--border)" }}>
-        <BadgeCheck size={12} style={{ color: "var(--accent)" }} />
-        <span className="text-[11px] ink-dim">The target that survived every rule:</span>
-        {finalRows.length ? (
-          finalRows.map((row) => (
-            <Badge
-              key={row.target_id}
-              color="#10B981"
-              title={`${row.modal_cdrh3_length_L}-residue loop, ${int(row.N_qual)} usable candidates, threshold ${row.threshold_source}`}
-            >
-              {row.target_id} · {row.modal_cdrh3_length_L} residues · {int(row.N_qual)} usable
-            </Badge>
-          ))
-        ) : (
-          <span className="mono text-[11px]" style={{ color: "#F59E0B" }}>
-            none — the rule eliminated every target
-          </span>
-        )}
-        <span className="mono ml-auto text-[9.5px] ink-faint">
-          <ArrowRight size={9} className="inline" /> {metadata.corpus}
-        </span>
       </div>
+      <p className="px-5 pb-2 text-[9.5px] leading-relaxed ink-faint">
+        <span style={{ color: "var(--gold)" }}>*</span> 1N8Z is the main dataset, measured by the frozen
+        35-test benchmark rather than a resized cell. The same rule, a different budget — its score is
+        comparable in method, not in spend.
+      </p>
+      {rankedBetter > beaten ? (
+        <p className="px-5 pb-2 text-[9.5px] leading-relaxed ink-faint">
+          <span className="text-[10px]">*</span> Ranks better than standard UCB, but not because of the loop. With
+          one round both methods query the identical batch, so best binder found is bit-identical between them
+          (shown as a tie in the scoreboard above) and the ranking gap comes from how each method orders the
+          library before any test is run. It is a real property of the scoring rule; it is not evidence the loop
+          learned anything.
+        </p>
+      ) : null}
+      {tougherThanUcb.length ? (
+        <p className="px-5 pb-3 text-[9.5px] leading-relaxed ink-faint">
+          Standard UCB is the comparator this page is built around, but it is not always the strongest ordinary
+          method.{" "}
+          {tougherThanUcb
+            .map((entry) => `${shortTarget(entry.target).toUpperCase()} (${methodName(entry.bestBaselineMethod ?? "")} ${num(entry.bestBaseline, 2)} vs ours ${num(entry.m5, 2)})`)
+            .join(" and ")}{" "}
+          — we do not lead there, and that row says so rather than quoting the easier number.
+        </p>
+      ) : null}
+
+      <details className="disclosure border-t px-5 py-2.5" style={{ borderColor: "var(--border)" }}>
+        <summary className="flex items-center gap-1.5 text-[11px] ink-dim">
+          <ChevronDown size={11} />
+          How we know the dataset choice wasn’t made after seeing results
+        </summary>
+        <ol className="pt-2">
+          {stages.map((stage, index) => {
+            const count = stage.remaining.length;
+            const width = Math.max(3, (count / total) * 100);
+            const isLast = index === stages.length - 1;
+            /*
+             * Two kinds of exclusion, two colours.
+             *
+             * `screen` means the dataset cannot answer the question at all — it
+             * collapses to 1-2 loops, or it is HER2 and therefore in-distribution.
+             * Red is honest there.
+             *
+             * `contamination` means the dataset is *already one of our results*.
+             * Painting `1n8z`, `aayl49_ML` and `2fjg` the same red as a
+             * degenerate 1-sequence CSV told the reader we had rejected the three
+             * targets whose wins are printed directly above this panel. They are
+             * excluded from the holdout because they are already on the board.
+             */
+            const isContamination = stage.kind === "contamination";
+            // The phase boundary is what separates "can we run on this?" from
+            // "may this be our blind test?". Without the divider the seven
+            // workable datasets and the one holdout read as one collapsing count.
+            const startsHoldoutPhase = index === boundaryIndex && boundaryIndex > 0;
+            return (
+              <>
+                {startsHoldoutPhase ? (
+                  <li
+                    className="border-t px-0 pt-2 pb-1"
+                    style={{ borderColor: "var(--border)" }}
+                  >
+                    <div className="flex flex-wrap items-baseline gap-x-2">
+                      <span className="label text-[9px]">Second question: may this be our blind test?</span>
+                      <span className="text-[9.5px] ink-faint">
+                        everything below here is a workable dataset, disqualified for the holdout rather than for the lab
+                      </span>
+                    </div>
+                  </li>
+                ) : null}
+                <li key={stage.stage} className="border-t py-2 first:border-t-0" style={{ borderColor: "var(--border)" }}>
+                  <div className="flex items-center gap-3">
+                    <span className="mono w-5 shrink-0 text-[9.5px] ink-faint">{String(index + 1).padStart(2, "0")}</span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-baseline justify-between gap-x-2">
+                        <span className="text-[11.5px] font-medium ink">{stage.stage}</span>
+                        <span className="mono text-[10px] shrink-0" style={{ color: isLast ? "var(--accent)" : "var(--ink-dim)" }}>
+                          {count} left
+                          {stage.rejected.length ? (
+                            <span style={{ color: isContamination ? "var(--ink-dim)" : "var(--danger)" }}>
+                              {" "}· {isContamination ? "already measured" : "−" + stage.rejected.length}
+                            </span>
+                          ) : null}
+                        </span>
+                      </div>
+                      <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full" style={{ background: "var(--border)" }}>
+                        <div
+                          className="h-full rounded-full"
+                          style={{
+                            width: `${width}%`,
+                            background: isLast ? "linear-gradient(90deg,#10B981,#22D3EE)" : "var(--border-strong)",
+                          }}
+                        />
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-1">
+                        <span className="text-[9.5px] ink-faint">{stage.detail}</span>
+                        {stage.rejected.slice(0, 12).map((row) => (
+                          <span
+                            key={row.target_id}
+                            className="mono rounded px-1 py-[1px] text-[8.5px]"
+                            style={
+                              isContamination
+                                ? { background: "var(--accent-soft)", color: "var(--accent)" }
+                                : { background: "rgba(244,63,94,0.08)", color: "#FB7185" }
+                            }
+                            title={
+                              isContamination
+                                ? `${row.target_id}: measured and reported above — excluded from the holdout only because it is already a result`
+                                : `${row.target_id}: ${stage.stage}`
+                            }
+                          >
+                            {row.target_id.replace(/_benchmarking_data(_trimmed)?$/, "")}
+                          </span>
+                        ))}
+                        {stage.rejected.length > 12 ? (
+                          <span className="mono text-[8.5px] ink-faint">+{stage.rejected.length - 12}</span>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                </li>
+              </>
+            );
+          })}
+        </ol>
+
+        <div className="flex flex-wrap items-center gap-1.5 border-t px-5 py-2.5" style={{ borderColor: "var(--border)" }}>
+          <BadgeCheck size={12} style={{ color: "var(--accent)" }} />
+          <span className="text-[11px] ink-dim">Of the workable datasets, this is the one that was still unread:</span>
+          {finalRows.length ? (
+            finalRows.map((row) => (
+              <Badge
+                key={row.target_id}
+                color="#10B981"
+                title={`${row.modal_cdrh3_length_L}-residue loop, ${int(row.N_qual)} usable candidates, threshold ${row.threshold_source}`}
+              >
+                {row.target_id} · {row.modal_cdrh3_length_L} residues · {int(row.N_qual)} usable
+              </Badge>
+            ))
+          ) : (
+            <span className="mono text-[11px]" style={{ color: "#F59E0B" }}>
+              none — the rule eliminated every target
+            </span>
+          )}
+          <span className="mono ml-auto text-[9.5px] ink-faint">
+            <ArrowRight size={9} className="inline" /> {metadata.corpus}
+          </span>
+        </div>
+
+        {/*
+       * One closing sentence, not a roster.
+       *
+       * The card's job is to answer "why is `aayl51` a clean test?" — it is not
+       * an inventory of everything we ran. Listing the measured targets again
+       * here would put the three learnable results in a panel about the holdout,
+       * which is the misalignment: a reader would try to reconcile two lists of
+       * datasets that answer different questions.
+       *
+       * What the reader does need is the one fact the funnel cannot say on its
+       * own: being excluded here is not a demotion for the excluded targets.
+       * `aayl49_ML`, `2fjg` and `1n8z` are excluded precisely *because* they are
+       * already wins — and `aayl51` is the only one that can be a blind test.
+       */}
+        <p className="flex items-start gap-1.5 border-t px-5 py-2.5 text-[10.5px] leading-relaxed ink-faint" style={{ borderColor: "var(--border)" }}>
+          <ShieldQuestion size={10} className="mt-[3px] shrink-0" />
+          <span>
+            Being left out of the second question is not a judgement on a target.{" "}
+            {roster.filter((entry) => entry.classification === "learnable" && entry.rejectedAt !== null).length} of
+            the excluded datasets are the learnable results above — they are workable, and their numbers are
+            reported. They are merely disqualified from being a <em>holdout</em>, because they already carry a
+            published number or because their pool is under the {int(metadata.min_nqual)}-candidate bar.
+            {belowFloor.length
+              ? ` ${belowFloor
+                .map((entry) => `${shortTarget(entry.target).toUpperCase()} (${int(entry.nQual)})`)
+                .join(" and ")} ${belowFloor.length === 1 ? "falls" : "fall"} under that bar and ${belowFloor.length === 1 ? "is" : "are"} reported as controls, not holdout evidence.`
+              : ""}{" "}
+            {finalRows.length === 1
+              ? "One target was still unread when the rules were fixed, and that is the one on this row."
+              : ""}
+          </span>
+        </p>
+      </details>
 
       <details className="disclosure border-t px-5 py-2.5" style={{ borderColor: "var(--border)" }}>
         <summary className="flex items-center gap-1.5 text-[11px] ink-dim">

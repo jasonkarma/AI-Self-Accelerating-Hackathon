@@ -51,6 +51,11 @@ import {
   rhoRankAtCoverage,
   rhoRatio,
   rowMatchesTarget,
+  belowHoldoutFloor,
+  canonicalTargetId,
+  capabilityCount,
+  evaluatedTargetRoster,
+  evaluatedVerdicts,
   slotRoles,
   slotSplit,
   targetRow,
@@ -461,6 +466,282 @@ function verifyCrossTarget(): void {
   expect("cross: four coverage datasets", datasets.length === 4, datasets.join(","));
   for (const dataset of datasets) {
     expect(`cross: ${dataset} has three coverage cells`, coverageCells(cross, dataset).length === 3, String(coverageCells(cross, dataset).length));
+  }
+
+  // ── The funnel is a holdout screen, not the evaluated set. ──
+  //
+  // The headline "17 went in, 1 came out" is only honest if the card also says
+  // that five datasets were measured and that four of them are rejected *by*
+  // those rules. Without this reconciliation the funnel reads as the evidence
+  // base, which contradicts the scoreboard directly above it.
+  // `stages` and `survivors` were computed above by the funnel section; reuse
+  // them so this reconciliation cannot describe a different funnel.
+  const metadata = cross.lockbox_metadata;
+  expect("cross: funnel leaves exactly one holdout", survivors.length === 1, String(survivors.length));
+  expect(
+    "cross: the survivor is the pre-registered holdout",
+    partition.unlearnable.includes(canonicalTargetId(survivors[0]?.target_id ?? "")),
+    survivors[0]?.target_id ?? "none",
+  );
+
+  // The headline is "the lab ran on N of 17", where N is the evaluated set —
+  // NOT the holdout count. Those differ by design: three evaluated targets are
+  // disqualified from being a holdout precisely because they were already run.
+  // Asserting the headline against `m5_evaluated` is what keeps the card from
+  // reverting to "17 went in, 1 came out", which read as one dataset of proof.
+  const capabilityStage = stages.filter((stage) => stage.phase === "capability").pop();
+  const expectedWorkable = metadata.rows.filter((row) => row.usable_as_search_problem).length;
+  // 1N8Z counts. It is published under `reference_targets` on the frozen 35-test
+  // protocol rather than as a resized cell, but it is the primary dataset and
+  // omitting it from "where the lab applies" would answer the title with a list
+  // that leaves out the one dataset every threshold was calibrated on.
+  const evaluatedAll = partition.m5_evaluated;
+  expect(
+    "cross: headline counts the evaluated targets",
+    evaluatedAll.length === 5,
+    evaluatedAll.join(","),
+  );
+  // The three headline counts must be reproducible from the data, and they must
+  // differ — otherwise the sentence collapses into one redundant claim.
+  const verdicts = evaluatedVerdicts(cross, partition, "16.7pct");
+  expect(
+    "cross: verdicts cover every evaluated target",
+    verdicts.length === evaluatedAll.length,
+    `${verdicts.length} vs ${evaluatedAll.length}`,
+  );
+  // Headline: "Ran on 5 · beat standard UCB on 4 · closed loop on 4".
+  // The comparator is **standard UCB**, matching the wording every other panel
+  // on this tab uses. The stronger-of-M1-M4 comparison is carried per row, not
+  // folded into this count.
+  const beaten = verdicts.filter((entry) => entry.loopAttributableWin).length;
+  const rankedBetter = verdicts.filter((entry) => entry.beatsUcb === true).length;
+  const multiRound = verdicts.filter((entry) => entry.rounds > 1).length;
+  expect("cross: headline loop-win count is 3", beaten === 3, String(beaten));
+  expect("cross: headline closed-loop count is 4", multiRound === 4, String(multiRound));
+  expect(
+    "cross: the first two headline counts differ",
+    evaluatedAll.length > beaten,
+    `${evaluatedAll.length} ran vs ${beaten} loop wins`,
+  );
+
+  /*
+   * The two cards must not disagree about the same run.
+   *
+   * "IT WORKS ON OTHER TARGETS" prints, for the single-round control, that
+   * best-binder-found is identical between our method and standard UCB (1MLC:
+   * 3.0663 = 3.0663, paired p = 1.0). If the verdict row below it counted that
+   * same cell as a win, a reader comparing the two panels would find a direct
+   * contradiction. `loopAttributableWin` exists to prevent exactly that, and
+   * this asserts the exclusion rather than trusting the flag.
+   */
+  for (const entry of verdicts) {
+    if (entry.rounds > 1) continue;
+    expect(
+      `cross: ${entry.target} single-round cell is not counted as a loop win`,
+      entry.loopAttributableWin === false,
+      String(entry.loopAttributableWin),
+    );
+    // And the structural tie must be real, not assumed: the paired
+    // best-binder test on that cell has to be exactly zero.
+    const cell = cross.targets.find(
+      (row) => row.dataset === entry.target && row.coverage_label === "16.7pct",
+    );
+    if (!cell) continue;
+    expect(
+      `cross: ${entry.target} single-round best-binder is a structural tie`,
+      close(cell.aubqc.m5_hybrid, cell.aubqc.m3_ucb, 1e-9) &&
+      close(cell.paired.m5_hybrid_minus_m3_ucb.p_value, 1, 1e-9),
+      `Δ ${cell.aubqc.m5_hybrid - cell.aubqc.m3_ucb}, p ${cell.paired.m5_hybrid_minus_m3_ucb.p_value}`,
+    );
+  }
+  // A row may rank better without the loop being responsible, but the surface
+  // must then say so — that is what the asterisk footnote keys off.
+  expect(
+    "cross: one row ranks better without loop attribution",
+    rankedBetter > beaten,
+    `${rankedBetter} ranked better vs ${beaten} attributed`,
+  );
+  // Every row must carry the UCB number it is compared against.
+  for (const entry of verdicts) {
+    expect(
+      `cross: ${entry.target} carries its UCB comparator`,
+      entry.ucb !== null,
+      "no m3_ucb value",
+    );
+    if (entry.beatsUcb === null) continue;
+    expect(
+      `cross: ${entry.target} verdict matches its own numbers`,
+      entry.beatsUcb === (entry.m5 !== null && entry.ucb !== null && entry.m5 > entry.ucb),
+      `${entry.m5} vs ${entry.ucb}`,
+    );
+  }
+  // The only dataset that must not beat UCB is the holdout.
+  const notBeaten = verdicts.filter((entry) => entry.beatsUcb === false).map((e) => e.target);
+  expect(
+    "cross: exactly one dataset fails to beat UCB",
+    notBeaten.length === 1,
+    notBeaten.join(","),
+  );
+  expect(
+    "cross: the dataset that fails to beat UCB is the holdout",
+    notBeaten.length === 1 && partition.unlearnable.includes(notBeaten[0]!),
+    notBeaten.join(","),
+  );
+  // A single-round cell must never be counted as showing a closed loop.
+  for (const entry of verdicts) {
+    if (entry.classification !== "single-round") continue;
+    expect(
+      `cross: ${entry.target} is single-round`,
+      entry.rounds <= 1,
+      String(entry.rounds),
+    );
+  }
+  // The stronger-than-UCB caveat must be data-driven: where a non-UCB baseline
+  // beats us, that fact is on the row, so the 4 cannot read as "we lead on
+  // everything".
+  const tougher = verdicts.filter(
+    (entry) => entry.bestBaselineMethod !== null && entry.bestBaselineMethod !== "m3_ucb" && entry.beatsBestBaseline === false,
+  );
+  expect(
+    "cross: a row records when a non-UCB baseline leads us",
+    tougher.length >= 1,
+    "1MLC's M2 loss is not surfaced",
+  );
+  for (const entry of tougher) {
+    expect(
+      `cross: ${entry.target} names the baseline that leads`,
+      entry.bestBaselineMethod !== null && entry.bestBaseline !== null,
+      "no baseline recorded",
+    );
+  }
+  expect(
+    "cross: the evaluated set includes the primary dataset",
+    evaluatedAll.includes("1n8z"),
+    evaluatedAll.join(","),
+  );
+  expect(
+    "cross: 1N8Z is published as a reference row with its score",
+    (cross.reference_targets.find((row) => row.dataset === "1n8z")?.spearman_rho_curves.length ?? 0) > 0,
+    "no ρ series on the reference row",
+  );
+  // Every evaluated target must be workable — the lab cannot have run on a
+  // dataset that fails the capability test, and if it ever did the headline
+  // would be claiming reach it does not have.
+  for (const target of evaluatedAll) {
+    const corpusRow = metadata.rows.find((row) => rowMatchesTarget(row, target));
+    expect(
+      `cross: evaluated ${target} is a workable search problem`,
+      corpusRow?.usable_as_search_problem === true,
+      corpusRow ? `usable=${corpusRow.usable_as_search_problem}` : "no corpus row",
+    );
+  }
+  // The evaluated set is a strict subset of the workable set: we ran on some of
+  // what is workable, and the holdout is one of those.
+  expect(
+    "cross: evaluated targets are a subset of the workable set",
+    evaluatedAll.length <= expectedWorkable,
+    `${evaluatedAll.length} evaluated vs ${expectedWorkable} workable`,
+  );
+  expect(
+    "cross: capability count equals the usable rows",
+    capabilityCount(stages) === expectedWorkable,
+    `${capabilityCount(stages)} vs ${expectedWorkable}`,
+  );
+  expect(
+    "cross: capability phase ends on the usable set",
+    capabilityStage !== undefined && capabilityStage.remaining.length === expectedWorkable,
+    `${capabilityStage?.remaining.length} vs ${expectedWorkable}`,
+  );
+  // The holdout must itself be one of the evaluated targets, or the funnel is
+  // certifying a dataset the lab never ran on.
+  expect(
+    "cross: the holdout was actually measured",
+    survivors.every((row) => partition.m5_evaluated.includes(canonicalTargetId(row.target_id))),
+    survivors.map((row) => row.target_id).join(","),
+  );
+  // Every capability-passing dataset must clear the two structural tests.
+  for (const row of capabilityStage?.remaining ?? []) {
+    expect(
+      `cross: ${row.target_id} passing capability is a real search problem`,
+      row.usable_as_search_problem && row.unique_cdrh3_pool_size >= 35,
+      `${row.unique_cdrh3_pool_size} loops`,
+    );
+  }
+
+  const roster = evaluatedTargetRoster(metadata, partition, stages);
+  expect(
+    "cross: roster covers every evaluated target",
+    roster.length === partition.m5_evaluated.length,
+    `${roster.length} vs ${partition.m5_evaluated.length}`,
+  );
+  expect(
+    "cross: the holdout is the only survivor in the roster",
+    roster.filter((entry) => entry.rejectedAt === null).length === 1,
+    String(roster.filter((entry) => entry.rejectedAt === null).length),
+  );
+  expect(
+    "cross: roster survivor is the funnel survivor",
+    canonicalTargetId(roster.find((entry) => entry.rejectedAt === null)?.target ?? "") ===
+    canonicalTargetId(survivors[0]?.target_id ?? ""),
+    `${roster.find((entry) => entry.rejectedAt === null)?.target} vs ${survivors[0]?.target_id}`,
+  );
+  // Every rejected entry must name a real stage, never a blank.
+  for (const entry of roster) {
+    if (entry.rejectedAt === null) continue;
+    expect(
+      `cross: roster ${entry.target} names the stage that removed it`,
+      stages.some((stage) => stage.stage === entry.rejectedAt),
+      entry.rejectedAt ?? "none",
+    );
+  }
+
+  // ── Exclusion is not rejection: the two stage kinds stay distinct. ──
+  //
+  // The card's closing sentence asserts that the learnable targets are excluded
+  // "because they already carry a published number, not because anything is
+  // wrong with them". That claim is only true while the stage doing the
+  // excluding is tagged `contamination` — if a future edit re-tagged that stage
+  // as a screen, the copy would become a lie and nothing else would notice.
+  const contaminationStages = stages.filter((stage) => stage.kind === "contamination");
+  expect("cross: a contamination stage exists", contaminationStages.length > 0, "none tagged");
+  // A learnable target is never excluded for being *bad* — it is excluded either
+  // because it is already on the board (`contamination`) or because its pool is
+  // below the holdout floor. The closing sentence must not collapse those two
+  // into one claim: 2FJG at 124 candidates is a legitimate control, but it is
+  // not excluded "only because it already carries a number" — it misses the
+  // 150-candidate bar as well. Assert the real reason per target.
+  for (const entry of roster) {
+    if (entry.classification !== "learnable" || entry.rejectedAt === null) continue;
+    if (entry.target === "1n8z") continue; // measured by a different artifact
+    const deciding = contaminationStages.some((stage) => stage.stage === entry.rejectedAt);
+    const corpusRow = metadata.rows.find((row) => rowMatchesTarget(row, entry.target));
+    const underFloor = (corpusRow?.N_qual ?? Number.POSITIVE_INFINITY) < metadata.min_nqual;
+    expect(
+      `cross: learnable ${entry.target} is excluded for contamination or the pool floor`,
+      deciding || underFloor,
+      `removed at '${entry.rejectedAt}', which is neither contamination nor under the floor`,
+    );
+  }
+  // ...and the reverse: a genuinely degenerate dataset must never be recoloured
+  // as "already measured", which would hide a real exclusion.
+  for (const stage of contaminationStages) {
+    for (const row of stage.rejected) {
+      expect(
+        `cross: ${row.target_id} tagged contamination is actually usable`,
+        row.usable_as_search_problem,
+        "a degenerate row was tagged as contamination",
+      );
+    }
+  }
+  // The floor caveat exists because two measured targets sit under it — if that
+  // stops being true the paragraph disappears, so assert the data, not the copy.
+  const floorRows = belowHoldoutFloor(metadata, partition);
+  for (const entry of floorRows) {
+    expect(
+      `cross: ${entry.target} is genuinely below the holdout floor`,
+      entry.nQual < metadata.min_nqual,
+      `${entry.nQual} vs ${metadata.min_nqual}`,
+    );
   }
 
   // ── The budget switch. ──

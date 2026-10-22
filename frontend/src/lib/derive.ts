@@ -676,6 +676,17 @@ export function rowMatchesTarget(row: LockboxRow, targetId: string): boolean {
  * * **"Survived the funnel" is not "not yet scored".** `aayl51` is both the
  *   pre-registered holdout and a measured cell; the two questions stay separate.
  */
+/**
+ * The structural bar for "is this a search problem at all".
+ *
+ * Mirrors the rule applied by the capability stage below: at least this many
+ * distinct CDRH3 loops, over at least two varying positions. It is deliberately
+ * separate from `min_nqual` (the holdout floor) because the two answer
+ * different questions and a dataset can clear the first while failing the
+ * second — `1mlc` has 67 usable candidates and is still a real search problem.
+ */
+export const CAPABILITY_MIN_LOOPS = 35;
+
 export function funnelStages(
   metadata: LockboxMetadata,
   minNQual: number,
@@ -686,6 +697,34 @@ export function funnelStages(
   remaining: LockboxRow[];
   rejected: LockboxRow[];
   note?: string;
+  /**
+   * Why this stage removes a row. The distinction is the whole point of the
+   * panel, and conflating it is what made the card contradict the scoreboard:
+   *
+   * * `screen` — the dataset cannot be used by *anyone*: it collapses to 1-2
+   *   distinct loops, is HER2 (in-distribution, so it proves nothing), or is a
+   *   near-duplicate of a pool already in play. A red "removed" is honest here.
+   * * `contamination` — the dataset is perfectly good and **is one of our
+   *   results**. It is excluded from the holdout precisely because it was
+   *   already run. Rendering that as a rejection says "we threw out 2FJG" when
+   *   2FJG is a headline win printed above this panel.
+   */
+  kind: "screen" | "contamination";
+  /**
+   * Which question this stage answers.
+   *
+   * `capability` — *can the lab work on this dataset at all?* A library of one
+   *   sequence is not a search problem for any method. This is the part of the
+   *   funnel that speaks to whether the lab is applicable.
+   * `holdout` — *may this dataset serve as a blind test?* These stages take a
+   *   perfectly workable dataset and disqualify it from being the holdout
+   *   because it is already ours, is a near-duplicate, or is in-distribution.
+   *
+   * The card's headline used to read "17 went in, 1 came out", which answered
+   * the second question while sounding like the first. Grouping the stages makes
+   * the split explicit: 7 datasets are workable, 1 is a clean holdout.
+   */
+  phase: "capability" | "holdout";
 }> {
   const rows = metadata.rows;
   const overlapOf = (targetId: string): number => {
@@ -713,24 +752,39 @@ export function funnelStages(
       detail: "enumerated from metadata alone",
       remaining: rows,
       rejected: [],
+      kind: "screen",
+      phase: "capability",
     },
     {
       stage: "Is it actually a search problem?",
-      detail: "needs at least 35 distinct CDRH3 loops and 2 positions that vary",
+      detail: `needs at least ${CAPABILITY_MIN_LOOPS} distinct CDRH3 loops and 2 positions that vary`,
       remaining: usable,
       rejected: notUsable,
+      kind: "screen",
+      phase: "capability",
     },
     {
       stage: "Enough usable candidates",
       detail: `at least ${minNQual} survivors after a fixed median cut-off`,
       remaining: candidates,
       rejected: belowFloor,
+      // Below the floor is a *size* limit, not a defect: the lab still runs on
+      // these, it just cannot use them as a like-for-like holdout. They are
+      // therefore capability-passing but holdout-failing, which is why this
+      // stage belongs to `holdout` and still paints its rejects in red.
+      kind: "screen",
+      phase: "holdout",
     },
     {
       stage: "Not already solved by us",
       detail: "no previous published result on any method",
       remaining: fresh,
       rejected: alreadyScored,
+      // These are our published results. They are excluded from the holdout
+      // because they are already on the board, not because anything is wrong
+      // with them — the view must not paint them as failures.
+      kind: "contamination",
+      phase: "holdout",
     },
   ];
 
@@ -740,6 +794,8 @@ export function funnelStages(
       detail: "overlap is measured from the sequences themselves, not from names",
       remaining: distinct,
       rejected: overlapping,
+      kind: "contamination",
+      phase: "holdout",
       note: overlapping.length
         ? `Overlap is a measured quantity (learnability gate), not a naming rule: ${overlapping
           .map((row) => `${canonicalTargetId(row.target_id)} ${overlapOf(row.target_id).toFixed(2)}%`)
@@ -753,6 +809,8 @@ export function funnelStages(
     detail: "HER2 is the source of the starting antibody, so it proves nothing",
     remaining,
     rejected: her2,
+    kind: "screen",
+    phase: "holdout",
     note: her2.some((row) => !row.is_her2)
       ? "One row is rejected on its filename rather than its own `is_her2` flag: the audit compares the trimmed CSV id against the short target id, so the flag reads false for the HER2 control. The UI matches the canonical id and says so."
       : undefined,
@@ -761,10 +819,288 @@ export function funnelStages(
   return stages;
 }
 
+/**
+ * Where the funnel stops answering "can the lab work on this?" and starts
+ * answering "may this be the blind test?".
+ *
+ * The last capability stage's `remaining` set is the workable universe: every
+ * dataset that is a genuine search problem. Everything after that re-filters an
+ * already-usable set. The card needs this boundary to state "the lab applies to
+ * N of 17 datasets" without conflating it with the holdout count.
+ */
+export function capabilityCount(stages: ReturnType<typeof funnelStages>): number {
+  const capabilityStages = stages.filter((stage) => stage.phase === "capability");
+  return (
+    capabilityStages[capabilityStages.length - 1]?.remaining.filter(
+      (row) => row.usable_as_search_problem,
+    ).length ?? 0
+  );
+}
+
 function isHer2Row(row: LockboxRow): boolean {
   if (row.is_her2) return true;
   const haystack = `${row.target_id} ${row.antigen}`.toLowerCase();
   return haystack.includes("her2");
+}
+
+/**
+ * Reconcile the funnel's survivor with the set that was actually measured.
+ *
+ * The 17→1 funnel answers one narrow question: **which dataset is a clean,
+ * pre-registered holdout?** It is not the list of datasets the benchmark ran on.
+ * Five targets were measured, and only one of them (`aayl51`) survives the
+ * holdout rules — the other four are rejected *by* those rules, because they were
+ * already scored (`1n8z`, `aayl49_ML`, `2fjg`) or fall below the 150-candidate
+ * floor (`2fjg` at 124, `1mlc` at 67).
+ *
+ * Presenting "1 came out" beside a scoreboard that reports three learnable
+ * targets reads as though one dataset were the whole evidence base. This roster
+ * exists so the two questions are answered in the same place, with the stage that
+ * decided each one named rather than left to inference.
+ */
+export function evaluatedTargetRoster(
+  metadata: LockboxMetadata,
+  partition: LearnabilityGate["partition"],
+  stages: ReturnType<typeof funnelStages>,
+): Array<{
+  target: string;
+  label: string;
+  /** The funnel stage that removed it, or `null` if it survived every rule. */
+  rejectedAt: string | null;
+  /** Why that stage removed it, in the stage's own words. */
+  reason: string | null;
+  classification: "learnable" | "unlearnable" | "single-round";
+}> {
+  const finalStage = stages[stages.length - 1];
+  const survivors = new Set((finalStage?.remaining ?? []).map((row) => canonicalTargetId(row.target_id)));
+  const lookup = new Map<string, { stage: string; detail: string }>();
+  for (const stage of stages) {
+    for (const row of stage.rejected) {
+      const key = canonicalTargetId(row.target_id);
+      // The first stage that rejects a row is the one that decided it.
+      if (!lookup.has(key)) lookup.set(key, { stage: stage.stage, detail: stage.detail });
+    }
+  }
+
+  return partition.m5_evaluated.map((target) => {
+    const canonical = canonicalTargetId(target);
+    const corpusRow = metadata.rows.find((entry) => rowMatchesTarget(entry, target));
+    const removed = lookup.get(canonical);
+    const classification = partition.learnable_multiround.includes(target)
+      ? ("learnable" as const)
+      : partition.single_round.includes(target)
+        ? ("single-round" as const)
+        : ("unlearnable" as const);
+    return {
+      target,
+      label: corpusRow?.antigen ?? target,
+      rejectedAt: survivors.has(canonical) ? null : (removed?.stage ?? null),
+      reason: survivors.has(canonical) ? null : (removed?.detail ?? null),
+      classification,
+    };
+  });
+}
+
+/**
+ * One verdict per dataset the lab actually ran on: did the loop rank the
+ * library better than the strongest ordinary baseline?
+ *
+ * This exists because the surface must state **4 of 5** without borrowing the
+ * artifact's internal vocabulary. `learnable_multiround` is the field name in
+ * `learnability_gate.json`, but "learns" on screen invites the one misreading
+ * that would invalidate the whole tab: that the model was *trained* on these
+ * libraries before being scored. It wasn't — every number here is a fresh run
+ * of the same untuned loop. So the copy says "beat the standard baseline",
+ * which is exactly what was measured, and the token stays in the tooltip.
+ *
+ * `baseline` is the best of M1-M4 on that cell, not M3 alone, so a win cannot
+ * be an artefact of picking a weak comparator after the fact.
+ */
+export interface EvaluatedVerdict {
+  target: string;
+  label: string;
+  classification: "learnable" | "unlearnable" | "single-round";
+  /** Rounds the protocol allowed. `1` means adaptation cannot be observed. */
+  rounds: number;
+  m5: number | null;
+  /**
+   * **Standard UCB** — the comparator the headline quotes.
+   *
+   * The tab's claim is "beats standard UCB", so that is the number the count
+   * uses. It is the comparison every other panel on this page also makes, which
+   * keeps the card consistent with the scoreboard above it.
+   */
+  ucb: number | null;
+  beatsUcb: boolean | null;
+  ucbDelta: number | null;
+  /**
+   * The strongest of M1-M4 on the same cell, and its name.
+   *
+   * Reported separately because it is sometimes *stronger than UCB* — on 1MLC,
+   * M2 greedy reaches 0.3899 against our 0.3814 while UCB only reaches 0.3541.
+   * Quoting UCB alone there would be true and misleading at once, so the row
+   * names the tougher comparator rather than quietly omitting it.
+   */
+  bestBaseline: number | null;
+  bestBaselineMethod: string | null;
+  beatsBestBaseline: boolean | null;
+  /**
+   * Whether the **loop** produced the ranking advantage.
+   *
+   * `beatsUcb` alone is not enough on a single-round cell. At R=1 both methods
+   * select the same batch, so best-binder-found is bit-identical (1MLC:
+   * 3.0663 = 3.0663, paired p exactly 1.0). The ρ gap that remains comes from
+   * the two *scoring* rules ordering the library before any test happens — a
+   * property of the surrogate, not of a closed loop. Counting it as a win would
+   * contradict the boundary tile on this same page, which shows "3.07 = 3.07"
+   * for that exact run.
+   */
+  loopAttributableWin: boolean;
+  note: string | null;
+}
+
+export function evaluatedVerdicts(
+  cross: CrossTargetPayload,
+  partition: LearnabilityGate["partition"],
+  coverageLabel: string,
+): EvaluatedVerdict[] {
+  const reference = cross.reference_targets[0];
+
+  function classify(target: string): EvaluatedVerdict["classification"] {
+    if (partition.learnable_multiround.includes(target)) return "learnable";
+    if (partition.single_round.includes(target)) return "single-round";
+    return "unlearnable";
+  }
+
+  /**
+   * The best **ordinary** method on a cell — M1-M4 only.
+   *
+   * `bestMethod` searches all five including ours, so using it here would make
+   * the comparator identical to the performer on every row where we lead, and
+   * `m5 > baseline` would be false everywhere. The comparison has to be against
+   * the strongest *baseline*, which is the claim the tab makes.
+   */
+  function bestBaseline(record: Record<string, number | null>): { method: string; value: number } | null {
+    let best: { method: string; value: number } | null = null;
+    for (const method of METHODS) {
+      if (method === "m5_hybrid") continue;
+      const value = record[method];
+      if (typeof value !== "number" || !Number.isFinite(value)) continue;
+      if (best === null || value > best.value) best = { method, value };
+    }
+    return best;
+  }
+
+  return partition.m5_evaluated.map((target) => {
+    const classification = classify(target);
+
+    function build(
+      record: Record<string, number | null>,
+      rounds: number,
+      label: string,
+      note: string | null,
+    ): EvaluatedVerdict {
+      const m5 = record.m5_hybrid ?? null;
+      const ucb = record.m3_ucb ?? null;
+      const best = bestBaseline(record);
+      /*
+       * The tougher comparator is called out only when it *actually beats us*.
+       *
+       * Two conditions, and the second is the one that matters: a non-UCB
+       * baseline leading UCB is not a problem for us, it is the normal case —
+       * M2 greedy leads UCB on this corpus almost everywhere, and on 1N8Z,
+       * AAYL49_ML and 2FJG we still beat M2's number. Flagging those as "we do
+       * not beat it" would understate three genuine wins. The note belongs only
+       * where the strongest ordinary method is ahead of our score, which is
+       * 1MLC (M2 0.3899 vs our 0.3814).
+       */
+      const strongerThanUcb =
+        best !== null && ucb !== null && m5 !== null &&
+        best.method !== "m3_ucb" && best.value > ucb && best.value > m5;
+      const beatsUcb = m5 !== null && ucb !== null ? m5 > ucb : null;
+
+      /*
+       * The count the headline is allowed to use.
+       *
+       * A single-round cell cannot attribute its ranking edge to the loop: both
+       * methods query the identical batch, so every measured outcome of *acting*
+       * on the library — best binder found, paired p — is identical. What is
+       * left is how each surrogate ordered the library up front. That is a real
+       * property of our scoring rule and it is reported on the row, but calling
+       * it "the loop beat the baseline" would contradict the boundary tile
+       * three panels above this one, which prints "3.07 = 3.07" for the same run.
+       */
+      const loopAttributableWin = beatsUcb === true && rounds > 1;
+
+      return {
+        target,
+        label,
+        classification,
+        rounds,
+        m5,
+        ucb,
+        beatsUcb,
+        ucbDelta: m5 !== null && ucb !== null ? m5 - ucb : null,
+        bestBaseline: best?.value ?? null,
+        bestBaselineMethod: best?.method ?? null,
+        beatsBestBaseline: m5 !== null && best ? m5 > best.value : null,
+        loopAttributableWin,
+        note:
+          rounds <= 1 && beatsUcb === true
+            ? "ranks better on the same picks — with one round both methods query the identical batch, so the gap is the scoring rule, not the loop"
+            : strongerThanUcb
+              ? `${best.method} is stronger than m3_ucb on this library (${best.value.toFixed(2)} vs ${ucb.toFixed(2)}) — we do not beat it${note ? ` · ${note}` : ""}`
+              : note,
+      };
+    }
+
+    // 1N8Z is the reference row: it publishes ρ curves rather than a
+    // `spearman_rho_at_last_checkpoint` block, and only at the frozen rate.
+    if (target === "1n8z" && reference) {
+      const last = reference.spearman_rho_curves[reference.spearman_rho_curves.length - 1];
+      return build(
+        (last ?? {}) as unknown as Record<string, number | null>,
+        reference.checkpoints.length - 1,
+        reference.label,
+        "frozen 35-test protocol · different budget from the resized cells",
+      );
+    }
+
+    const row =
+      cross.targets.find(
+        (entry) => entry.dataset === target && entry.coverage_label === coverageLabel,
+      ) ?? cross.targets.find((entry) => entry.dataset === target);
+    const rounds = row?.campaign_protocol.rounds ?? 0;
+    return build(
+      (row?.spearman_rho_at_last_checkpoint ?? {}) as unknown as Record<string, number | null>,
+      rounds,
+      row?.label ?? target,
+      rounds <= 1 ? "one round — the loop has no second round to act on" : null,
+    );
+  });
+}
+
+/**
+ * The evaluated targets the holdout floor would have excluded.
+ *
+ * These are measured and published, but they are **not** holdout evidence: their
+ * probe budget is sized to a pool the pre-registration called too small. The card
+ * says so, because "why did you run on 124 candidates when your rule says 150"
+ * is the first question a reader who takes the funnel seriously will ask.
+ */
+export function belowHoldoutFloor(
+  metadata: LockboxMetadata,
+  partition: LearnabilityGate["partition"],
+): Array<{ target: string; nQual: number; floor: number }> {
+  const out: Array<{ target: string; nQual: number; floor: number }> = [];
+  for (const target of partition.m5_evaluated) {
+    const row = metadata.rows.find((entry) => rowMatchesTarget(entry, target));
+    if (!row) continue;
+    if (row.N_qual < metadata.min_nqual) {
+      out.push({ target, nQual: row.N_qual, floor: metadata.min_nqual });
+    }
+  }
+  return out;
 }
 
 
