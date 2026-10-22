@@ -1,5 +1,5 @@
 import { AlertTriangle, ArrowRight, BadgeCheck, ChevronDown, Filter, ShieldQuestion, Sparkles, Telescope, Trophy } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import type {
   AttributionPayload,
   BenchmarkPayload,
@@ -7,7 +7,7 @@ import type {
   CrossTargetRow,
   LockboxRow,
 } from "../../types/report";
-import { Badge, Callout, EmptyState, InfoTip, KpiTile, Note, Panel } from "../../components/Panel";
+import { Badge, Callout, EmptyState, InfoTip, Note, Panel } from "../../components/Panel";
 import { HBarChart, LineChart } from "../../components/charts";
 import {
   bestMethod,
@@ -94,7 +94,7 @@ export function CrossTargetView({
        * scrolling past the explorer first.
        */}
       <EliminationFunnel payload={payload} />
-      <TargetExplorer payload={payload} attribution={attribution.data} />
+      <TargetExplorer payload={payload} attribution={attribution.data} benchmark={benchmark.data} />
       <ArchitectureNote payload={payload} />
     </div>
   );
@@ -317,15 +317,27 @@ function Scoreboard({
 function TargetExplorer({
   payload,
   attribution,
+  benchmark,
 }: {
   payload: CrossTargetPayload;
   attribution: AttributionPayload | null;
+  benchmark: BenchmarkPayload | null;
 }) {
   const partition = payload.learnability_gate.partition;
   const reference = payload.reference_targets[0];
   // Learnable targets first (the result), then the controls, then the reference.
+  //
+  // The single-round control (`1mlc`) is excluded. Its protocol allows one round,
+  // so both methods query the identical batch and every acted-on measure is
+  // bit-identical — the explorer would open onto two charts that agree to four
+  // decimals and a paired p of exactly 1.0. That is a check on the harness, not a
+  // result, and it already has its own lane in the learnability gate above
+  // ("Only one round is possible"), so it stays visible there rather than
+  // occupying a tab here that can only restate a tie.
   const targets = useMemo(() => {
-    const measured = partition.m5_evaluated.filter((target) => target !== "1n8z");
+    const measured = partition.m5_evaluated.filter(
+      (target) => target !== "1n8z" && !partition.single_round.includes(target),
+    );
     const learnable = measured.filter((target) => partition.learnable_multiround.includes(target));
     const rest = measured.filter((target) => !partition.learnable_multiround.includes(target));
     return [...learnable, ...rest, "1n8z"];
@@ -341,7 +353,7 @@ function TargetExplorer({
     <Panel
       eyebrow="One dataset at a time"
       title="Pick a target and see the whole comparison"
-      lede="Every method, both measures, and the paired test that decides whether a gap is real. Switch the share of the library a round may sample to see whether the result survives a different budget. 1N8Z * is the main dataset, measured by the full 35-test protocol rather than a resized cell."
+      lede="Every method, both measures, and the paired test that decides whether a gap is real. Switch the share of the library a round may sample to see whether the result survives a different budget. 1N8Z * is the main dataset, measured by the full 35-test protocol rather than a resized cell. 1MLC is not listed here: its protocol allows a single round, so both methods query the identical batch and the comparison is a tie by construction — it appears above, under “Only one round is possible”."
       actions={
         <div className="flex flex-col items-end gap-1.5">
           <div className="flex flex-wrap gap-1">
@@ -397,7 +409,7 @@ function TargetExplorer({
       }
     >
       {isReference && reference ? (
-        <ReferenceDetail reference={reference} />
+        <ReferenceDetail reference={reference} benchmark={benchmark} />
       ) : row ? (
         <TargetDetail row={row} cells={cells} attribution={attribution} target={active} cross={payload} />
       ) : (
@@ -479,13 +491,6 @@ function TargetDetail({
   const pairedAubqc = row.paired.m5_hybrid_minus_m3_ucb;
   const pairedRho = rhoPairedTest(attribution, row.dataset, row.coverage_label);
   const warm = row.paired.m5_warm_start_minus_m5_hybrid;
-  const bars = METHODS.map((method) => ({
-    key: method,
-    label: methodName(method),
-    value: row.spearman_rho_at_last_checkpoint[method] ?? 0,
-    color: methodMeta(method).color,
-    hero: method === "m5_hybrid",
-  }));
 
   return (
     <div>
@@ -519,80 +524,35 @@ function TargetDetail({
         </InfoTip>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-        <div>
-          <div className="mb-1.5 flex items-center justify-between gap-2">
-            <span className="label text-[9.5px]">Ranking accuracy · 0 = guessing · 1 = perfect</span>
-            <span className="mono text-[9.5px] ink-faint">
-              best: {rhoBest ? methodName(rhoBest.method) : "—"} {num(rhoBest?.value ?? null, 2)}
-            </span>
-          </div>
-          <HBarChart
-            data={bars}
-            format={(value) => value.toFixed(2)}
-            labelWidth={150}
-            rowHeight={30}
-            showZeroLine
-            zeroLabel="0 · guessing"
-            ariaLabel={`Ranking accuracy per method on ${target}`}
+      <ChartPair
+        left={
+          <RankingAccuracyPanel
+            target={target}
+            rho={row.spearman_rho_at_last_checkpoint as unknown as Record<string, number | null>}
+            rhoBest={rhoBest}
+            pairedRho={
+              pairedRho
+                ? { delta: pairedRho.meanDiff, p: pairedRho.p_value, seeds: pairedRho.seeds_won, n: pairedRho.n }
+                : null
+            }
+            pairedAubqc={{
+              delta: pairedAubqc.mean_diff,
+              p: pairedAubqc.p_value,
+              seeds: pairedAubqc.seeds_won,
+              n: pairedAubqc.n,
+            }}
+            pairedRhoNote="no paired ρ test at this cell"
           />
-          <div className="mt-2 grid grid-cols-2 gap-2">
-            <PairTile
-              label="Ranking accuracy"
-              delta={pairedRho?.meanDiff ?? null}
-              p={pairedRho?.p_value ?? null}
-              seeds={pairedRho ? `${pairedRho.seeds_won}/${pairedRho.n}` : null}
-              note={pairedRho ? "head-to-head" : "not measured"}
-            />
-            <PairTile
-              label="Best binder found"
-              delta={pairedAubqc.mean_diff}
-              p={pairedAubqc.p_value}
-              seeds={`${pairedAubqc.seeds_won}/${pairedAubqc.n}`}
-              note="head-to-head"
-            />
-          </div>
-        </div>
-
-        <div>
-          <div className="mb-1.5 flex items-center justify-between gap-2">
-            <span className="label text-[9.5px]">Best binder found · higher is better</span>
-            <span className="mono text-[9.5px] ink-faint">
-              best: {best ? methodName(best.method) : "—"} {num(best?.value ?? null, 2)}
-            </span>
-          </div>
-          <HBarChart
-            data={METHODS.map((method) => ({
-              key: method,
-              label: methodName(method),
-              value: row.aubqc[method],
-              color: methodMeta(method).color,
-              hero: method === "m5_hybrid",
-            }))}
-            format={(value) => value.toFixed(2)}
-            labelWidth={104}
-            rowHeight={30}
-            showZeroLine={false}
-            domain={[0, Math.max(...METHODS.map((method) => row.aubqc[method])) * 1.18]}
-            ariaLabel={`Best binder found per method on ${target}`}
+        }
+        right={
+          <AubqcBarsPanel
+            target={target}
+            aubqc={row.aubqc as unknown as Record<string, number | null>}
+            aubqcBest={best}
+            warm={{ delta: warm.mean_diff, p: warm.p_value, seeds: warm.seeds_won, n: warm.n }}
           />
-          <div className="mt-2 rounded-lg border px-2.5 py-2" style={{ borderColor: "var(--border)", background: "var(--panel-2)" }}>
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-[10.5px] ink-dim">Guided first batch · vs. a random start</span>
-              <span
-                className="mono text-[11px] font-semibold"
-                style={{ color: warm.mean_diff > 0 ? "var(--accent)" : "var(--ink-faint)" }}
-              >
-                {warm.mean_diff >= 0 ? "+" : "−"}
-                {num(Math.abs(warm.mean_diff), 2)}
-              </span>
-            </div>
-            <div className="mono mt-0.5 text-[9px] ink-faint">
-              won {warm.seeds_won} of {warm.n} runs · {flukeOdds(warm.p_value)}
-            </div>
-          </div>
-        </div>
-      </div>
+        }
+      />
 
       {/*
        * Both orderings are shown side by side, and each one is labelled.
@@ -667,6 +627,165 @@ function TargetDetail({
   );
 }
 
+/**
+ * The two charts every dataset tab shows, in one place.
+ *
+ * Extracted so the reference row (1N8Z) and the three resized cross-target cells
+ * render the *same* picture on the left: the five-method ranking-accuracy bars
+ * and the two paired-test tiles. Those were the parts that made switching tabs
+ * change the page's grammar.
+ *
+ * The right-hand panel is deliberately *not* forced to match. On the resized
+ * cells it is five AUBQC bars, because that is one cell and a bar is what a
+ * single comparison looks like. On 1N8Z all five methods finish within 0.0126 of
+ * each other (0.65% of the max — see `aubqcSpread` below), so five bars would be
+ * five identical rectangles that imply a ranking nobody earned. That dataset has
+ * seven checkpoints instead, and the trend across them is the only thing worth
+ * drawing. Consistency of grammar, without pretending a near-tie is a result.
+ */
+function RankingAccuracyPanel({
+  target,
+  rho,
+  rhoBest,
+  pairedRho,
+  pairedAubqc,
+  pairedRhoNote,
+}: {
+  target: string;
+  rho: Record<string, number | null>;
+  rhoBest: { method: string; value: number } | null;
+  pairedRho: { delta: number; p: number; seeds: number; n: number } | null;
+  pairedAubqc: { delta: number; p: number; seeds: number; n: number } | null;
+  /** Why a missing paired ρ test is missing — differs per dataset. */
+  pairedRhoNote: string;
+}) {
+  return (
+    <div>
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        <span className="label text-[9.5px]">Ranking accuracy · 0 = guessing · 1 = perfect</span>
+        <span className="mono text-[9.5px] ink-faint">
+          best: {rhoBest ? methodName(rhoBest.method) : "—"} {num(rhoBest?.value ?? null, 2)}
+        </span>
+      </div>
+      <HBarChart
+        data={METHODS.map((method) => ({
+          key: method,
+          label: methodName(method),
+          value: rho[method] ?? 0,
+          color: methodMeta(method).color,
+          hero: method === "m5_hybrid",
+          negative: (rho[method] ?? 0) < 0,
+        }))}
+        format={(value) => value.toFixed(2)}
+        domain={[0, 1]}
+        labelWidth={150}
+        rowHeight={30}
+        showZeroLine
+        zeroLabel="0 · guessing"
+        ariaLabel={`Ranking accuracy per method on ${target}`}
+      />
+      <div className="mt-2 grid grid-cols-2 gap-2">
+        <PairTile
+          label="Ranking accuracy"
+          delta={pairedRho?.delta ?? null}
+          p={pairedRho?.p ?? null}
+          seeds={pairedRho ? `${pairedRho.seeds}/${pairedRho.n}` : null}
+          note={pairedRho ? "head-to-head" : pairedRhoNote}
+        />
+        <PairTile
+          label="Best binder found"
+          delta={pairedAubqc?.delta ?? null}
+          p={pairedAubqc?.p ?? null}
+          seeds={pairedAubqc ? `${pairedAubqc.seeds}/${pairedAubqc.n}` : null}
+          note={pairedAubqc ? "head-to-head" : "not measured"}
+        />
+      </div>
+    </div>
+  );
+}
+
+/** The warm-start ablation tile, shared by both right-hand panels. */
+function WarmStartTile({
+  warm,
+}: {
+  warm: { delta: number; p: number; seeds: number; n: number } | null;
+}) {
+  return (
+    <div className="mt-2 rounded-lg border px-2.5 py-2" style={{ borderColor: "var(--border)", background: "var(--panel-2)" }}>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[10.5px] ink-dim">Guided first batch · vs. a random start</span>
+        <span
+          className="mono text-[11px] font-semibold"
+          style={{
+            color: warm === null ? "var(--ink-faint)" : warm.delta > 0 ? "var(--accent)" : "var(--ink-faint)",
+          }}
+        >
+          {warm === null ? "—" : `${warm.delta >= 0 ? "+" : "−"}${num(Math.abs(warm.delta), 2)}`}
+        </span>
+      </div>
+      <div className="mono mt-0.5 text-[9px] ink-faint">
+        {warm === null
+          ? "not measured at this budget"
+          : `won ${warm.seeds} of ${warm.n} runs · ${flukeOdds(warm.p)}`}
+      </div>
+    </div>
+  );
+}
+
+/** Two-column layout shared by every dataset tab. */
+function ChartPair({ left, right }: { left: ReactNode; right: ReactNode }) {
+  return (
+    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+      {left}
+      {right}
+    </div>
+  );
+}
+
+/** Five-method AUBQC bars — the right-hand panel on the resized cells. */
+function AubqcBarsPanel({
+  target,
+  aubqc,
+  aubqcBest,
+  warm,
+}: {
+  target: string;
+  aubqc: Record<string, number | null>;
+  aubqcBest: { method: string; value: number } | null;
+  warm: { delta: number; p: number; seeds: number; n: number } | null;
+}) {
+  const aubqcValues = METHODS.map((method) => aubqc[method]).filter(
+    (value): value is number => typeof value === "number" && Number.isFinite(value),
+  );
+  const aubqcMax = aubqcValues.length ? Math.max(...aubqcValues) : 1;
+  return (
+    <div>
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        <span className="label text-[9.5px]">Best binder found · higher is better</span>
+        <span className="mono text-[9.5px] ink-faint">
+          best: {aubqcBest ? methodName(aubqcBest.method) : "—"} {num(aubqcBest?.value ?? null, 2)}
+        </span>
+      </div>
+      <HBarChart
+        data={METHODS.map((method) => ({
+          key: method,
+          label: methodName(method),
+          value: aubqc[method] ?? 0,
+          color: methodMeta(method).color,
+          hero: method === "m5_hybrid",
+        }))}
+        format={(value) => value.toFixed(2)}
+        labelWidth={104}
+        rowHeight={30}
+        showZeroLine={false}
+        domain={[0, aubqcMax * 1.18]}
+        ariaLabel={`Best binder found per method on ${target}`}
+      />
+      <WarmStartTile warm={warm} />
+    </div>
+  );
+}
+
 function PairTile({
   label,
   delta,
@@ -700,24 +819,67 @@ function PairTile({
   );
 }
 
-function ReferenceDetail({ reference }: { reference: NonNullable<CrossTargetPayload["reference_targets"][0]> }) {
-  const bestBinder = bestMethod(reference.aubqc);
-  const rhoBest = bestMethod(
-    (reference.spearman_rho_curves[reference.spearman_rho_curves.length - 1] ??
-      {}) as unknown as Record<string, number | null>,
-  );
+/**
+ * The reference row (1N8Z), rendered through the same two charts as every other
+ * dataset tab.
+ *
+ * It previously had its own layout — a ρ line chart plus four KPI tiles — which
+ * meant the panel's grammar changed when a reader switched tabs. Consistency is
+ * worth more here than the bespoke card was: a comparison page whose panels are
+ * not shaped alike makes the reader re-learn each one.
+ *
+ * What the shared layout costs, and why it is still correct:
+ *
+ * * The ρ bars are the **final** checkpoint's values, same as the cross-target
+ *   cells. The seven-point series is still available — it backs the benchmark
+ *   tab's main chart — but this panel now answers the same question the other
+ *   three answer: where did each method finish.
+ * * The AUBQC bars are five near-equal values (spread 0.0126, 0.65% of the max)
+ *   and we are fractionally behind UCB. `aubqcCaveat` states that in place, so
+ *   five even bars cannot be read as a win.
+ * * `ReferenceTarget` publishes no paired AUBQC test, so that block comes from
+ *   `/api/benchmark` instead. It is the same 100-seed artifact the reference
+ *   row's own numbers come from, which is why passing it in is legitimate
+ *   rather than a cross-artifact splice.
+ */
+function ReferenceDetail({
+  reference,
+  benchmark,
+}: {
+  reference: NonNullable<CrossTargetPayload["reference_targets"][0]>;
+  benchmark: BenchmarkPayload | null;
+}) {
   const last = reference.spearman_rho_curves[reference.spearman_rho_curves.length - 1];
-  const lastAubqc = reference.curves[reference.curves.length - 1];
-  // The ranking-accuracy series is the one the rest of the page argues from, so
-  // it gets the chart. The best-binder curve moved to the tile: quoting the
-  // saturating metric as the picture is what made this card look like a tie.
-  const x = reference.spearman_rho_curves.map((row) => row.query_count);
+  const rho = (last ?? {}) as unknown as Record<string, number | null>;
+  const rhoBest = bestMethod(rho);
+  const aubqcBest = bestMethod(reference.aubqc);
+
+  // The paired tests live on the benchmark artifact, not on this row.
+  const vsUcb = benchmark?.paired_t_tests.m5_hybrid_minus_m3_ucb.metrics ?? null;
+  const warmStart = benchmark?.paired_t_tests.m5_warm_start_minus_m5_hybrid.metrics ?? null;
+  const pairedRho = vsUcb?.spearman_rho_at_q35 ?? null;
+  const pairedAubqc = vsUcb?.aubqc ?? null;
+  const warm = warmStart?.aubqc ?? null;
+
+  // How close the five methods actually are on this dataset, for the caveat.
+  const aubqcValues = METHODS.map((method) => reference.aubqc[method]).filter(
+    (value) => Number.isFinite(value),
+  );
+  const spread = aubqcValues.length ? Math.max(...aubqcValues) - Math.min(...aubqcValues) : 0;
+  const spreadShare = aubqcValues.length ? (spread / Math.max(...aubqcValues)) * 100 : 0;
+
   return (
     <div>
       <div className="mb-3 flex flex-wrap items-center gap-1.5">
         <Badge color="#F43F5E" title="Reference only: the main 35-test protocol over every usable candidate">
           1N8Z · the main dataset
         </Badge>
+        <span className="chip mono" style={{ borderColor: "var(--border)", color: "var(--ink-dim)" }}>
+          {reference.checkpoints.length} test rounds
+        </span>
+        <span className="chip mono" style={{ borderColor: "var(--border)", color: "var(--ink-dim)" }}>
+          {reference.checkpoints[reference.checkpoints.length - 1]} tests total
+        </span>
         <span className="chip mono" style={{ borderColor: "var(--border)", color: "var(--ink-dim)" }}>
           {reference.cdr3_length}-residue CDR
         </span>
@@ -728,66 +890,71 @@ function ReferenceDetail({ reference }: { reference: NonNullable<CrossTargetPayl
           {int(reference.seeds)} runs
         </span>
       </div>
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
-        <div>
-          <div className="mb-1 flex items-center justify-between gap-2">
-            <span className="label text-[9.5px]">Ranking accuracy · 0 = guessing · 1 = perfect</span>
-            <span className="mono text-[9.5px] ink-faint">
-              best: {rhoBest ? methodName(rhoBest.method) : "—"} {num(rhoBest?.value ?? null, 2)}
-            </span>
-          </div>
-          <LineChart
-            x={x}
-            series={METHODS.filter((method) => method !== "m1_random").map((method) => ({
-              key: method,
-              label: methodName(method),
-              color: methodMeta(method).color,
-              values: reference.spearman_rho_curves.map((row) => row[method]),
-              dashed: method !== "m5_hybrid",
-              width: method === "m5_hybrid" ? 2.2 : 1.3,
-            }))}
-            height={216}
-            xLabel="lab tests spent"
-            yLabel="ranking accuracy"
-            formatY={(value) => value.toFixed(2)}
-            referenceLines={[{ value: 0, label: "0 · guessing", color: "var(--border-strong)" }]}
-            ariaLabel="1N8Z reference curves: ranking accuracy per method"
-          />
-        </div>
-        <div className="grid grid-cols-2 gap-2 self-start">
-          <KpiTile
-            label="Ranking accuracy, ours"
-            value={num(last?.m5_hybrid ?? null, 2)}
-            caption="0 = guessing · 1 = perfect"
-            emphasis="accent"
-          />
-          <KpiTile
-            label="Our accuracy vs. standard"
-            value={gainText(relativeGain(last?.m5_hybrid ?? null, last?.m3_ucb ?? null))}
-            caption={`${num(last?.m5_hybrid ?? null, 2)} vs ${num(last?.m3_ucb ?? null, 2)} on 0→1`}
-            emphasis="accent"
-          />
-          <KpiTile
-            label="Ranking accuracy, standard"
-            value={num(last?.m3_ucb ?? null, 2)}
-            caption="0 = guessing · 1 = perfect"
-          />
-          <KpiTile
-            label="Best binder found"
-            value={num(bestBinder?.value ?? null, 2)}
-            caption={
-              bestBinder
-                ? `top: ${methodName(bestBinder.method)} · ours ${num(lastAubqc?.m5_hybrid ?? null, 2)}`
-                : ""
+
+      <ChartPair
+        left={
+          <RankingAccuracyPanel
+            target="1n8z"
+            rho={rho}
+            rhoBest={rhoBest}
+            pairedRho={
+              pairedRho
+                ? { delta: pairedRho.mean_diff, p: pairedRho.p_value, seeds: pairedRho.seeds_won, n: pairedRho.n }
+                : null
             }
+            pairedAubqc={
+              pairedAubqc
+                ? { delta: pairedAubqc.mean_diff, p: pairedAubqc.p_value, seeds: pairedAubqc.seeds_won, n: pairedAubqc.n }
+                : null
+            }
+            pairedRhoNote="not measured"
           />
-        </div>
-      </div>
-      <p className="mt-2 text-[10.5px] leading-relaxed ink-faint">
-        The chart is the measure the rest of this page argues from. Best binder found saturates — every method
-        reaches the same ceiling within a few rounds, so a curve of it reads as a tie that no method earned.
-        Both numbers are in the tiles, and the full comparison of both is in the benchmark tab.
-      </p>
+        }
+        right={
+          <div>
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <span className="label text-[9.5px]">Best binder found · across the run</span>
+              <span className="mono text-[9.5px] ink-faint">
+                best: {aubqcBest ? methodName(aubqcBest.method) : "—"} {num(aubqcBest?.value ?? null, 2)}
+              </span>
+            </div>
+            {/*
+             * A trend, not a bar chart, and only on this dataset.
+             *
+             * All five methods finish inside 0.0126 of each other here (0.65% of
+             * the top score), so five bars would be five indistinguishable
+             * rectangles that imply a ranking nobody earned. Across the seven
+             * checkpoints the separation is visible even though the endpoint is
+             * not: at q=10 greedy leads at 8.13, by q=30 three methods share
+             * 8.47–8.52. The caveat states the flattening rather than hiding it.
+             */}
+            <LineChart
+              x={reference.curves.map((row) => row.query_count)}
+              series={METHODS.filter((method) => method !== "m1_random").map((method) => ({
+                key: method,
+                label: methodName(method),
+                color: methodMeta(method).color,
+                values: reference.curves.map((row) => row[method]),
+                dashed: method !== "m5_hybrid",
+                width: method === "m5_hybrid" ? 2.2 : 1.3,
+              }))}
+              height={216}
+              xLabel="lab tests spent"
+              yLabel="best binder found"
+              formatY={(value: number) => value.toFixed(1)}
+              ariaLabel="1N8Z reference curves: best binder found per method"
+            />
+            <p className="mt-1.5 text-[9.5px] leading-relaxed" style={{ color: "var(--ink-faint)" }}>
+              Every method lands within {num(spread, 4)} of every other by the final test —{" "}
+              {spreadShare.toFixed(2)}% of the top score — so the endpoint is a near-tie, not a ranking. Ours is
+              fractionally behind standard UCB ({num(reference.aubqc.m5_hybrid, 4)} vs {num(reference.aubqc.m3_ucb, 4)});
+              the paired tile on the left is what settles whether that gap means anything.
+            </p>
+            <WarmStartTile warm={warm ? { delta: warm.mean_diff, p: warm.p_value, seeds: warm.seeds_won, n: warm.n } : null} />
+          </div>
+        }
+      />
+
       <Note summary="Why the main dataset is shown separately">
         {reference.note} Measured at {reference.checkpoints.join(", ")} tests. It uses the same sampling rule
         as the other datasets, which is why it is comparable in method but not in budget.
