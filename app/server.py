@@ -431,14 +431,53 @@ def ledger():
 @app.get("/api/hypotheses")
 def hypotheses(): return {"items": current().hypotheses}
 
+#: Seconds of SSE silence tolerated before a comment frame is sent. A live round
+#: emits nothing while a seat is thinking, and the reasoning seats can deliberate
+#: for minutes: without a heartbeat an idle connection is dropped by whatever
+#: proxy sits in front of the app (Render's edge, or nginx on the Railway path).
+#: 15 s is well under any observed proxy idle timeout and far below the cost of a
+#: dropped round.
+_STREAM_KEEPALIVE_SECONDS = 15.0
+
+
 @app.get("/api/stream-round")
 async def stream_round():
     async def generate():
         lab = current()
         task = asyncio.create_task(lab.execute_round())
         await asyncio.sleep(0)
-        async for message in lab.runner.events.subscribe(replay=True):
-            yield f"event: {message['event']}\ndata: {json.dumps(message['data'], default=str)}\n\n"
+
+        # The bus is drained by a pump task into a local queue rather than awaited
+        # directly: a keep-alive timeout must cancel *this* queue's ``get``, and
+        # cancelling the bus iterator's ``__anext__`` would unwind
+        # ``RoundEventBus.subscribe`` and silently drop every later event.
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def pump():
+            async for message in lab.runner.events.subscribe(replay=True):
+                await queue.put(message)
+            await queue.put(None)  # sentinel: the bus returned after ``stream_end``
+
+        pump_task = asyncio.create_task(pump())
+        try:
+            while True:
+                try:
+                    message = await asyncio.wait_for(queue.get(), _STREAM_KEEPALIVE_SECONDS)
+                except asyncio.TimeoutError:
+                    # An SSE comment frame: parsed and discarded by ``EventSource``,
+                    # so it is invisible to the client while still proving liveness
+                    # to every proxy in the path.
+                    yield ": keep-alive\n\n"
+                    continue
+                if message is None:
+                    break
+                yield f"event: {message['event']}\ndata: {json.dumps(message['data'], default=str)}\n\n"
+        finally:
+            # Normal completion and client disconnect both land here. Cancelling the
+            # pump detaches this stream's subscriber; it does not cancel the round,
+            # which writes to the ledger regardless, so ``GET /api/state`` still
+            # reflects a round whose viewer navigated away.
+            pump_task.cancel()
         await task
         invalidate_benchmark_cache()
     return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

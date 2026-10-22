@@ -1,0 +1,48 @@
+# Render blueprint for the FastAPI backend (app/server.py).
+#
+# The frontend is deployed separately on Vercel (frontend/vercel.json) and calls
+# this service cross-origin. That works because app/server.py already installs
+# CORSMiddleware with allow_origins=["*"], so nothing here needs to know the
+# Vercel URL.
+#
+# Deploy: Render dashboard -> New -> Blueprint -> pick this repo. Then set the
+# provider keys marked `sync: false` (they are prompted for, never committed).
+services:
+  - type: web
+    name: virtual-lab-api
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    # --workers 1 is load-bearing, not a default: the campaign keeps its live
+    # state in an in-process Campaign object and appends to a SQLite ledger.
+    # A second worker would hold a second, divergent copy of the campaign and
+    # interleave writes into the same file.
+    startCommand: uvicorn app.server:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      # 3.12 rather than local 3.14: every pinned dependency ships a cp312
+      # wheel, so the build never falls back to compiling numpy/scipy.
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      # Default policy. Set to live_agent to stamp rounds as driven by a live
+      # council; see IMPLEMENTATION_DECISIONS.md before changing it.
+      - key: M5_POLICY_MODE
+        value: adaptive_tool
+      - key: HITL
+        value: "0"
+
+      # ── Provider credentials ────────────────────────────────────────────────
+      # sync: false means Render prompts for the value instead of reading it from
+      # this file. Any seat whose provider has no key falls back down its ladder
+      # and finally runs the deterministic offline reasoner, so the service boots
+      # and serves /api/state with all of these unset.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false

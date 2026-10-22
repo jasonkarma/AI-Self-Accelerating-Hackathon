@@ -350,6 +350,70 @@ Prints the pinned model, live/offline transport, effective base URL, and resolve
 for every seat, and exits non-zero if any seat fell back to the deterministic reasoner — so a
 degraded single-model run can't be mistaken for a diverse live council.
 
+## Deploy: Render (backend) + Vercel (frontend)
+
+The two halves are independent. `render.yaml` at the repo root describes the Python
+service; `frontend/vercel.json` describes the static bundle. Deploy the backend first — the
+frontend bakes its URL in at build time.
+
+### 1. Backend on Render
+
+```bash
+# Dashboard → New → Blueprint → select this repo (render.yaml is detected)
+```
+
+The blueprint pins `uvicorn app.server:app --host 0.0.0.0 --port $PORT --workers 1`, health
+checks `/api/health`, and prompts for `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY`
+without storing them in the repo. With no keys the service still boots and serves the frozen
+Seed-21 campaign — every council seat falls back to the deterministic reasoner — so a deploy
+can be verified before any credential is added.
+
+`--workers 1` is required, not a default. The live campaign is an in-process `Campaign`
+object appending to `results/campaign.sqlite3`; two workers would hold two divergent
+campaigns and interleave writes into one ledger.
+
+Two free-tier behaviours matter for a live demo:
+
+| behaviour | consequence |
+| --- | --- |
+| the instance sleeps after ~15 min idle | the first request takes ~30–60 s to wake; open `/api/health` a minute before presenting |
+| the filesystem is ephemeral — a deploy or restart resets it | live rounds are lost on redeploy. `POST /api/restore-golden` reinstalls the verified run in ~12 ms, which is exactly what that endpoint is for |
+
+`GET /api/stream-round` sends `X-Accel-Buffering: no` and returns `text/event-stream`, which
+Render proxies without buffering. A live round calls four frontier models, so allow several
+minutes; the stream keeps the connection open for the duration.
+
+### 2. Frontend on Vercel
+
+```bash
+# Dashboard → Add New → Project → import the repo
+#   Root Directory : frontend
+#   Framework      : Vite (prefilled from vercel.json)
+#   Env var        : VITE_API_BASE = https://virtual-lab-api.onrender.com
+```
+
+`VITE_API_BASE` is substituted by Vite at build time, so **changing it requires a redeploy**,
+not just a settings edit. It must be the backend's HTTPS origin with no path and no trailing
+slash; `frontend/src/lib/api.ts` strips a trailing slash defensively.
+
+The bundle then calls the backend directly across origins, which is safe here because
+`app/server.py` installs `allow_origins=["*"]`. If you later want a single origin instead, the
+Railway path in `frontend/README.md` serves the same bundle behind nginx with an `/api/` proxy.
+
+`vercel.json` caches `/assets/*` for a year (hashed filenames) and marks `index.html`
+`no-store`, so a redeploy can never serve a stale bundle hash. Its rewrite sends every other
+path to `index.html` for the SPA fallback.
+
+### Verifying a deploy
+
+```bash
+curl -s https://<backend>.onrender.com/api/health          # {"status":"ok","version":"1.2"}
+curl -s https://<frontend>.vercel.app | grep -c 'assets/index-'   # 1 → bundle is wired
+```
+
+Then open the Vercel URL; the provenance pill reads `GET /api/ledger`. If it says it cannot
+reach the backend, `VITE_API_BASE` was empty at build time or still points at localhost.
+
 ## Install the official AbBiBench 1N8Z table
 
 ```bash
