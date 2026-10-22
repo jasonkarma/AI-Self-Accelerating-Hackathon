@@ -55,6 +55,70 @@ export function Panel({
   );
 }
 
+/**
+ * A one-line identification of the dataset a page's numbers are about.
+ *
+ * The overview and the recorded run both quoted a library size without ever
+ * saying whose library it was — which antibody, against what, from where. This
+ * strip answers that in one row, and every field is read from an artifact: a
+ * missing value renders as an em dash rather than a plausible-looking name.
+ */
+export function DatasetStrip({
+  identity,
+  className = "",
+}: {
+  identity: {
+    id: string | null;
+    antigen: string | null;
+    cdr3Length: number | null;
+    libraryRows: number | null;
+    usableRows: number | null;
+    corpus: string | null;
+  } | null;
+  className?: string;
+}) {
+  if (!identity) return null;
+  const dash = "—";
+  const fmt = (value: number | null) =>
+    value === null ? dash : Math.round(value).toLocaleString("en-US");
+  const cells: Array<{ label: string; value: string; mono?: boolean }> = [
+    { label: "antibody target", value: identity.id ? identity.id.toUpperCase() : dash, mono: true },
+    { label: "binds", value: identity.antigen ?? dash },
+    {
+      label: "region optimised",
+      value: identity.cdr3Length === null ? dash : `CDR3-H3 · ${identity.cdr3Length} residues`,
+      mono: true,
+    },
+    {
+      label: "library",
+      value:
+        identity.libraryRows === null
+          ? dash
+          : `${fmt(identity.usableRows)} usable of ${fmt(identity.libraryRows)}`,
+      mono: true,
+    },
+    { label: "measured by", value: identity.corpus ?? dash },
+  ];
+  return (
+    <div
+      className={`flex flex-wrap items-stretch gap-x-5 gap-y-2 rounded-xl border px-3.5 py-2.5 ${className}`}
+      style={{ borderColor: "var(--border)", background: "var(--panel-2)" }}
+    >
+      {cells.map((cell) => (
+        <div key={cell.label} className="min-w-0">
+          <div className="label text-[8.5px]">{cell.label}</div>
+          <div
+            className={`${cell.mono ? "mono" : ""} truncate text-[11px] leading-snug ink`}
+            title={cell.value}
+          >
+            {cell.value}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** A metric cell: label above, tabular value, optional footnote. */
 export function Stat({
   label,

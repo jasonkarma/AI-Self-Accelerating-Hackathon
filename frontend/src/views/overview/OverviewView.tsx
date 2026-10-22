@@ -2,9 +2,9 @@ import { ArrowRight, FlaskConical, Scale, Target, Trophy } from "lucide-react";
 import type { BenchmarkPayload, CrossTargetPayload } from "../../types/report";
 import type { ConfigPayload, StatePayload } from "../../types/state";
 import type { TabKey } from "../../components/Header";
-import { InfoTip } from "../../components/Panel";
+import { DatasetStrip, InfoTip } from "../../components/Panel";
 import { ScaleMarker } from "../../components/Plain";
-import { finalRho, pairedDelta } from "../../lib/derive";
+import { datasetIdentity, finalRho, pairedDelta } from "../../lib/derive";
 import { int, num } from "../../lib/format";
 import { countOf, flukeOdds, gainWhole, librarySkipped, methodName, shareWhole } from "../../lib/plain";
 import type { Resource } from "../../hooks/useResource";
@@ -50,13 +50,19 @@ export function OverviewView({
     const qualified = config?.qualified_count ?? null;
     const skipped = librarySkipped(spent, qualified);
 
+    const identity = datasetIdentity(cross.data ?? null);
     const partition = cross.data?.available ? cross.data.learnability_gate.partition : null;
     const learnableCount = partition?.learnable_multiround.length ?? null;
-    const excludedCount = partition
-        ? partition.unlearnable.length +
-        partition.single_round.length +
-        partition.degenerate_1_or_2_cdrh3.length
+    // The corpus size the partition was built from — 17 enumerated files. Read
+    // from the metadata rather than typed, so "3 of 17" cannot go stale if the
+    // corpus grows.
+    const totalDatasets = cross.data?.available
+        ? cross.data.lockbox_metadata.rows.length
         : null;
+    // The metadata-only exclusion: datasets that collapse to one or two distinct
+    // loops. Kept separate from the baseline-gated ones, because only these were
+    // decided without running anything.
+    const degenerateCount = partition?.degenerate_1_or_2_cdrh3.length ?? null;
 
     return (
         <div className="space-y-4">
@@ -72,6 +78,14 @@ export function OverviewView({
                         </span>
                         <span className="text-[11px] ink-faint">antibody engineering · decided by a multi-agent lab</span>
                     </div>
+
+                    {/*
+                     * Was missing entirely: the hero talked about "thousands of
+                     * variants" without ever naming the antibody or the antigen.
+                     * A reader could finish the page unable to say what the
+                     * numbers described.
+                     */}
+                    <DatasetStrip identity={identity} className="mb-4 mt-1" />
 
                     <h2 className="max-w-[34ch] text-[30px] font-semibold leading-[1.15] tracking-[-0.025em] ink sm:text-[38px]">
                         AI agents argue over{" "}
@@ -121,11 +135,37 @@ export function OverviewView({
                             value={learnableCount === null ? "—" : countOf(learnableCount, learnableCount)}
                             label="of the targets where learning is possible"
                             caption={
-                                excludedCount === null
+                                learnableCount === null || totalDatasets === null
                                     ? "same code, no retuning"
-                                    : `${int(excludedCount)} other datasets ruled out before we ran anything`
+                                    : `only ${countOf(learnableCount, totalDatasets)} libraries have a ranking signal to find`
                             }
-                            hint="Datasets where no method can rank the library are excluded by rules fixed in advance, so the targets that remain are the ones where the comparison means something."
+                            hint={
+                                /*
+                                 * This used to read "14 other datasets ruled out
+                                 * before we ran anything", which was not true of
+                                 * all 14: the baseline gate genuinely ran on
+                                 * `aayl49`, `4d5_her2` and `1mlc`, and `aayl51`
+                                 * was withheld rather than eliminated. The copy
+                                 * below only makes claims the artifacts support.
+                                 *
+                                 * It also now *defines* learnability, which is
+                                 * what a reader needs in order for "3 of 3" to
+                                 * mean anything: a library is learnable when the
+                                 * measured binding varies with the sequence.
+                                 */
+                                <>
+                                    A library is learnable only when its measured binding actually varies with the
+                                    sequence — otherwise there is no ordering to discover and no method, ours
+                                    included, can be compared.{" "}
+                                    {degenerateCount === null
+                                        ? "Most datasets here"
+                                        : `${int(degenerateCount)} of the ${int(totalDatasets ?? 0)} datasets here`}{" "}
+                                    do not offer a real search: nine collapse to one or two distinct loops, and the
+                                    tenth has eight loops but only five usable candidates. The remainder were
+                                    screened by rules fixed before any result existed, and one is the sealed holdout
+                                    that was never available to choose from.
+                                </>
+                            }
                             tone="accent"
                             onClick={() => onTab("cross")}
                             cta="See the other targets"

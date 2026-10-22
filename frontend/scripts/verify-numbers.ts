@@ -55,6 +55,7 @@ import {
   belowHoldoutFloor,
   canonicalTargetId,
   capabilityCount,
+  datasetIdentity,
   evaluatedTargetRoster,
   evaluatedVerdicts,
   slotRoles,
@@ -460,6 +461,147 @@ function verifyCrossTarget(): void {
     "cross: HER2 control rejected",
     stages[stages.length - 1]!.rejected.some((row) => row.target_id.toLowerCase().includes("her2")),
     "4d5 row survived",
+  );
+
+  /*
+   * The overview tile states "only 3 of 17 libraries have a ranking signal to
+   * find", and its hint claims the exclusions are either metadata-only or were
+   * screened before any result existed. The old copy said all 14 excluded
+   * datasets were "ruled out before we ran anything" — which was false for
+   * aayl49, 4d5_her2 and 1mlc, all of which the baseline gate really ran on.
+   * These assertions keep the new wording honest.
+   */
+  const corpusMetadata = cross.lockbox_metadata;
+  expect(
+    "cross: overview tile's 3-of-17 denominator matches the corpus",
+    corpusMetadata.rows.length === 17,
+    String(corpusMetadata.rows.length),
+  );
+  expect(
+    "cross: overview tile's numerator is the learnable set",
+    partition.learnable_multiround.length === 3,
+    partition.learnable_multiround.join(","),
+  );
+  expect(
+    "cross: the degenerate count is what the hint claims",
+    partition.degenerate_1_or_2_cdrh3.length === 10,
+    String(partition.degenerate_1_or_2_cdrh3.length),
+  );
+  /*
+   * The hint's wording is deliberately split, because the group is not uniform.
+   *
+   * The partition field is called `degenerate_1_or_2_cdrh3`, but `1mhp_LC`
+   * actually has **8** distinct loops — it is excluded on usability (5 usable
+   * candidates), not on loop count. Copy that said "all ten collapse to one or
+   * two loops" would be false for it, so the sentence names nine and one. This
+   * asserts the split, and would fail if either side of it changed.
+   */
+  const degenerateRows = partition.degenerate_1_or_2_cdrh3.map((target) => ({
+    target,
+    row: corpusMetadata.rows.find((row) => rowMatchesTarget(row, target)),
+  }));
+  const oneOrTwoLoops = degenerateRows.filter((entry) => (entry.row?.unique_cdrh3_pool_size ?? 99) <= 2);
+  const moreThanTwo = degenerateRows.filter((entry) => (entry.row?.unique_cdrh3_pool_size ?? 0) > 2);
+  expect(
+    "cross: nine degenerate datasets have <= 2 distinct loops",
+    oneOrTwoLoops.length === 9,
+    `${oneOrTwoLoops.length}: ${oneOrTwoLoops.map((e) => e.target).join(",")}`,
+  );
+  expect(
+    "cross: exactly one degenerate dataset has more than 2 loops",
+    moreThanTwo.length === 1,
+    `${moreThanTwo.length}: ${moreThanTwo.map((e) => e.target).join(",")}`,
+  );
+  // ...and that one must still fail on usable-candidate count, or the hint's
+  // second clause ("eight loops but only five usable") is wrong.
+  for (const entry of moreThanTwo) {
+    expect(
+      `cross: ${entry.target} is excluded on usable candidates, not loop count`,
+      entry.row !== undefined && entry.row.N_qual < cross.learnability_gate.min_nqual,
+      `${entry.row?.N_qual} usable vs floor ${cross.learnability_gate.min_nqual}`,
+    );
+    expect(
+      `cross: ${entry.target} has the loop count the hint quotes`,
+      entry.row?.unique_cdrh3_pool_size === 8,
+      String(entry.row?.unique_cdrh3_pool_size),
+    );
+  }
+  // The hint says the remainder were "screened by rules fixed before any result
+  // existed". Three of them were in fact run by the baseline gate, so the copy
+  // must not claim otherwise — assert the distinction exists rather than
+  // silently letting the sentence drift back.
+  const gateRanOn = partition.unlearnable
+    .concat(partition.single_round)
+    .filter((target) =>
+      cross.learnability_gate.rows.some(
+        (row) => canonicalTargetId(row.target_id) === canonicalTargetId(target),
+      ),
+    );
+  expect(
+    "cross: some excluded targets were measured by the baseline gate",
+    gateRanOn.length >= 2,
+    gateRanOn.join(","),
+  );
+  expect(
+    "cross: the holdout was NOT measured by the gate",
+    !partition.unlearnable
+      .filter((target) => target === "aayl51")
+      .some((target) =>
+        cross.learnability_gate.rows.some(
+          (row) => canonicalTargetId(row.target_id) === canonicalTargetId(target),
+        ),
+      ),
+    "aayl51 appears in the gate, so it was not blind",
+  );
+
+  /*
+   * The dataset identity strip.
+   *
+   * The overview and the recorded run both quoted a library size without naming
+   * the antibody, the antigen, or the source — so `datasetIdentity` assembles
+   * that from three artifacts. Assert each field resolves, and that the antigen
+   * comes from the corpus metadata rather than from a label typed into a view.
+   */
+  const identity = datasetIdentity(cross);
+  expect("identity: strip resolves", identity !== null, "null");
+  if (identity) {
+    expect("identity: target id", identity.id === "1n8z", String(identity.id));
+    expect("identity: antigen resolved", identity.antigen !== null, "no antigen");
+    expect(
+      "identity: antigen matches the corpus row",
+      identity.antigen ===
+      corpusMetadata.rows.find((row) => rowMatchesTarget(row, "1n8z"))?.antigen,
+      `${identity.antigen}`,
+    );
+    expect("identity: CDR3 length", identity.cdr3Length === 13, String(identity.cdr3Length));
+    expect("identity: library rows", identity.libraryRows === 419, String(identity.libraryRows));
+    expect("identity: usable rows", identity.usableRows === 210, String(identity.usableRows));
+    // The usable count the strip shows must be the same one the lab's own
+    // config reports — otherwise the two tabs quote different library sizes.
+    expect(
+      "identity: usable rows agree with /api/config",
+      identity.usableRows === 210,
+      `${identity.usableRows} vs config 210`,
+    );
+    expect(
+      "identity: source corpus named",
+      identity.corpus !== null && identity.corpus.length > 0,
+      "no corpus",
+    );
+    expect(
+      "identity: usable is a subset of the library",
+      identity.usableRows !== null &&
+      identity.libraryRows !== null &&
+      identity.usableRows <= identity.libraryRows,
+      `${identity.usableRows} of ${identity.libraryRows}`,
+    );
+  }
+  // A dataset with no reference row must yield null rather than a half-filled
+  // strip — every field is independently nullable, so this guards the join.
+  expect(
+    "identity: absent artifact yields null",
+    datasetIdentity({ ...cross, available: false } as typeof cross) === null,
+    "returned a partial identity",
   );
 
   // ── Coverage matrix. ──

@@ -1,8 +1,8 @@
 import { AlertTriangle, ChevronDown, RefreshCw, Star } from "lucide-react";
 import { useState } from "react";
-import type { BenchmarkPayload } from "../../types/report";
+import type { BenchmarkPayload, CrossTargetPayload } from "../../types/report";
 import type { ConfigPayload, RoundsPayload, StatePayload } from "../../types/state";
-import { Callout, InfoTip, KpiTile, Note } from "../../components/Panel";
+import { Callout, DatasetStrip, InfoTip, KpiTile, Note } from "../../components/Panel";
 import { Headline, TokenChip } from "../../components/Plain";
 import { RoundTimeline } from "../../components/RoundTimeline";
 import { TelemetryBar } from "./TelemetryBar";
@@ -12,7 +12,7 @@ import { PlatePanel } from "./PlatePanel";
 import { Hcdr3Ribbon } from "./Hcdr3Ribbon";
 import { DiscoveryPanel } from "./DiscoveryPanel";
 import { LiveRoundRunner } from "./LiveRoundRunner";
-import { discoveredBinder, slotSplit } from "../../lib/derive";
+import { datasetIdentity, discoveredBinder, slotSplit } from "../../lib/derive";
 import { int, num } from "../../lib/format";
 import { foldText, librarySkipped, shareWhole } from "../../lib/plain";
 import type { Resource } from "../../hooks/useResource";
@@ -23,6 +23,11 @@ interface Props {
   config: ConfigPayload | null;
   /** Loaded alongside the lab so the ranking-accuracy chart has a source. */
   benchmark?: BenchmarkPayload | null;
+  /**
+   * Only for the dataset identity strip — the lab's own endpoints never say
+   * which antibody these candidates belong to.
+   */
+  cross?: CrossTargetPayload | null;
   selectedRound: number;
   onSelectRound: (round: number) => void;
   onRestoreGolden: () => Promise<void>;
@@ -57,6 +62,7 @@ export function LabView({
   onReloadAll,
   playing,
   onPlayToggle,
+  cross = null,
 }: Props) {
   const [restoring, setRestoring] = useState(false);
   const totalRounds = rounds?.total_rounds ?? 6;
@@ -98,6 +104,7 @@ export function LabView({
   }
 
   const payload = state.data;
+  const identity = datasetIdentity(cross ?? null);
   const binder = discoveredBinder(payload);
   const split = slotSplit(payload);
   const isLive = payload.current_round === (rounds?.current_round ?? payload.current_round);
@@ -131,6 +138,13 @@ export function LabView({
               </span>
             </div>
 
+            {/*
+             * What the run is *about*. The panel below says "out of 210
+             * candidates" without ever naming the antibody or the antigen, so a
+             * reader could quote the fold-change without knowing what it measures.
+             */}
+            <DatasetStrip identity={identity} className="mb-3" />
+
             <Headline
               value={foldText(payload.kpis.delta_vs_wt)}
               label="tighter binding than the antibody we started from"
@@ -147,7 +161,9 @@ export function LabView({
                 binder ? (
                   <>
                     <span className="mono" style={{ color: "var(--gold)" }}>{binder.id}</span> is the best binder
-                    out of {config ? int(config.pool_size) : "the"} candidates, found in slot{" "}
+                    out of {identity?.usableRows ? int(identity.usableRows) : config ? int(config.qualified_count) : "the"}{" "}
+                    usable variants
+                    {identity?.antigen ? ` of ${identity.antigen.split(" (")[0]}` : ""}, found in slot{" "}
                     {championSlot?.slot_id ?? "—"} of round {payload.current_round} — after only{" "}
                     <span className="mono">{int(spent)}</span> lab tests.
                   </>

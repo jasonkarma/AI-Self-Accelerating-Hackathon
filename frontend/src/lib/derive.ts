@@ -1132,6 +1132,62 @@ export function evaluatedVerdicts(
 }
 
 /**
+ * What the lab's dataset actually is.
+ *
+ * No endpoint serves this as a single object, and its absence was a real gap:
+ * the overview and the recorded run both said "210 candidates" without ever
+ * naming the antibody, the antigen, or where the measurement came from. A
+ * reader could not tell what the numbers were about.
+ *
+ * The pieces live in three places, none of which is `/api/config`:
+ *
+ * * `cross_target.reference_targets[0]` — dataset id, CDR3 length, library size,
+ *   usable count, seeds;
+ * * `cross_target.lockbox_metadata.rows[1n8z].antigen` — the antigen, resolved
+ *   from the corpus metadata rather than typed;
+ * * `cross_target.lockbox_metadata.corpus` — the published benchmark the library
+ *   was drawn from.
+ *
+ * Every field is nullable because each comes from a different artifact and any
+ * of them may be absent on a checkout where a script has not run. The surface
+ * must degrade to "—", never to an invented name.
+ */
+export interface DatasetIdentity {
+  /** PDB-style identifier, e.g. `1n8z`. */
+  id: string | null;
+  /** What the antibody binds, e.g. `HER2 (trastuzumab)`. */
+  antigen: string | null;
+  /** Length of the CDR3 region being optimised. */
+  cdr3Length: number | null;
+  /** Distinct sequences in the source table. */
+  libraryRows: number | null;
+  /** Sequences that survive the developability filter. */
+  usableRows: number | null;
+  /** Independent runs behind the published comparison. */
+  seeds: number | null;
+  /** The public benchmark the data was drawn from. */
+  corpus: string | null;
+}
+
+export function datasetIdentity(cross: CrossTargetPayload | null): DatasetIdentity | null {
+  if (!cross?.available) return null;
+  const reference = cross.reference_targets[0];
+  // `1n8z` is spelled `1n8z` in `reference_targets` and `1n8z` in the metadata,
+  // but the join still goes through `rowMatchesTarget` so a future rename of the
+  // trimmed CSV id cannot silently break the antigen lookup.
+  const corpusRow = cross.lockbox_metadata.rows.find((row) => rowMatchesTarget(row, "1n8z"));
+  return {
+    id: reference?.dataset ?? null,
+    antigen: corpusRow?.antigen ?? null,
+    cdr3Length: reference?.cdr3_length ?? null,
+    libraryRows: reference?.rows_final ?? null,
+    usableRows: reference?.qualified_count ?? null,
+    seeds: reference?.seeds ?? null,
+    corpus: cross.lockbox_metadata.corpus ?? null,
+  };
+}
+
+/**
  * The evaluated targets the holdout floor would have excluded.
  *
  * These are measured and published, but they are **not** holdout evidence: their
