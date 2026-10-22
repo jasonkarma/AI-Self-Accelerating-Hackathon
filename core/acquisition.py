@@ -891,9 +891,22 @@ def resolve_anchor_positions(
     For 1N8Z this is exactly :data:`core.constants.ANCHOR_POSITIONS` (3, 11, 12,
     13) — the four structural anchors the HCDR3 loop closes on. A different
     reference cannot inherit those indices, because "position 11" of a 9-mer is a
-    different residue. The default for any other length keeps the same *shape*:
-    the last three positions plus the third, which is the ``xxxW...DY`` pattern
-    1N8Z's anchors encode (W3, and the ``D-Y`` terminus at 12-13).
+    different residue.
+
+    **For every other reference this returns ``()``.** It previously returned
+    ``(3, length - 2, length - 1, length)``, an *invented* analogy to 1N8Z's
+    ``W3 ... DY`` motif: it asserted that an arbitrary loop's third residue and
+    its last three residues are structural anchors. Nothing in the data supports
+    that for a foreign reference, and the cost is measurable — it added position
+    11 to ``aayl49_ML``'s conserved set and position 3 to ``aayl51``'s, so M4 was
+    conserving residues its reference says nothing about.
+
+    Returning ``()`` is the honest value: *we have no structural knowledge of this
+    loop*, so M4's prior falls back to what the sequence itself evidences — its
+    native aromatics, acidic residues and glycine hinges (:func:`conserved_motif_positions`).
+    On 1N8Z nothing changes (``WT_SEQUENCE`` still short-circuits above, and its
+    native set already spans every anchor); ``1mlc`` is unchanged too because its
+    reference's native residues already cover the invented positions.
 
     An explicit ``anchor_positions`` always wins, and is validated against the
     reference length so an off-by-one cannot silently mark the wrong residue.
@@ -910,7 +923,7 @@ def resolve_anchor_positions(
         return resolved
     if reference == WT_SEQUENCE:
         return ANCHOR_POSITIONS
-    return (3, length - 2, length - 1, length)
+    return ()
 
 
 def sar_maturity_target(seq_len: int = 13, *, total_budget: int = 35) -> float:

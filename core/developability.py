@@ -39,9 +39,24 @@ def raw_components(
     wt_liability = reference.count("C") + sum(
         reference.count(m) for m in ("NG", "NS", "DG", "DS")
     )
+    # The ``window`` term is the worst 5-residue hydropathy window. Its scan range
+    # must be the number of *valid* windows, ``len(s) - 4``, not the literal 9 that
+    # was correct only at the frozen 13-residue width:
+    #
+    #   L=13 -> range(9), 9 windows of exactly width 5   (unchanged, bit-for-bit)
+    #   L=9  -> range(5); the old range(9) reached i=8, where hydro[8:13] is a
+    #           *1-element* slice, so a single hydrophobic residue won the max
+    #           outright (measured 4.500 vs the correct 2.340)
+    #   L=20 -> range(16); the old range(9) never looked at positions 13-19
+    #
+    # ``max(1, ...)`` guards a reference shorter than the window: there is no
+    # valid 5-mer, so the whole-sequence mean is the honest answer rather than an
+    # empty ``max()``. At L=13 this expression is exactly 9, which is why the
+    # 1N8Z path is unchanged.
+    window_span = max(1, len(s) - 4)
     return {
         "hydro": float(hydro.mean()),
-        "window": float(max(hydro[i:i + 5].mean() for i in range(9))),
+        "window": float(max(hydro[i:i + 5].mean() for i in range(window_span))),
         "aromatic": float(sum(a in "FWY" for a in s) / len(s)),
         "charge": float(abs(charges.sum()) / len(s)),
         "cluster": float(same_sign),
