@@ -48,10 +48,13 @@ import {
   productionRow,
   revealedBindings,
   rhoPairedTest,
+  rhoRankAtCoverage,
   rhoRatio,
   rowMatchesTarget,
   slotRoles,
   slotSplit,
+  targetRow,
+  TOGGLE_COVERAGE,
   zeroShotRows,
 } from "../src/lib/derive";
 import { pvalue, signed } from "../src/lib/format";
@@ -459,6 +462,122 @@ function verifyCrossTarget(): void {
   for (const dataset of datasets) {
     expect(`cross: ${dataset} has three coverage cells`, coverageCells(cross, dataset).length === 3, String(coverageCells(cross, dataset).length));
   }
+
+  // ── The budget switch. ──
+  //
+  // The switch offers exactly the levels where a cell exists for *every*
+  // measured dataset. If a level were added without the data behind it, the
+  // button would render an empty card — so the data, not the button list, is
+  // the assertion.
+  for (const level of TOGGLE_COVERAGE) {
+    for (const dataset of datasets) {
+      const row = cross.targets.find(
+        (entry) => entry.dataset === dataset && entry.coverage_label === level,
+      );
+      expect(`cross: ${dataset} has a ${level} cell for the switch`, row !== undefined, "no row");
+      expect(
+        `cross: ${dataset}@${level} switch lookup resolves`,
+        targetRow(cross, dataset, level)?.coverage_label === level,
+        targetRow(cross, dataset, level)?.coverage_label ?? "none",
+      );
+      // Every cell the switch can show must publish a ranking-accuracy score —
+      // that is what the card's chart, bars and "ranking N of 5" all read.
+      expect(
+        `cross: ${dataset}@${level} has a ranking-accuracy score`,
+        Number.isFinite(row?.spearman_rho_at_last_checkpoint.m5_hybrid ?? Number.NaN),
+        String(row?.spearman_rho_at_last_checkpoint.m5_hybrid),
+      );
+    }
+  }
+
+  // The **paired** ranking-accuracy test is a stricter requirement: the
+  // attribution ledger only measured the learnable datasets, so the two
+  // controls legitimately have no p-value. Asserting its absence rather than
+  // its presence keeps the control cards honest — the card says "not measured"
+  // there and must not start implying a test exists.
+  for (const level of TOGGLE_COVERAGE) {
+    for (const dataset of partition.learnable_multiround) {
+      if (dataset === "1n8z") continue;
+      expect(
+        `cross: learnable ${dataset}@${level} publishes a paired ranking-accuracy test`,
+        rhoPairedTest(attribution, dataset, level) !== null,
+        `no attribution cell for "${dataset} @ ${level}"`,
+      );
+    }
+    for (const dataset of [...partition.unlearnable, ...partition.single_round]) {
+      if (!datasets.includes(dataset)) continue;
+      expect(
+        `cross: control ${dataset}@${level} has no paired ranking-accuracy test`,
+        rhoPairedTest(attribution, dataset, level) === null,
+        "an attribution cell appeared for a control",
+      );
+    }
+  }
+
+  // ── A tie must never be rendered as a win. ──
+  //
+  // `m5_rank` uses a strict `>` comparison upstream, so an exact tie scores 1.
+  // The chip labels that case "tied" rather than "1 of 5"; this asserts the
+  // condition the label keys off, so removing the branch fails here first.
+  for (const target of partition.single_round) {
+    for (const level of TOGGLE_COVERAGE) {
+      const cell = cross.coverage_sensitivity.find(
+        (entry) => entry.dataset === target && entry.coverage_label === level,
+      );
+      if (!cell || cell.aubqc_m5 === null || cell.aubqc_best_baseline === null) continue;
+      expect(
+        `cross: ${target}@${level} best binder is an exact tie`,
+        Math.abs(cell.aubqc_m5 - cell.aubqc_best_baseline) < 5e-4,
+        `${cell.aubqc_m5} vs ${cell.aubqc_best_baseline}`,
+      );
+      expect(
+        `cross: ${target}@${level} tie is not presented as rank 1`,
+        Math.abs(cell.aubqc_m5 - cell.aubqc_best_baseline) < 5e-4 && cell.m5_rank === 1,
+        "the tie branch in the chip is unreachable — check CrossTargetView",
+      );
+    }
+  }
+
+  // ── Rank and score must come from the same block. ──
+  //
+  // The defect this guards: `coverage_sensitivity[].m5_rank` is a *best binder*
+  // rank, while `rho_m5` beside it is ranking accuracy. Rendering those two in
+  // one chip read as "we are not first", when the ρ rank is 1 on both learnable
+  // datasets at 16.7% and 33%. Every rank the surface prints next to a ρ value
+  // is now derived from the ρ block, and this asserts the two agree.
+  for (const level of TOGGLE_COVERAGE) {
+    for (const dataset of datasets) {
+      const cell = cross.coverage_sensitivity.find(
+        (entry) => entry.dataset === dataset && entry.coverage_label === level,
+      );
+      const row = cross.targets.find(
+        (entry) => entry.dataset === dataset && entry.coverage_label === level,
+      );
+      if (!cell || !row) continue;
+      const rhoRank = rhoRankAtCoverage(cross, dataset, level);
+      const ranked = METHODS.map((method) => ({
+        method,
+        value: row.spearman_rho_at_last_checkpoint[method],
+      }))
+        .filter((entry): entry is { method: (typeof METHODS)[number]; value: number } =>
+          typeof entry.value === "number" && Number.isFinite(entry.value),
+        )
+        .sort((a, b) => b.value - a.value);
+      expect(
+        `cross: ${dataset}@${level} ρ rank agrees with the ρ block`,
+        rhoRank !== null && rhoRank === ranked.findIndex((entry) => entry.method === "m5_hybrid") + 1,
+        `${rhoRank} vs ${ranked.findIndex((entry) => entry.method === "m5_hybrid") + 1}`,
+      );
+      // Anyone quoting rank 1 must actually hold the top ρ in that cell.
+      if (rhoRank === 1) {
+        expect(
+          `cross: ${dataset}@${level} rank 1 means top ranking accuracy`,
+          (ranked[0]?.method ?? "") === "m5_hybrid",
+          ranked[0]?.method ?? "none",
+        );
+      }
+    }
+  }
   for (const cell of cross.coverage_sensitivity) {
     if (cell.m5_rank === null) continue;
     expect(`cross: ${cell.dataset}@${cell.coverage_label} rank in 1..5`, cell.m5_rank >= 1 && cell.m5_rank <= 5, String(cell.m5_rank));
@@ -486,6 +605,27 @@ function verifyCrossTarget(): void {
     "cross: 1n8z is absent from targets[]",
     cross.targets.every((row) => row.dataset !== "1n8z"),
     "1n8z leaked into the matrix",
+  );
+  // The reference card's chart is the ranking-accuracy series, so the series has
+  // to exist and carry the same endpoints the tiles quote.
+  expect(
+    "cross: reference publishes a ranking-accuracy series",
+    (reference?.spearman_rho_curves.length ?? 0) === (reference?.checkpoints.length ?? -1),
+    `${reference?.spearman_rho_curves.length} rows vs ${reference?.checkpoints.length} checkpoints`,
+  );
+  const referenceLastRho =
+    reference?.spearman_rho_curves[reference.spearman_rho_curves.length - 1];
+  expectClose(
+    "cross: reference chart endpoint agrees with the benchmark ρ curve",
+    referenceLastRho?.m5_hybrid ?? Number.NaN,
+    benchmark.spearman_rho_curves[benchmark.spearman_rho_curves.length - 1]?.m5_hybrid ?? Number.NaN,
+    1e-9,
+  );
+  expect(
+    "cross: reference ranking accuracy puts us first",
+    (referenceLastRho?.m5_hybrid ?? 0) >
+    Math.max(...METHODS.filter((method) => method !== "m5_hybrid").map((method) => referenceLastRho?.[method] ?? Number.NEGATIVE_INFINITY)),
+    `${referenceLastRho?.m5_hybrid} vs field`,
   );
 
   // ── The one positive ablation on an unlearnable target. ──

@@ -557,6 +557,71 @@ export function coverageCells(
     .sort((a, b) => order.indexOf(a.coverage_label) - order.indexOf(b.coverage_label));
 }
 
+/**
+ * The coverage levels a reader can switch between on the target explorer.
+ *
+ * Only these two, because they are the only levels for which a **paired ρ test**
+ * exists (`/api/attribution` publishes `… @ 16.7pct` and `… @ 33pct` and nothing
+ * at 5%). Offering 5pct in the switch would turn the headline comparison into a
+ * "not measured" tile on every dataset; it stays available in the sensitivity
+ * strip, where it is a budget-robustness row rather than a head-to-head result.
+ */
+export const TOGGLE_COVERAGE = ["16.7pct", "33pct"] as const;
+
+export type ToggleCoverage = (typeof TOGGLE_COVERAGE)[number];
+
+/** `"16.7pct"` → `"17%"`; `"33pct"` → `"33%"`. */
+export function coverageLabelShort(label: string): string {
+  const match = /^([\d.]+)pct$/.exec(label);
+  return match ? `${Math.round(Number(match[1]))}%` : label;
+}
+
+/**
+ * One `targets[]` cell for a dataset at a requested coverage.
+ *
+ * This replaces the four hand-written `find(… "16.7pct") ?? find(…)` chains that
+ * used to pin every surface to the pre-registered rate. The fallback stays: a
+ * dataset measured only at 16.7pct (1N8Z, via `/api/benchmark`) must still
+ * render rather than show an empty card.
+ */
+export function targetRow(
+  cross: CrossTargetPayload,
+  dataset: string,
+  coverageLabel: string,
+): CrossTargetPayload["targets"][number] | null {
+  return (
+    cross.targets.find(
+      (entry) => entry.dataset === dataset && entry.coverage_label === coverageLabel,
+    ) ??
+    cross.targets.find(
+      (entry) => entry.dataset === dataset && entry.coverage_label === "16.7pct",
+    ) ??
+    cross.targets.find((entry) => entry.dataset === dataset) ??
+    null
+  );
+}
+
+/**
+ * Our **ranking-accuracy** rank (1 = best) within one dataset × coverage cell.
+ *
+ * Deliberately separate from `CoverageSensitivityRow.m5_rank`, which is computed
+ * from AUBQC by `run_cross_target_benchmark.py`. The two orderings disagree — on
+ * 1N8Z at 100 runs we are 1st on ranking accuracy and 3rd on best-binder-found —
+ * so a surface that quotes a rank and a ρ value side by side must take **both**
+ * from the ρ block. Mixing them was the bug this function exists to prevent.
+ */
+export function rhoRankAtCoverage(
+  cross: CrossTargetPayload,
+  dataset: string,
+  coverageLabel: string,
+): number | null {
+  const row = cross.targets.find(
+    (entry) => entry.dataset === dataset && entry.coverage_label === coverageLabel,
+  );
+  if (!row) return null;
+  return rankOf(row.spearman_rho_at_last_checkpoint, "m5_hybrid");
+}
+
 /** Every dataset in the sensitivity matrix, in first-seen order. */
 export function coverageDatasets(cross: CrossTargetPayload): string[] {
   const seen: string[] = [];

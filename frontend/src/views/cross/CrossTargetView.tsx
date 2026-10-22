@@ -12,12 +12,17 @@ import { HBarChart, LineChart } from "../../components/charts";
 import {
   bestMethod,
   coverageCells,
+  coverageLabelShort,
   funnelStages,
   learnableRhoEvidence,
   METHODS,
   partitionClasses,
   rhoPairedTest,
+  rhoRankAtCoverage,
   strongestWarmStart,
+  targetRow,
+  TOGGLE_COVERAGE,
+  type ToggleCoverage,
 } from "../../lib/derive";
 import { int, methodMeta, num, pExact, percentOf100, pvalue } from "../../lib/format";
 import { countOf, flukeOdds, gainText, methodName, relativeGain } from "../../lib/plain";
@@ -306,64 +311,133 @@ function TargetExplorer({
     return [...learnable, ...rest, "1n8z"];
   }, [partition]);
   const [active, setActive] = useState<string>(targets[0] ?? "1n8z");
+  const [coverage, setCoverage] = useState<ToggleCoverage>("16.7pct");
 
   const isReference = active === "1n8z";
-  const row =
-    payload.targets.find((entry) => entry.dataset === active && entry.coverage_label === "16.7pct") ??
-    payload.targets.find((entry) => entry.dataset === active) ??
-    null;
+  const row = targetRow(payload, active, coverage);
   const cells = coverageCells(payload, active);
 
   return (
     <Panel
       eyebrow="One dataset at a time"
       title="Pick a target and see the whole comparison"
-      lede="Every method, both measures, and the paired test that decides whether a gap is real. 1N8Z * is the main dataset, measured by the full 35-test protocol rather than a resized cell."
+      lede="Every method, both measures, and the paired test that decides whether a gap is real. Switch the share of the library a round may sample to see whether the result survives a different budget. 1N8Z * is the main dataset, measured by the full 35-test protocol rather than a resized cell."
       actions={
-        <div className="flex flex-wrap gap-1">
-          {targets.map((target) => {
-            const selected = target === active;
-            const isRef = target === "1n8z";
-            return (
-              <button
-                key={target}
-                type="button"
-                onClick={() => setActive(target)}
-                className="focus-ring rounded-lg border px-2 py-1 text-[10.5px] font-medium transition-colors"
-                style={{
-                  borderColor: selected ? "var(--accent-line)" : "var(--border)",
-                  color: selected ? "var(--accent)" : "var(--ink-dim)",
-                  background: selected ? "var(--accent-soft)" : "transparent",
-                }}
-                title={
-                  isRef
-                    ? "1N8Z — the main dataset, measured by the primary 35-test protocol rather than a resized cell"
-                    : undefined
-                }
-              >
-                {/*
-                 * Every tab is just its dataset id. `1N8Z (main)` was the only
-                 * one carrying a parenthetical, which read as a different kind
-                 * of control rather than as the same list. The distinction that
-                 * matters — this one is the full protocol, not a resized cell —
-                 * is carried by the asterisk and the lede below.
-                 */}
-                {shortTarget(target).toUpperCase()}
-                {isRef ? <span style={{ color: "var(--gold)" }}> *</span> : null}
-              </button>
-            );
-          })}
+        <div className="flex flex-col items-end gap-1.5">
+          <div className="flex flex-wrap gap-1">
+            {targets.map((target) => {
+              const selected = target === active;
+              const isRef = target === "1n8z";
+              return (
+                <button
+                  key={target}
+                  type="button"
+                  onClick={() => setActive(target)}
+                  className="focus-ring rounded-lg border px-2 py-1 text-[10.5px] font-medium transition-colors"
+                  style={{
+                    borderColor: selected ? "var(--accent-line)" : "var(--border)",
+                    color: selected ? "var(--accent)" : "var(--ink-dim)",
+                    background: selected ? "var(--accent-soft)" : "transparent",
+                  }}
+                  title={
+                    isRef
+                      ? "1N8Z — the main dataset, measured by the primary 35-test protocol rather than a resized cell"
+                      : undefined
+                  }
+                >
+                  {/*
+                   * Every tab is just its dataset id. `1N8Z (main)` was the only
+                   * one carrying a parenthetical, which read as a different kind
+                   * of control rather than as the same list. The distinction that
+                   * matters — this one is the full protocol, not a resized cell —
+                   * is carried by the asterisk and the lede below.
+                   */}
+                  {shortTarget(target).toUpperCase()}
+                  {isRef ? <span style={{ color: "var(--gold)" }}> *</span> : null}
+                </button>
+              );
+            })}
+          </div>
+          <CoverageSwitch
+            value={coverage}
+            onChange={setCoverage}
+            /*
+             * 1N8Z is published once, at the pre-registered rate, by a different
+             * artifact (`/api/benchmark`). Offering a 33% button there would
+             * imply a cell that does not exist, so the switch says *why* it is
+             * unavailable instead of silently doing nothing.
+             */
+            unavailableReason={
+              isReference
+                ? "1N8Z is measured once at the pre-registered 17% rate by the primary benchmark; there is no 33% cell to switch to."
+                : null
+            }
+          />
         </div>
       }
     >
       {isReference && reference ? (
         <ReferenceDetail reference={reference} />
       ) : row ? (
-        <TargetDetail row={row} cells={cells} attribution={attribution} target={active} />
+        <TargetDetail row={row} cells={cells} attribution={attribution} target={active} cross={payload} />
       ) : (
         <p className="text-[12px] ink-faint">No measured cell for {active}.</p>
       )}
     </Panel>
+  );
+}
+
+/**
+ * The budget switch for the target explorer.
+ *
+ * Two levels, not three: a paired **ranking-accuracy** test is published for
+ * 16.7% and 33% only, so those are the two a reader can compare head to head.
+ * 5% still exists in the sensitivity strip below, where it is a robustness row
+ * rather than a result.
+ */
+function CoverageSwitch({
+  value,
+  onChange,
+  unavailableReason,
+}: {
+  value: ToggleCoverage;
+  onChange: (next: ToggleCoverage) => void;
+  unavailableReason: string | null;
+}) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="label text-[9px]" title="The share of the usable library one round may sample">
+        library per round
+      </span>
+      <div
+        className="flex overflow-hidden rounded-lg border"
+        style={{ borderColor: "var(--border)" }}
+        role="group"
+        aria-label="Share of the library sampled per round"
+      >
+        {TOGGLE_COVERAGE.map((label) => {
+          const selected = label === value;
+          const disabled = unavailableReason !== null;
+          return (
+            <button
+              key={label}
+              type="button"
+              onClick={() => onChange(label)}
+              disabled={disabled}
+              aria-pressed={selected}
+              className="focus-ring mono px-2 py-0.5 text-[10px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-45"
+              style={{
+                color: selected ? "var(--accent)" : "var(--ink-dim)",
+                background: selected ? "var(--accent-soft)" : "transparent",
+              }}
+              title={unavailableReason ?? `Show every number measured at ${coverageLabelShort(label)} coverage`}
+            >
+              {coverageLabelShort(label)}
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -372,11 +446,13 @@ function TargetDetail({
   cells,
   attribution,
   target,
+  cross,
 }: {
   row: CrossTargetRow;
   cells: ReturnType<typeof coverageCells>;
   attribution: AttributionPayload | null;
   target: string;
+  cross: CrossTargetPayload;
 }) {
   const best = bestMethod(row.aubqc);
   const rhoBest = bestMethod(row.spearman_rho_at_last_checkpoint);
@@ -498,32 +574,72 @@ function TargetDetail({
         </div>
       </div>
 
+      {/*
+       * Both orderings are shown side by side, and each one is labelled.
+       *
+       * `m5_rank` is computed from **best binder found** by the cross-target
+       * script, while `rho_m5` beside it is ranking accuracy. Rendering the two
+       * unlabelled in one chip was the defect: a reader compared a best-binder
+       * rank against the ranking-accuracy number the rest of the page leads with,
+       * and concluded we had not won where we had. The ρ rank is now read from
+       * the same block as the ρ score, so rank and score cannot disagree.
+       */}
       {cells.length > 1 ? (
         <div className="mt-3 border-t pt-2.5" style={{ borderColor: "var(--border)" }}>
           <div className="mb-1.5 flex items-center gap-1.5">
             <span className="label text-[9px]">Does it still win when the budget changes?</span>
-            <InfoTip label="Lower is better">
-              Our rank among the five methods at each library size, not a score. The same target, run against a
-              larger or smaller share of its library — a method that wins at only one setting is a coincidence.
+            <InfoTip label="Two different orderings">
+              Each box reports two rankings among the five methods, at one library size.{" "}
+              <strong>Ranking accuracy</strong> is the measure the rest of this page leads with: does the method
+              put the genuinely better candidates on top. <strong>Best binder</strong> is the single best
+              candidate it happened to find, which saturates once methods hit the same ceiling. A method can win
+              the first and tie the second — reporting only one would hide that.
             </InfoTip>
           </div>
           <div className="flex flex-wrap gap-1.5">
-            {cells.map((cell) => (
-              <span
-                key={cell.coverage_label}
-                className="mono flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[10px]"
-                style={{
-                  borderColor: cell.m5_rank === 1 ? "var(--accent-line)" : "var(--border)",
-                  color: cell.m5_rank === 1 ? "var(--accent)" : "var(--ink-dim)",
-                  background: cell.m5_rank === 1 ? "var(--accent-soft)" : "transparent",
-                }}
-                title={`AUBQC ${num(cell.aubqc_m5, 4)} vs best baseline ${cell.best_baseline ?? "—"} ${num(cell.aubqc_best_baseline, 4)}`}
-              >
-                <span className="ink-faint">{cell.coverage_pct.toFixed(0)}% of library</span>
-                rank {cell.m5_rank ?? "—"} of 5
-                <span className="ink-faint">accuracy {num(cell.rho_m5, 2)}</span>
-              </span>
-            ))}
+            {cells.map((cell) => {
+              const rhoRank = rhoRankAtCoverage(cross, cell.dataset, cell.coverage_label);
+              const leadsRho = cell.m5_leads_rho === true;
+              /*
+               * `m5_rank` counts only *strictly* better baselines
+               * (`1 + sum(v > m5)`), so an exact tie scores as rank 1. On the
+               * single-round control M5 and the baseline are bit-identical by
+               * construction — printing "1 of 5" would present a protocol
+               * artefact as a win, which is the one claim this tab must not make.
+               */
+              const tiedOnBestBinder =
+                cell.aubqc_m5 !== null &&
+                cell.aubqc_best_baseline !== null &&
+                Math.abs(cell.aubqc_m5 - cell.aubqc_best_baseline) < 5e-4;
+              return (
+                <span
+                  key={cell.coverage_label}
+                  className="mono flex flex-wrap items-center gap-x-1.5 gap-y-0.5 rounded-lg border px-2 py-1 text-[10px]"
+                  style={{
+                    borderColor: rhoRank === 1 ? "var(--accent-line)" : "var(--border)",
+                    color: rhoRank === 1 ? "var(--accent)" : "var(--ink-dim)",
+                    background: rhoRank === 1 ? "var(--accent-soft)" : "transparent",
+                  }}
+                  title={`Ranking accuracy ${num(cell.rho_m5, 4)} vs best baseline ${cell.best_baseline_rho ?? "—"} ${num(cell.rho_best_baseline, 4)} · best binder ${num(cell.aubqc_m5, 4)} vs ${cell.best_baseline ?? "—"} ${num(cell.aubqc_best_baseline, 4)}`}
+                >
+                  <span className="ink-faint">{cell.coverage_pct.toFixed(0)}% of library</span>
+                  <span>
+                    ranking {rhoRank ?? "—"} of 5
+                    <span className="ink-faint"> · accuracy {num(cell.rho_m5, 2)}</span>
+                  </span>
+                  <span className="ink-faint">
+                    {tiedOnBestBinder
+                      ? `best binder tied (${cell.best_baseline ?? "baseline"})`
+                      : `best binder ${cell.m5_rank ?? "—"} of 5`}
+                  </span>
+                  {leadsRho ? (
+                    <span className="font-semibold" style={{ color: "var(--accent)" }}>
+                      best ranking
+                    </span>
+                  ) : null}
+                </span>
+              );
+            })}
           </div>
         </div>
       ) : null}
@@ -565,9 +681,17 @@ function PairTile({
 }
 
 function ReferenceDetail({ reference }: { reference: NonNullable<CrossTargetPayload["reference_targets"][0]> }) {
-  const best = bestMethod(reference.aubqc);
+  const bestBinder = bestMethod(reference.aubqc);
+  const rhoBest = bestMethod(
+    (reference.spearman_rho_curves[reference.spearman_rho_curves.length - 1] ??
+      {}) as unknown as Record<string, number | null>,
+  );
   const last = reference.spearman_rho_curves[reference.spearman_rho_curves.length - 1];
-  const x = reference.curves.map((row) => row.query_count);
+  const lastAubqc = reference.curves[reference.curves.length - 1];
+  // The ranking-accuracy series is the one the rest of the page argues from, so
+  // it gets the chart. The best-binder curve moved to the tile: quoting the
+  // saturating metric as the picture is what made this card look like a tie.
+  const x = reference.spearman_rho_curves.map((row) => row.query_count);
   return (
     <div>
       <div className="mb-3 flex flex-wrap items-center gap-1.5">
@@ -586,31 +710,35 @@ function ReferenceDetail({ reference }: { reference: NonNullable<CrossTargetPayl
       </div>
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
         <div>
-          <div className="mb-1 flex items-center gap-1.5">
-            <span className="label text-[9.5px]">How good the best candidate got · 35-test protocol</span>
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <span className="label text-[9.5px]">Ranking accuracy · 0 = guessing · 1 = perfect</span>
+            <span className="mono text-[9.5px] ink-faint">
+              best: {rhoBest ? methodName(rhoBest.method) : "—"} {num(rhoBest?.value ?? null, 2)}
+            </span>
           </div>
           <LineChart
             x={x}
-            series={METHODS.map((method) => ({
+            series={METHODS.filter((method) => method !== "m1_random").map((method) => ({
               key: method,
               label: methodName(method),
               color: methodMeta(method).color,
-              values: reference.curves.map((row) => row[method]),
+              values: reference.spearman_rho_curves.map((row) => row[method]),
               dashed: method !== "m5_hybrid",
               width: method === "m5_hybrid" ? 2.2 : 1.3,
             }))}
             height={216}
             xLabel="lab tests spent"
-            yLabel="best binder so far"
+            yLabel="ranking accuracy"
             formatY={(value) => value.toFixed(2)}
-            ariaLabel="1N8Z reference curves: best binder found per method"
+            referenceLines={[{ value: 0, label: "0 · guessing", color: "var(--border-strong)" }]}
+            ariaLabel="1N8Z reference curves: ranking accuracy per method"
           />
         </div>
         <div className="grid grid-cols-2 gap-2 self-start">
           <KpiTile
-            label="Best binder found"
-            value={num(best?.value ?? null, 2)}
-            caption={best ? `top method: ${methodName(best.method)}` : ""}
+            label="Ranking accuracy, ours"
+            value={num(last?.m5_hybrid ?? null, 2)}
+            caption="0 = guessing · 1 = perfect"
             emphasis="accent"
           />
           <KpiTile
@@ -620,14 +748,26 @@ function ReferenceDetail({ reference }: { reference: NonNullable<CrossTargetPayl
             emphasis="accent"
           />
           <KpiTile
-            label="Ranking accuracy, ours"
-            value={num(last?.m5_hybrid ?? null, 2)}
+            label="Ranking accuracy, standard"
+            value={num(last?.m3_ucb ?? null, 2)}
             caption="0 = guessing · 1 = perfect"
-            emphasis="accent"
           />
-          <KpiTile label="Ranking accuracy, standard" value={num(last?.m3_ucb ?? null, 2)} caption="0 = guessing · 1 = perfect" />
+          <KpiTile
+            label="Best binder found"
+            value={num(bestBinder?.value ?? null, 2)}
+            caption={
+              bestBinder
+                ? `top: ${methodName(bestBinder.method)} · ours ${num(lastAubqc?.m5_hybrid ?? null, 2)}`
+                : ""
+            }
+          />
         </div>
       </div>
+      <p className="mt-2 text-[10.5px] leading-relaxed ink-faint">
+        The chart is the measure the rest of this page argues from. Best binder found saturates — every method
+        reaches the same ceiling within a few rounds, so a curve of it reads as a tie that no method earned.
+        Both numbers are in the tiles, and the full comparison of both is in the benchmark tab.
+      </p>
       <Note summary="Why the main dataset is shown separately">
         {reference.note} Measured at {reference.checkpoints.join(", ")} tests. It uses the same sampling rule
         as the other datasets, which is why it is comparable in method but not in budget.
