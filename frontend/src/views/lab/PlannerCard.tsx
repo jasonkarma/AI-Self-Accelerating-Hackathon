@@ -31,7 +31,7 @@ export function PlannerCard({ state }: { state: StatePayload }) {
             <section className="panel px-4 py-3.5">
                 <div className="label mb-1 flex items-center gap-1.5 text-[9.5px]">
                     <Gavel size={10} style={{ color: "var(--ink-faint)" }} />
-                    The planner's decision
+                    Decision Specialist
                 </div>
                 <p className="text-[11.5px] leading-relaxed ink-faint">
                     The opening batch has no planning step — five candidates are drawn at random before any evidence
@@ -50,7 +50,7 @@ export function PlannerCard({ state }: { state: StatePayload }) {
                 <div className="min-w-0">
                     <div className="label mb-1 flex items-center gap-1.5 text-[9.5px]">
                         <Gavel size={10} style={{ color: "var(--gold)" }} />
-                        The planner's decision · round {planner.round_number}
+                        Decision Specialist · round {planner.round_number}
                     </div>
                     <h2 className="text-[13px] font-semibold leading-snug ink">
                         A fourth agent reads all three arguments and commits to one claim
