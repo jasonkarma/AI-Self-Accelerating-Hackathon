@@ -326,7 +326,6 @@ def audit_past_hypotheses(ledger_df: pd.DataFrame, previous_decisions: list[dict
     carriers *worse than the surrogate expected* (``y_bind - mu_bind < 0``). A
     position whose measured residual was positive is never inverted, however the
     round was graded — that inversion was the negative-feedback half of the
-    oscillation. A legacy round with no ``pre_query_expectation`` has no residual
     to read, so it falls back to the tested-positions rule rather than declaring
     nothing falsifiable.
 
