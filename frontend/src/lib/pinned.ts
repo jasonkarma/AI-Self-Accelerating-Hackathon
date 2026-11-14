@@ -19,8 +19,8 @@ export const PINNED = {
   /** The production objective law shipped at `e567cd4` and still in force. */
   objectiveLaw: "a_null := a_base",
   lockedCommit: "28b2520",
-  /** Ptarmigan-1 ERBB2 binding oracle: ChEMBL CHEMBL1824 (assay_type B, median pchembl). */
-  ptarmiganOracle: "CHEMBL1824 / assay_type=B / canonical SMILES median",
+  /** Ptarmigan-1 in-distribution small-molecule panel (3 targets, all ood=[]). */
+  ptarmiganPanel: "CDK2 (CHEMBL301, 298 aa) · BRAF (CHEMBL5145, 766 aa) · CHK1 (CHEMBL4630, 476 aa)",
 } as const;
 
 /** First 8 hex characters — the form the pill shows before the tooltip. */

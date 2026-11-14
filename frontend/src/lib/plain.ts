@@ -141,6 +141,27 @@ export const METHOD_WORDS: Record<string, { name: string; full: string; role: st
     m5_hybrid: { name: "Virtual Lab", full: "Virtual Lab (ours)", role: "This work." },
     m5_warm_start: { name: "Virtual Lab, guided start", full: "Virtual Lab with a guided first batch", role: "Same loop, smarter first five candidates." },
     live_m5: { name: "The recorded run", full: "The recorded run", role: "The single campaign the demo replays." },
+    // Ptarmigan-1 structure-free virtual screen methods (Short-Range).
+    m3_ucb_cold: {
+        name: "M3 UCB (Cold)",
+        full: "Standard UCB, cold start",
+        role: "Active-learning baseline with no Ptarmigan prior — random round-0.",
+    },
+    ptarmigan_zeroshot: {
+        name: "Ptarmigan ranking",
+        full: "Static Ptarmigan engagement ranking",
+        role: "Virtual screen ranking by predicted engagement, never entering the lab.",
+    },
+    ptarmigan_static: {
+        name: "Ptarmigan static",
+        full: "Ptarmigan static engagement order",
+        role: "Same 35-well budget, spent in engagement order — no learning.",
+    },
+    m5_ptarmigan_hybrid: {
+        name: "M5 Ptarmigan hybrid",
+        full: "Ptarmigan-warm-started hybrid loop",
+        role: "Warm start from Ptarmigan engagement + hotspot-driven delta-agent loop.",
+    },
 };
 
 export function methodName(key: string): string {

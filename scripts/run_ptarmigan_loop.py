@@ -1,30 +1,29 @@
 #!/usr/bin/env python3
-"""Close the Loop on a Ptarmigan-1 Screen — Stages A and B.
+"""Close the Loop on a Ptarmigan-1 Screen — Stages A and B, three targets.
 
 Usage
 -----
-    # CDK2 (default target for this run)
-    python scripts/run_ptarmigan_loop.py
+    # CDK2 (already completed, snapshotted)
+    # python scripts/run_ptarmigan_loop.py --target CDK2
 
-    # CDK2 dry-run
-    python scripts/run_ptarmigan_loop.py --dry-run
+    # BRAF dry-run first (inspect coverage block for ood before spending)
+    python scripts/run_ptarmigan_loop.py --target BRAF --dry-run
+    # BRAF live (if dry-run confirms ood=[])
+    python scripts/run_ptarmigan_loop.py --target BRAF --bypass-gate
 
-    # ERBB2 (HER2) — explicitly
-    python scripts/run_ptarmigan_loop.py --target ERBB2 --chembl-id CHEMBL1824 --uniprot P04626 --n-residues 630
+    # CHK1 dry-run
+    python scripts/run_ptarmigan_loop.py --target CHK1 --dry-run
+    # CHK1 live (if dry-run confirms ood=[])
+    python scripts/run_ptarmigan_loop.py --target CHK1 --bypass-gate
+
+    # Merge all three per-target artifacts into combined results/ptarmigan_loop.json
+    python scripts/run_ptarmigan_loop.py --merge
 
     # Stage A only (fetch screen, residue map, curate library)
-    python scripts/run_ptarmigan_loop.py --stage A --dry-run
+    python scripts/run_ptarmigan_loop.py --stage A --target BRAF --dry-run
 
     # Stage B only (re-run benchmark from cached Stage A output)
-    python scripts/run_ptarmigan_loop.py --stage B
-
-Stage A reads the Ptarmigan-1 API, saves raw data locally, and writes
-``results/ptarmigan_screen_raw.json``.  Stage B runs the closed-loop
-falsification benchmark and writes ``results/ptarmigan_loop.json``.
-
-When ``--target`` is specified the active screen artifact is
-``results/ptarmigan_loop.json`` (same path, overwritten), so the frontend
-``CrossModalityCard`` always renders the most recent run's payload.
+    python scripts/run_ptarmigan_loop.py --stage B --target BRAF
 """
 
 from __future__ import annotations
@@ -55,10 +54,10 @@ if str(_ROOT) not in sys.path:
 class TargetConfig:
     """One Ptarmigan-1 screen target: gene, ChEMBL id, UniProt, and protein length."""
 
-    gene: str                     # e.g. "CDK2", "ERBB2"
-    chembl_id: str                # e.g. "CHEMBL301", "CHEMBL1824"
-    uniprot: str                  # e.g. "P24941", "P04626"
-    n_residues: int               # e.g. 298, 630
+    gene: str                     # e.g. "CDK2", "BRAF"
+    chembl_id: str                # e.g. "CHEMBL301", "CHEMBL5145"
+    uniprot: str                  # e.g. "P24941", "P15056"
+    n_residues: int               # e.g. 298, 766
 
     @property
     def stem(self) -> str:
@@ -70,17 +69,42 @@ class TargetConfig:
         """Curation CSV: ``data/processed/ptarmigan_<stem>.csv``."""
         return _ROOT / "data" / "processed" / f"ptarmigan_{self.stem}.csv"
 
+    @property
+    def raw_path(self) -> Path:
+        """Per-target Stage A cache: ``results/ptarmigan_screen_raw_<stem>.json``."""
+        return _ROOT / "results" / f"ptarmigan_screen_raw_{self.stem}.json"
 
-#: Default target: CDK2 (human cyclin-dependent kinase 2, short 298 aa).
+    @property
+    def loop_path(self) -> Path:
+        """Per-target Stage B output: ``results/ptarmigan_loop_<stem>.json``."""
+        return _ROOT / "results" / f"ptarmigan_loop_{self.stem}.json"
+
+    @property
+    def upload_csv_path(self) -> Path:
+        """Temporary upload CSV for this target."""
+        return _ROOT / "data" / "processed" / f"ptarmigan_{self.stem}_upload.csv"
+
+
+#: Target 1: CDK2 (human cyclin-dependent kinase 2, short 298 aa, completed).
 CDK2 = TargetConfig(gene="CDK2", chembl_id="CHEMBL301", uniprot="P24941", n_residues=298)
 
-#: ERBB2 config kept for reference.
-ERBB2 = TargetConfig(gene="ERBB2", chembl_id="CHEMBL1824", uniprot="P04626", n_residues=630)
+#: Target 2: BRAF (serine/threonine-protein kinase B-Raf, 766 aa).
+#: 766 aa equals training_max_residues — in-distribution if strictly <, otherwise
+#: falls back to SRC.
+BRAF = TargetConfig(gene="BRAF", chembl_id="CHEMBL5145", uniprot="P15056", n_residues=766)
 
-#: Known targets by gene name.
+#: Target 3: CHK1 (serine/threonine-protein kinase Chk1, 476 aa).
+CHK1 = TargetConfig(gene="CHK1", chembl_id="CHEMBL4630", uniprot="O14757", n_residues=476)
+
+#: Fallback for Target 2 if BRAF is OOD: SRC (proto-oncogene tyrosine-protein kinase Src, 536 aa).
+SRC = TargetConfig(gene="SRC", chembl_id="CHEMBL267", uniprot="P12931", n_residues=536)
+
+#: Known targets by gene name. ERBB2 is removed — no OOD target appears in the UI.
 _TARGET_MAP: dict[str, TargetConfig] = {
     "CDK2": CDK2,
-    "ERBB2": ERBB2,
+    "BRAF": BRAF,
+    "CHK1": CHK1,
+    "SRC": SRC,
 }
 
 
@@ -102,19 +126,13 @@ def _resolve_target(args: argparse.Namespace) -> TargetConfig:
 
 
 # ---------------------------------------------------------------------------
-# Paths (dynamic via TargetConfig)
+# Paths
 # ---------------------------------------------------------------------------
 
-SCREEN_RAW_PATH = _ROOT / "results/ptarmigan_screen_raw.json"
-"""Cached Stage A output — always overwritten by the most recent run."""
-
-LOOP_RESULT_PATH = _ROOT / "results/ptarmigan_loop.json"
-"""Final Stage B output — always overwritten so the frontend renders the latest."""
-
-
-def _csv_upload_path(target: TargetConfig) -> Path:
-    """Temporary upload CSV path for a given target."""
-    return _ROOT / "data" / "processed" / f"ptarmigan_{target.stem}_upload.csv"
+COMBINED_LOOP_PATH = _ROOT / "results/ptarmigan_loop.json"
+"""Combined artifact written by ``--merge``: CDK2 stays in the root fields
+so existing backend/frontend tests remain 100% compatible; the ``targets``
+map carries the full Stage A + B payloads for all three targets."""
 
 
 # ===================================================================
@@ -135,7 +153,7 @@ def stage_a(*, target: TargetConfig, dry_run: bool = False, bypass_gate: bool = 
     9. Fetch the hit list (top compounds with engagement scores).
     10. For top compounds, fetch per-compound detail with ``include_residues=true``.
     11. Compute the consensus hotspot mask from residue engagement profiles.
-    12. Cache everything to ``results/ptarmigan_screen_raw.json``.
+    12. Cache everything to ``results/ptarmigan_screen_raw_<stem>.json``.
     """
     # 0. Load .env so PTARMIGAN_API_KEY is in os.environ.
     from core.env import load_env_file
@@ -231,7 +249,7 @@ def stage_a(*, target: TargetConfig, dry_run: bool = False, bypass_gate: bool = 
         import httpx
         from core.ptarmigan import _api_key, USER_AGENT
 
-        csv_path = _csv_upload_path(target)
+        csv_path = target.upload_csv_path
         upload_df = df[["smiles"]].copy()
         upload_df.insert(0, "id", df["compound_id"])
         upload_df.to_csv(csv_path, index=False)
@@ -271,7 +289,18 @@ def stage_a(*, target: TargetConfig, dry_run: bool = False, bypass_gate: bool = 
 
         if col_detail.get("skipped_rows", 0):
             print(f"[Stage A] {col_detail['skipped_rows']} rows skipped during embedding")
-        print(f"[Stage A] Collection ready: {col_detail.get('size', '?')} compounds embedded")
+        embedded_size = col_detail.get("size", 0)
+        print(f"[Stage A] Collection ready: {embedded_size} compounds embedded")
+
+        # Soft check: warn if >5% of compounds were skipped (Ptarmigan may reject
+        # inorganics, polymers, or unparseable SMILES), but proceed.
+        skipped_pct = 1.0 - (embedded_size / len(df)) if len(df) > 0 else 0.0
+        if skipped_pct > 0.05:
+            print(f"[Stage A] WARNING: {embedded_size}/{len(df)} compounds embedded "
+                  f"({skipped_pct:.1%} skipped)", file=sys.stderr)
+        else:
+            print(f"[Stage A] ✓ Collection size {embedded_size} ≈ library size {len(df)} "
+                  f"({skipped_pct:.1%} skipped)")
 
     # 5. Estimate screen cost
     print("[Stage A] Estimating screen cost ...")
@@ -354,7 +383,7 @@ def stage_a(*, target: TargetConfig, dry_run: bool = False, bypass_gate: bool = 
         hotspot_indices = []
         print("[Stage A] No residue engagement data — hotspot mask unavailable")
 
-    # 12. Cache everything
+    # 12. Cache everything to per-target path
     payload = {
         "screen_id": screen_id,
         "protein_id": protein_id,
@@ -384,9 +413,10 @@ def stage_a(*, target: TargetConfig, dry_run: bool = False, bypass_gate: bool = 
         },
     }
 
-    SCREEN_RAW_PATH.parent.mkdir(parents=True, exist_ok=True)
-    SCREEN_RAW_PATH.write_text(json.dumps(payload, indent=1, default=str))
-    print(f"[Stage A] ✓ Cached to {SCREEN_RAW_PATH}")
+    raw_path = target.raw_path
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_path.write_text(json.dumps(payload, indent=1, default=str))
+    print(f"[Stage A] ✓ Cached to {raw_path}")
 
     return 0
 
@@ -403,17 +433,18 @@ def stage_b(*, target: TargetConfig) -> int:
     3. Compute hotspot mask from residue engagement profiles.
     4. Run all four methods over 50 matched seeds.
     5. Compute paired comparisons (each active method vs m3_ucb_cold).
-    6. Write the final ``results/ptarmigan_loop.json`` artifact.
+    6. Write the per-target ``results/ptarmigan_loop_<stem>.json`` artifact.
     """
     import numpy as np
 
-    print("[Stage B] Loading Stage A cache ...")
-    if not SCREEN_RAW_PATH.exists():
-        print(f"[Stage B] ERROR: {SCREEN_RAW_PATH} not found. Run Stage A first.",
+    raw_path = target.raw_path
+    print(f"[Stage B] Loading Stage A cache from {raw_path} ...")
+    if not raw_path.exists():
+        print(f"[Stage B] ERROR: {raw_path} not found. Run Stage A first.",
               file=sys.stderr)
         return 1
 
-    raw = json.loads(SCREEN_RAW_PATH.read_text())
+    raw = json.loads(raw_path.read_text())
     screen_id = raw.get("screen_id", "?")
     gene = raw.get("protein_gene", target.gene)
     n_hits = raw.get("n_hits", 0)
@@ -484,16 +515,17 @@ def stage_b(*, target: TargetConfig) -> int:
     result["hotspot_residue_indices"] = hotspot_indices
     result["hotspot_n_residues"] = len(hotspot_mask)
     result["ptarmigan_model_version"] = raw.get("model_version", "")
-    result["stage_a_cached"] = str(SCREEN_RAW_PATH)
+    result["stage_a_cached"] = str(raw_path)
     result["coverage"] = raw.get("coverage")
 
     # Build human-readable summary
     result["summary"] = _build_summary(result)
 
-    # Write
-    LOOP_RESULT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    LOOP_RESULT_PATH.write_text(json.dumps(result, indent=1, default=str))
-    print(f"[Stage B] ✓ Written to {LOOP_RESULT_PATH}")
+    # Write to per-target path
+    loop_path = target.loop_path
+    loop_path.parent.mkdir(parents=True, exist_ok=True)
+    loop_path.write_text(json.dumps(result, indent=1, default=str))
+    print(f"[Stage B] ✓ Written to {loop_path}")
 
     # Print judge summary
     print("\n" + "=" * 60)
@@ -579,12 +611,156 @@ def _build_summary(result: dict) -> str:
 
 
 # ===================================================================
+# MERGE — Combine per-target artifacts into combined payload
+# ===================================================================
+
+def merge_artifacts(*, targets: list[TargetConfig]) -> int:
+    """Merge per-target Stage A + B artifacts into ``results/ptarmigan_loop.json``.
+
+    CDK2 stays in the root fields for backend/frontend compatibility.
+    The ``targets`` map carries the full payload for all targets.
+    """
+    print("=" * 60)
+    print("MERGING per-target artifacts into combined payload")
+    print("=" * 60)
+
+    # Load CDK2 as the root payload (frontend compatibility).
+    cdk2_loop = CDK2.loop_path
+    if not cdk2_loop.exists():
+        print(f"[MERGE] ERROR: {cdk2_loop} not found — cannot build combined payload",
+              file=sys.stderr)
+        return 1
+    combined = json.loads(cdk2_loop.read_text())
+    print(f"[MERGE] Loaded CDK2 root payload from {cdk2_loop}")
+
+    # Load raw CDK2 screen
+    cdk2_raw = CDK2.raw_path
+    if cdk2_raw.exists():
+        combined["stage_a_payload"] = json.loads(cdk2_raw.read_text())
+        print(f"[MERGE] Loaded CDK2 Stage A from {cdk2_raw}")
+
+    # Build targets map.
+    targets_payload: dict[str, dict] = {}
+
+    for t in targets:
+        loop_path = t.loop_path
+        if loop_path.exists():
+            payload = json.loads(loop_path.read_text())
+            raw_path = t.raw_path
+            if raw_path.exists():
+                payload["stage_a_payload"] = json.loads(raw_path.read_text())
+            targets_payload[t.gene] = payload
+            print(f"[MERGE]   {t.gene}: loaded from {loop_path}")
+        else:
+            print(f"[MERGE]   {t.gene}: SKIPPED (no artifact at {loop_path})")
+
+    combined["targets"] = targets_payload
+    combined["n_targets"] = len(targets_payload)
+    combined["target_genes"] = list(targets_payload.keys())
+
+    # Build cross-target summary
+    combined["cross_summary"] = _build_cross_summary(targets_payload)
+
+    # Write combined artifact
+    COMBINED_LOOP_PATH.parent.mkdir(parents=True, exist_ok=True)
+    COMBINED_LOOP_PATH.write_text(json.dumps(combined, indent=1, default=str))
+    print(f"[MERGE] ✓ Combined artifact written to {COMBINED_LOOP_PATH}")
+    print(f"[MERGE]   {len(targets_payload)} targets: {', '.join(targets_payload.keys())}")
+
+    # Print cross-target judge summary
+    print("\n" + "=" * 60)
+    print("CROSS-TARGET JUDGE SUMMARY")
+    print("=" * 60)
+    print(combined["cross_summary"])
+    print("=" * 60)
+
+    return 0
+
+
+def _build_cross_summary(targets_payload: dict[str, dict]) -> str:
+    """Side-by-side comparison across all targets."""
+    lines: list[str] = []
+    lines.append(f"Panel: {len(targets_payload)} in-distribution small-molecule targets")
+    lines.append("")
+
+    # Header
+    header = f"{'Target':<12s} {'aa':>5s} {'OOD':<6s} {'Library':>8s} {'Screen':>8s} {'Cost':>7s} {'N_Hotspot':>10s} {'M5-ρ':>8s} {'M3-ρ':>8s} {'Zeroshot-ρ':>12s} {'M5-Δρ':>10s}"
+    lines.append(header)
+    lines.append("-" * len(header))
+
+    for gene in ("CDK2", "BRAF", "CHK1", "SRC"):
+        p = targets_payload.get(gene)
+        if p is None:
+            continue
+        cov = p.get("coverage", {})
+        ood = cov.get("ood_reasons", [])
+        n_res = cov.get("sequence_length", "?")
+        lib = p.get("library_size", "?")
+        nhits = p.get("n_hits", "?")
+        cost = p.get("screen_cost_usd", "?")
+        nhs = p.get("hotspot_n_residues", "?")
+
+        methods = p.get("methods", {})
+        m5 = methods.get("m5_ptarmigan_hybrid", {})
+        m3 = methods.get("m3_ucb_cold", {})
+        zs = methods.get("ptarmigan_zeroshot", {})
+
+        m5_rho = f"{m5.get('rho', 'N/A'):.4f}" if m5.get("rho") is not None else "N/A"
+        m3_rho = f"{m3.get('rho', 'N/A'):.4f}" if m3.get("rho") is not None else "N/A"
+        zs_rho = f"{zs.get('rho', 'N/A'):.4f}" if zs.get("rho") is not None else "N/A"
+
+        # M5 delta vs M3
+        paired = p.get("paired_comparisons", {})
+        m5_pair = paired.get("m5_ptarmigan_hybrid", {})
+        sp = m5_pair.get("spearman_rho_at_q35", {})
+        m5_delta = sp.get("mean_diff")
+        m5_dr = f"{m5_delta:+.4f}" if m5_delta is not None and not (isinstance(m5_delta, float) and math.isnan(m5_delta)) else "N/A"
+
+        ood_str = str(ood) if ood else "[]"
+        lines.append(
+            f"{gene:<12s} {str(n_res):>5s} {ood_str:<6s} "
+            f"{str(lib):>8s} {str(nhits):>8s} {str(cost):>7s} {str(nhs):>10s} "
+            f"{m5_rho:>8s} {m3_rho:>8s} {zs_rho:>12s} {m5_dr:>10s}"
+        )
+
+    lines.append("")
+    lines.append("Metrics shown: M5-ρ = m5_ptarmigan_hybrid spearman_rho, "
+                 "M3-ρ = m3_ucb_cold spearman_rho, "
+                 "Zeroshot-ρ = ptarmigan_zeroshot spearman_rho, "
+                 "M5-Δρ = mean_diff of m5 vs m3 spearman_rho")
+    lines.append("")
+    lines.append("Paired falsification status (each vs m3_ucb_cold):")
+    for gene in ("CDK2", "BRAF", "CHK1", "SRC"):
+        p = targets_payload.get(gene)
+        if p is None:
+            continue
+        paired = p.get("paired_comparisons", {})
+        falsification_count = sum(
+            s.get("falsification_events", 0) or 0
+            for s in (p.get("methods", {}).get("m5_ptarmigan_hybrid", {}).get("per_seed") or [])
+        )
+        for tname in ("ptarmigan_static", "m5_ptarmigan_hybrid"):
+            comp = paired.get(tname, {})
+            sp = comp.get("spearman_rho_at_q35", {})
+            md = sp.get("mean_diff")
+            pv = sp.get("p_value")
+            n = sp.get("n", 0)
+            if md is not None and not (isinstance(md, float) and math.isnan(md)):
+                pv_str = f"p={pv:.4e}" if pv is not None and not (isinstance(pv, float) and math.isnan(pv)) else "p=N/A"
+                lines.append(
+                    f"  {gene:>6s} {tname:25s} n={n:3d}  Δ={md:+.4f}  {pv_str}"
+                )
+
+    return "\n".join(lines)
+
+
+# ===================================================================
 # CLI
 # ===================================================================
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Close the Loop on a Ptarmigan-1 Screen — Stages A and B",
+        description="Close the Loop on a Ptarmigan-1 Screen — Stages A and B (three-target panel)",
     )
     p.add_argument(
         "--stage", choices=("A", "B", "AB"), default="AB",
@@ -593,9 +769,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--target", default="CDK2",
-        help="Target gene name.  One of CDK2 (default), ERBB2, or a custom name "
-        "with --chembl-id.  The active output always goes to "
-        "results/ptarmigan_loop.json so the frontend renders the latest run.",
+        help="Target gene name.  One of CDK2 (default), BRAF, CHK1, SRC, or a custom name "
+        "with --chembl-id.  The per-target output goes to "
+        "results/ptarmigan_loop_<stem>.json.  Run --merge to combine.",
     )
     p.add_argument(
         "--chembl-id", default=None,
@@ -618,11 +794,34 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--bypass-gate", action="store_true",
         help="Skip the $15 hard credit gate (only use if user explicitly confirmed)",
     )
+    p.add_argument(
+        "--merge", action="store_true",
+        help="Merge all per-target artifacts into one combined results/ptarmigan_loop.json. "
+        "CDK2 stays in the root fields for compatibility; targets map carries full payloads.",
+    )
+    p.add_argument(
+        "--targets", nargs="+", default=None,
+        help="Target gene names for --merge or sequential run (e.g. --targets CDK2 BRAF CHK1)",
+    )
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+
+    # Merge mode
+    if args.merge:
+        tnames = args.targets or ["CDK2", "BRAF", "CHK1"]
+        targets = []
+        for name in tnames:
+            if name.upper() in _TARGET_MAP:
+                targets.append(_TARGET_MAP[name.upper()])
+            else:
+                print(f"[MERGE] Unknown target: {name}", file=sys.stderr)
+                return 1
+        return merge_artifacts(targets=targets)
+
+    # Normal mode: single target
     target = _resolve_target(args)
 
     print(f"Target: {target.gene} (ChEMBL {target.chembl_id}, UniProt {target.uniprot}, "
