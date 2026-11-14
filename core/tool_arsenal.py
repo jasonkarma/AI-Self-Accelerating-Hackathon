@@ -1,7 +1,9 @@
-"""Six deterministic, JSON-serializable scientific tools."""
+"""Six deterministic, JSON-serializable scientific tools (plus a read-only Ptarmigan view)."""
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterable
+from pathlib import Path
 import numpy as np
 import pandas as pd
 
@@ -563,6 +565,89 @@ def compute_cost_and_effort_saved(
             "saved_vs_exhaustive_usd": max(0, (full_pool - queried) * assay_cost_usd),
             "assay_days_parallel_batches": int(np.ceil(queried / 5)),
             "full_pool": int(full_pool)}
+
+
+# ── Read-only Ptarmigan-1 residue map tool (outside TOOL_REGISTRY) ────────
+#
+# Deliberately NOT registered in TOOL_REGISTRY, TOOL_ROUTING, TOOL_TIERS, or
+# ACTIVE_TOOL_ORDER: adding it there would break ``len(TOOL_REGISTRY) == 6``,
+# the ordered name list, and the tier partition in three separate tests.  It is
+# a module-level function that reads from the cached script artifact, never from
+# the live Ptarmigan-1 API, so it is safe to call at any time.
+#
+# The frontend renders the payload from ``/api/ptarmigan``; this tool exists so
+# the *agent council* can read the hotspot residues and engagement rankings
+# during a planning round — a deliberately read-only, latency-free view.
+
+_PTARMIGAN_LOOP_PATH: Path | None = None
+"""Injectable path for tests; defaults to ``results/ptarmigan_loop.json`` at first call."""
+
+
+def _ptarmigan_loop_path() -> Path:
+    from config.settings import SETTINGS as _SETTINGS  # local import keeps module importable alone
+    return _PTARMIGAN_LOOP_PATH or _SETTINGS.root / "results/ptarmigan_loop.json"
+
+
+def query_ptarmigan_residue_map() -> dict:
+    """Read-only view of the cached Ptarmigan-1 screen residue map and benchmark.
+
+    Loads ``results/ptarmigan_loop.json`` and returns a structured subset the
+    agent council can query: target gene, hotspot residue indices, top 5 hits
+    with engagement, and the head-to-head paired comparison between
+    ``m5_ptarmigan_hybrid`` and ``m3_ucb_cold``.
+
+    Returns a dict with ``available: False`` when the artifact is absent, just
+    like the ``/api/ptarmigan`` endpoint, so callers (council or UI) branch on
+    ``available`` rather than catching ``FileNotFoundError``.
+    """
+    path = _ptarmigan_loop_path()
+    try:
+        payload: dict = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {
+            "tool": "query_ptarmigan_residue_map",
+            "available": False,
+            "detail": f"Ptarmigan loop artifact not found at {path}",
+        }
+
+    hotspot = payload.get("hotspot_residue_indices", [])
+    methods = payload.get("methods", {})
+    paired = payload.get("paired_comparisons", {})
+    screen_id = payload.get("screen_id", "")
+    target_gene = payload.get("target_gene", "")
+
+    # Top 5 hits by engagement.
+    hits = payload.get("hits", [])
+    top5 = [
+        {"rank": h.get("rank"), "compound_id": h.get("compound_id"),
+         "engagement": h.get("engagement"), "predicted_residue": h.get("predicted_residue"),
+         "predicted_residue_letter": h.get("predicted_residue_letter")}
+        for h in hits[:5]
+    ]
+
+    return {
+        "tool": "query_ptarmigan_residue_map",
+        "available": True,
+        "screen_id": screen_id,
+        "target_gene": target_gene,
+        "n_hits": len(hits),
+        "library_size": payload.get("library_size", 0),
+        "hotspot_residues_total": len(hotspot),
+        "hotspot_residue_indices": hotspot[:25],  # top 25 to keep payload small
+        "top5_hits": top5,
+        "methods": {
+            m: {
+                "aubqc": methods.get(m, {}).get("aubqc"),
+                "rho": methods.get(m, {}).get("rho"),
+                "top_decile_hit_rate": methods.get(m, {}).get("top_decile_hit_rate"),
+            }
+            for m in ("ptarmigan_zeroshot", "m3_ucb_cold", "ptarmigan_static", "m5_ptarmigan_hybrid")
+        },
+        "paired_vs_cold_ucb": {
+            t: paired.get(t, {}).get("spearman_rho_at_q35", {})
+            for t in ("ptarmigan_static", "m5_ptarmigan_hybrid")
+        },
+    }
 
 
 TOOL_REGISTRY: dict[str, Callable] = {fn.__name__: fn for fn in (

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from contextlib import asynccontextmanager
 
 from fastapi import Body, FastAPI, HTTPException, Query
@@ -373,6 +374,58 @@ def cross_target_payload() -> dict:
 
 @app.get("/api/cross-target")
 def cross_target(): return cross_target_payload()
+
+
+#: ``results/ptarmigan_loop.json`` — the Ptarmigan-1 screen + benchmark artifact.
+#: Deliberately cached with the same mtime+size pattern as the other script-written
+#: artifacts.  The endpoint is NOT in ``ENDPOINTS`` (``scripts/generate_api_contract.py``),
+#: so the locked contract stays byte-identical.
+_ptarmigan_cache: dict | None = None
+_ptarmigan_key: tuple | None = None
+
+
+def _clean_nan(obj):
+    """Recursively replace ``NaN`` / ``Infinity`` with ``None`` for JSON safety."""
+    if isinstance(obj, dict):
+        return {k: _clean_nan(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_clean_nan(v) for v in obj]
+    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return None
+    return obj
+
+
+def _ptarmigan_payload() -> dict:
+    """The Ptarmigan-1 cross-modality extension report.
+
+    Served verbatim from ``results/ptarmigan_loop.json``.  Absent file degrades
+    to ``available: False`` — the same pattern as the lockbox and cross-target
+    payloads — so the React frontend renders a graceful message rather than a 500.
+    """
+    global _ptarmigan_cache, _ptarmigan_key
+    path = SETTINGS.root / "results/ptarmigan_loop.json"
+    key = _stat_key(path)
+    if _ptarmigan_cache is not None and _ptarmigan_key == key:
+        return _ptarmigan_cache
+    payload = _load_json(path)
+    if payload is None:
+        result = {
+            "available": False,
+            "path": str(path),
+            "detail": (
+                "Ptarmigan-1 screen not yet run; "
+                "run `python scripts/run_ptarmigan_loop.py`"
+            ),
+        }
+    else:
+        payload["available"] = True
+        result = _clean_nan(payload)
+    _ptarmigan_cache, _ptarmigan_key = result, key
+    return result
+
+
+@app.get("/api/ptarmigan")
+def ptarmigan(): return _ptarmigan_payload()
 
 
 #: ``results/attribution_ablation.json`` memoized on mtime+size, same pattern as

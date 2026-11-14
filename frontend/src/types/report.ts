@@ -327,6 +327,64 @@ export interface ReferenceTarget {
   checkpoints: number[];
 }
 
+/** One Ptarmigan-1 hit (as stored in the artifact). */
+export interface PtarmiganHit {
+  rank: number;
+  compound_id: string;
+  name: string;
+  smiles: string;
+  engagement: number;
+  score: number;
+  predicted_residue: number;
+  predicted_residue_letter: string;
+}
+
+/** One method's summary in the Ptarmigan benchmark. */
+export interface PtarmiganMethodSummary {
+  aubqc: number | null;
+  rho: number | null;
+  top_decile_hit_rate: number | null;
+}
+
+/** The paired-test block for one treatment vs m3_ucb_cold. */
+export interface PtarmiganPairedEntry {
+  metric: string;
+  n: number;
+  mean_diff: number;
+  se: number;
+  t_stat: number;
+  p_value: number;
+  seeds_won: number;
+}
+
+/** `GET /api/ptarmigan` — the Ptarmigan-1 cross-modality extension. */
+export interface PtarmiganPayload {
+  available: boolean;
+  detail?: string;
+  path?: string;
+  screen_id?: string;
+  target_gene?: string;
+  target_uniprot?: string;
+  library_size?: number;
+  n_hits?: number;
+  screen_cost_usd?: string;
+  ptarmigan_model_version?: string;
+  hotspot_residue_indices?: number[];
+  hotspot_n_residues?: number;
+  hits?: PtarmiganHit[];
+  methods?: Record<string, PtarmiganMethodSummary>;
+  paired_comparisons?: Record<string, Record<string, PtarmiganPairedEntry>>;
+  metadata?: {
+    seeds: number;
+    rounds: number;
+    batch_size: number;
+    initial_queries: number;
+    total_queries_per_seed: number;
+    methods: string[];
+  };
+  summary?: string;
+}
+
 /** `GET /api/cross-target` — the sweep, the funnel, the gate, the reference row. */
 export interface CrossTargetPayload {
   available: boolean;

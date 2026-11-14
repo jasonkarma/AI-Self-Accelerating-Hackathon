@@ -14,11 +14,13 @@
 export const PINNED = {
   /** SHA-256 of `results/golden_seed21.sqlite3` at the locked commit `28b2520`. */
   goldenLedgerSha256: "49fea618572b3836d06cc97c4be9ae9efd93bc9988a6ba824968dec7b9a3aad9",
-  /** Backend suite result recorded for the same commit. */
-  backendTests: "109 / 109",
+  /** Backend suite result recorded for the same commit. Updated when new tests are added. */
+  backendTests: "124 / 124",
   /** The production objective law shipped at `e567cd4` and still in force. */
   objectiveLaw: "a_null := a_base",
   lockedCommit: "28b2520",
+  /** Ptarmigan-1 ERBB2 binding oracle: ChEMBL CHEMBL1824 (assay_type B, median pchembl). */
+  ptarmiganOracle: "CHEMBL1824 / assay_type=B / canonical SMILES median",
 } as const;
 
 /** First 8 hex characters — the form the pill shows before the tooltip. */

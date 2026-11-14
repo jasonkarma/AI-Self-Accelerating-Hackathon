@@ -94,6 +94,8 @@ export const endpoints = {
     getJson<import("../types/report").CrossTargetPayload>("/api/cross-target", signal),
   attribution: (signal?: AbortSignal) =>
     getJson<import("../types/report").AttributionPayload>("/api/attribution", signal),
+  ptarmigan: (signal?: AbortSignal) =>
+    getJson<import("../types/report").PtarmiganPayload>("/api/ptarmigan", signal),
 
   // Control routes on the same server (app/server.py).
   rounds: (signal?: AbortSignal) =>
