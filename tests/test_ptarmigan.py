@@ -378,3 +378,209 @@ def test_ptarmigan_benchmark_module_importable() -> None:
     assert hasattr(core.ptarmigan_benchmark, "run_ptarmigan_benchmark")
     assert hasattr(core.ptarmigan_benchmark, "paired_test")
     assert hasattr(core.ptarmigan_benchmark, "featurise_smiles")
+
+
+# ===================================================================
+# 7. Regression tests — the three benchmark bugs
+#
+# These exist because the published Stage B numbers were once wrong in a way
+# no existing test could see: the loop spent 11 of 35 wells, the hybrid's
+# Δ_agent was computed and discarded, and the falsification counter was summed
+# per pick. Each test below fails on that code and passes on the fix.
+# ===================================================================
+
+
+def _tiny_benchmark_fixture(n_compounds: int = 120):
+    """A self-contained pool: no network, no artifacts, deterministic labels.
+
+    The pool is deliberately much larger than ``TOTAL_QUERIES`` (35). With only
+    ~40 candidates the loop would assay nearly the whole library and every
+    method would converge on the same set, which would hide exactly the
+    divergence these tests are meant to detect.
+    """
+    import pandas as pd
+
+    rng = np.random.default_rng(7)
+    # A real affinity gradient so ρ is defined and UCB has something to learn.
+    pchembl = np.linspace(5.0, 9.4, n_compounds)
+    df = pd.DataFrame({
+        "compound_id": [f"C{i:03d}" for i in range(n_compounds)],
+        "smiles": [f"CC{'C' * (i % 7)}N{'O' * (i % 4)}" for i in range(n_compounds)],
+        "pchembl_value": pchembl,
+    })
+    ranking = [
+        {"compound_id": f"C{i:03d}", "engagement": float(rng.random())}
+        for i in range(n_compounds)
+    ]
+    engagements = {
+        f"C{i:03d}": [float(rng.random()) for _ in range(20)]
+        for i in range(n_compounds)
+    }
+    return df, ranking, engagements
+
+
+def test_round_loop_spends_the_full_batch_budget() -> None:
+    """Bug 1: BATCH_SIZE must actually be wired into the round loop.
+
+    Before the fix the loop picked exactly one compound per round, so every
+    active method topped out at INITIAL_QUERIES + ROUNDS = 11 queries while the
+    artifact still advertised ``total_queries_per_seed = 35``.
+    """
+    from core.ptarmigan_benchmark import (
+        BATCH_SIZE,
+        INITIAL_QUERIES,
+        ROUNDS,
+        TOTAL_QUERIES,
+        compute_hotspot_mask,
+        run_ptarmigan_benchmark,
+    )
+
+    df, ranking, engagements = _tiny_benchmark_fixture()
+    mask = compute_hotspot_mask(list(engagements.values()), top_pct=0.10)
+    result = run_ptarmigan_benchmark(
+        df, ranking, engagements, mask, n_residues=len(mask), seeds=2,
+    )
+
+    # The protocol arithmetic must be self-consistent.
+    assert TOTAL_QUERIES == INITIAL_QUERIES + ROUNDS * BATCH_SIZE
+
+    for method in ("m3_ucb_cold", "ptarmigan_static", "m5_ptarmigan_hybrid"):
+        for rec in result["methods"][method]["per_seed"]:
+            spent = INITIAL_QUERIES + len(rec["round_histories"])
+            assert spent == TOTAL_QUERIES, (
+                f"{method} spent {spent} wells, expected {TOTAL_QUERIES} — "
+                "BATCH_SIZE is not wired into the round loop"
+            )
+            assert len(rec["best_per_round"]) == ROUNDS
+
+
+def test_aubqc_is_measured_not_stubbed_to_none() -> None:
+    """Bug 1 (consequence): AUBQC must be a number for every active method.
+
+    It was hardcoded ``None`` because the loop never reached the Q=35
+    checkpoint, which silently emptied every ``aubqc`` paired comparison.
+    """
+    from core.ptarmigan_benchmark import compute_hotspot_mask, run_ptarmigan_benchmark
+
+    df, ranking, engagements = _tiny_benchmark_fixture()
+    mask = compute_hotspot_mask(list(engagements.values()), top_pct=0.10)
+    result = run_ptarmigan_benchmark(
+        df, ranking, engagements, mask, n_residues=len(mask), seeds=2,
+    )
+
+    for method in ("m3_ucb_cold", "ptarmigan_static", "m5_ptarmigan_hybrid"):
+        assert result["methods"][method]["aubqc"] is not None, f"{method} aubqc is None"
+
+    # The zero-wet-lab ranking method has no discovery curve by definition.
+    assert result["methods"]["ptarmigan_zeroshot"]["aubqc"] is None
+
+
+def test_hybrid_actually_uses_the_agent_prior() -> None:
+    """Bug 2: Δ_agent must change the pick, not be computed and discarded.
+
+    With ``delta`` dropped on the floor, ``m5_ptarmigan_hybrid`` and
+    ``ptarmigan_static`` produced byte-identical pick sequences — the hybrid had
+    no in-loop Ptarmigan signal at all.
+    """
+    from core.ptarmigan_benchmark import compute_hotspot_mask, run_ptarmigan_benchmark
+
+    df, ranking, engagements = _tiny_benchmark_fixture()
+    mask = compute_hotspot_mask(list(engagements.values()), top_pct=0.10)
+    result = run_ptarmigan_benchmark(
+        df, ranking, engagements, mask, n_residues=len(mask), seeds=2,
+    )
+
+    def sequences(method: str) -> set:
+        return {
+            tuple(h["candidate_id"] for h in rec["round_histories"])
+            for rec in result["methods"][method]["per_seed"]
+        }
+
+    static_seqs = sequences("ptarmigan_static")
+    hybrid_seqs = sequences("m5_ptarmigan_hybrid")
+    assert static_seqs.isdisjoint(hybrid_seqs), (
+        "m5_ptarmigan_hybrid picked exactly the same compounds as "
+        "ptarmigan_static — Δ_agent is not being added to the score"
+    )
+
+
+def test_falsification_is_a_bounded_rate_not_a_summed_count() -> None:
+    """Bug 3: events must never exceed the number of adaptive picks."""
+    from core.ptarmigan_benchmark import compute_hotspot_mask, run_ptarmigan_benchmark
+
+    df, ranking, engagements = _tiny_benchmark_fixture()
+    mask = compute_hotspot_mask(list(engagements.values()), top_pct=0.10)
+    result = run_ptarmigan_benchmark(
+        df, ranking, engagements, mask, n_residues=len(mask), seeds=3,
+    )
+
+    for rec in result["methods"]["m5_ptarmigan_hybrid"]["per_seed"]:
+        events = rec["falsification_events"]
+        queries = rec["falsification_queries"]
+        assert queries == len(rec["round_histories"]), "every pick must be counted"
+        assert 0 <= events <= queries, (
+            f"falsification {events}/{queries} is not a rate — "
+            "the counter is being summed instead of bounded"
+        )
+        assert rec["falsification_rate"] == pytest.approx(events / queries)
+
+
+# ===================================================================
+# 8. The committed artifact — the 3-target in-distribution contract
+# ===================================================================
+
+
+def _load_artifact() -> dict | None:
+    path = _ROOT / "results" / "ptarmigan_loop.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
+
+
+def test_artifact_has_no_out_of_distribution_target() -> None:
+    """No target in the published panel may carry an OOD reason."""
+    payload = _load_artifact()
+    if payload is None:
+        pytest.skip("results/ptarmigan_loop.json not generated")
+
+    targets = payload.get("targets") or {}
+    assert targets, "combined artifact must carry a targets map"
+
+    for gene, target in targets.items():
+        coverage = target.get("coverage") or {}
+        assert coverage.get("ood_reasons") == [], f"{gene} is out of distribution"
+        assert coverage.get("is_truncated") is False, f"{gene} is truncated"
+        seq_len = coverage.get("sequence_length")
+        training_max = coverage.get("training_max_residues")
+        if seq_len is not None and training_max is not None:
+            assert seq_len <= training_max, f"{gene}: {seq_len} aa exceeds {training_max}"
+
+
+def test_artifact_root_fields_stay_cdk2_for_compatibility() -> None:
+    """CDK2 must remain at the root so existing consumers keep working."""
+    payload = _load_artifact()
+    if payload is None:
+        pytest.skip("results/ptarmigan_loop.json not generated")
+
+    assert payload.get("target_gene") == "CDK2"
+    assert payload.get("screen_id"), "root screen_id must survive the merge"
+    assert payload.get("methods"), "root methods block must survive the merge"
+    assert payload.get("targets", {}).get("CDK2") is not None
+
+
+def test_artifact_targets_all_spent_the_full_budget() -> None:
+    """Every target in the published artifact must show 35 wells, not 11."""
+    from core.ptarmigan_benchmark import INITIAL_QUERIES, TOTAL_QUERIES
+
+    payload = _load_artifact()
+    if payload is None:
+        pytest.skip("results/ptarmigan_loop.json not generated")
+
+    for gene, target in (payload.get("targets") or {}).items():
+        per_seed = (target.get("methods", {})
+                    .get("m5_ptarmigan_hybrid", {})
+                    .get("per_seed") or [])
+        assert per_seed, f"{gene} has no per-seed records"
+        for rec in per_seed:
+            spent = INITIAL_QUERIES + len(rec.get("round_histories") or [])
+            assert spent == TOTAL_QUERIES, f"{gene} spent {spent} of {TOTAL_QUERIES} wells"

@@ -594,12 +594,18 @@ def _build_summary(result: dict) -> str:
                     f"  {treatment:25s} {metric:25s} n={n:3d}  Δ={md:+.4f}{pv_str}"
                 )
 
-    falsification_events = sum(
-        s.get("falsification_events", 0) or 0
-        for s in (methods.get("m5_ptarmigan_hybrid", {}).get("per_seed") or [])
-    )
+    per_seed = methods.get("m5_ptarmigan_hybrid", {}).get("per_seed") or []
+    falsification_events = sum(s.get("falsification_events", 0) or 0 for s in per_seed)
+    falsification_queries = sum(s.get("falsification_queries", 0) or 0 for s in per_seed)
     lines.append("")
-    lines.append(f"M5 falsification events (H0 rejections): {falsification_events}/50 seeds")
+    if falsification_queries:
+        rate = falsification_events / falsification_queries
+        lines.append(
+            "M5 falsification rate (picks that landed on a low-engagement compound): "
+            f"{falsification_events}/{falsification_queries} adaptive picks = {rate:.1%}"
+        )
+    else:
+        lines.append("M5 falsification rate: N/A (no adaptive picks)")
     lines.append("")
     lines.append("Key metrics:")
     lines.append(f"  spearman_rho (ptarmigan_zeroshot): {methods.get('ptarmigan_zeroshot', {}).get('rho', 'N/A')}")
@@ -729,16 +735,19 @@ def _build_cross_summary(targets_payload: dict[str, dict]) -> str:
                  "Zeroshot-ρ = ptarmigan_zeroshot spearman_rho, "
                  "M5-Δρ = mean_diff of m5 vs m3 spearman_rho")
     lines.append("")
-    lines.append("Paired falsification status (each vs m3_ucb_cold):")
+    lines.append("Paired head-to-head (each vs m3_ucb_cold, ranking accuracy):")
     for gene in ("CDK2", "BRAF", "CHK1", "SRC"):
         p = targets_payload.get(gene)
         if p is None:
             continue
         paired = p.get("paired_comparisons", {})
-        falsification_count = sum(
-            s.get("falsification_events", 0) or 0
-            for s in (p.get("methods", {}).get("m5_ptarmigan_hybrid", {}).get("per_seed") or [])
-        )
+        m5_seeds = p.get("methods", {}).get("m5_ptarmigan_hybrid", {}).get("per_seed") or []
+        fe = sum(s.get("falsification_events", 0) or 0 for s in m5_seeds)
+        fq = sum(s.get("falsification_queries", 0) or 0 for s in m5_seeds)
+        if fq:
+            lines.append(
+                f"  {gene:>6s} M5 falsification rate: {fe}/{fq} adaptive picks = {fe / fq:.1%}"
+            )
         for tname in ("ptarmigan_static", "m5_ptarmigan_hybrid"):
             comp = paired.get(tname, {})
             sp = comp.get("spearman_rho_at_q35", {})

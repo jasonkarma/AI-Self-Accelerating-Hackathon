@@ -241,14 +241,21 @@ class PtarmiganBenchmarkResult:
         return len(self.records)
 
     @property
-    def aubqc(self) -> float:
+    def aubqc(self) -> float | None:
+        """Mean AUBQC across seeds, or ``None`` when the method has no curve.
+
+        ``ptarmigan_zeroshot`` spends zero wet-lab wells, so it has no area
+        under a discovery curve by definition. Returning ``None`` (rather than
+        ``nan``) keeps that "not applicable" distinct from "computed and
+        undefined", and matches the per-seed value the loop emits.
+        """
         vals = [r["aubqc"] for r in self.records if r["aubqc"] is not None]
-        return float(np.mean(vals)) if vals else float("nan")
+        return float(np.mean(vals)) if vals else None
 
     @property
-    def aubqc_se(self) -> float:
+    def aubqc_se(self) -> float | None:
         vals = [r["aubqc"] for r in self.records if r["aubqc"] is not None]
-        return float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else float("nan")
+        return float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else None
 
     @property
     def rho(self) -> float | None:
@@ -310,6 +317,45 @@ def _ucb_pick(
             best_idx = u_idx
 
     return best_idx
+
+
+def _ucb_scores(
+    X: np.ndarray,
+    y: np.ndarray,
+    unqueried_idx: np.ndarray,
+    *,
+    beta: float = 1.0,
+) -> np.ndarray:
+    """Vectorised UCB score for every unqueried candidate.
+
+    Same arithmetic as :func:`_ucb_pick` (``mu + beta * sigma`` over the k
+    nearest known compounds), but the ``NearestNeighbors`` index is built once
+    per call instead of once per candidate. ``_ucb_pick`` still fits a model per
+    call; at one well per round that was tolerable, but a full 35-query budget
+    revisits this ~30 times per seed, so the M5 branch needs the batched form.
+
+    Returns an array aligned with ``unqueried_idx``. **Callers must treat the
+    result positionally** — index ``i`` is the score of ``unqueried_idx[i]``,
+    not of row ``i`` of ``X``.
+    """
+    known = ~np.isnan(y)
+    if not known.any():
+        return np.linalg.norm(X[unqueried_idx], axis=1)
+
+    k = min(5, int(known.sum()))
+    from sklearn.neighbors import NearestNeighbors
+
+    nn = NearestNeighbors(n_neighbors=k, metric="cosine").fit(X[known])
+    _, indices = nn.kneighbors(X[unqueried_idx])
+    known_rows = np.where(known)[0]
+
+    scores = np.empty(len(unqueried_idx), dtype=float)
+    for i in range(len(unqueried_idx)):
+        neighbours = known_rows[indices[i]]
+        mu = float(y[neighbours].mean())
+        sigma = float(y[neighbours].std(ddof=1)) if k > 1 else 0.0
+        scores[i] = mu + beta * sigma
+    return scores
 
 
 # ---------------------------------------------------------------------------
@@ -478,6 +524,7 @@ def _run_active(
     best_per_round: list[dict] = []
     round_histories: list[list[dict]] = []
     falsification_events = 0
+    falsification_queries = 0
     all_engagements = list(engagement_map.values()) if engagement_map else []
 
     # Check for degenerate edge case: all measured values are identical.
@@ -489,78 +536,77 @@ def _run_active(
             idx = id_to_idx[cid]
             y_measured[idx] = float(pool.loc[pool["compound_id"] == cid, "y_bind"].iloc[0])
 
+    # AUBQC is the mean best-so-far binding over the checkpoints reached
+    # (5, 10, 15, ... up to TOTAL_QUERIES). It is recorded here rather than
+    # left to the runner so the published figure is always the curve the loop
+    # actually walked.
+    aubqc_checkpoints: list[float] = []
     round_number = 0
     for round_idx in range(ROUNDS):
         round_number += 1
 
-        # ---- Current best qualified binding ----
-        known_y = y_measured[~np.isnan(y_measured)]
-        best_y = float(np.nanmax(known_y)) if known_y.size > 0 else float("nan")
-
-        best_per_round.append({
-            "round": round_idx + 1,
-            "query_count": len(queried),
-            "best_qualified_binding": best_y,
-        })
-
         if len(queried) >= TOTAL_QUERIES:
             break
 
-        # ---- Identify unqueried candidates ----
-        unqueried = [cid for cid in pool["compound_id"] if cid not in queried]
-        if not unqueried:
-            break
+        # ---- Spend one BATCH_SIZE batch this round (5 wells, 3:1:1 law) ----
+        n_this_round = min(BATCH_SIZE, TOTAL_QUERIES - len(queried))
+        for _slot in range(n_this_round):
+            # ---- Identify unqueried candidates (positional row indices) ----
+            unqueried = [cid for cid in pool["compound_id"] if cid not in queried]
+            if not unqueried:
+                break
 
-        unqueried_idx = np.asarray([id_to_idx[cid] for cid in unqueried], dtype=int)
+            unqueried_idx = np.asarray([id_to_idx[cid] for cid in unqueried], dtype=int)
 
-        # ---- Score and pick ----
-        remaining_X = X[unqueried_idx]
-        remaining_y = y_measured[unqueried_idx].copy()
+            # ---- Score and pick one ----
+            # Index convention: ``_ucb_pick`` returns a *row index into X*, and
+            # ``X[i]`` corresponds to ``pool.iloc[i]`` because ``pool`` was
+            # sorted by engagement and ``reset_index(drop=True)`` before the
+            # feature matrix was built. The M5 branch below indexes the
+            # ``unqueried`` list positionally instead, so it converts through
+            # ``id_to_idx`` — never through ``pool.iloc`` — to stay consistent.
+            if method in ("m3_ucb_cold", "ptarmigan_static"):
+                # m3 starts cold (random round-0); ptarmigan_static round-0 is
+                # the Ptarmigan top-5. After round 0 both are pure UCB on
+                # molecular features (no Ptarmigan signal in-loop).
+                pick_idx = _ucb_pick(X, y_measured, unqueried_idx, beta=1.0)
+                chosen_cid = str(pool.iloc[pick_idx]["compound_id"])
 
-        if method == "m3_ucb_cold":
-            # Pure UCB on molecular features (no Ptarmigan signal).
-            pick_idx = _ucb_pick(X, y_measured, unqueried_idx, beta=1.0)
-            chosen_cid = str(pool.iloc[pick_idx]["compound_id"])
+            elif method == "m5_ptarmigan_hybrid":
+                # UCB on features PLUS Δ_agent from engagement and hotspot
+                # similarity. Δ_agent is the whole point of the hybrid: without
+                # it this method is byte-identical to ptarmigan_static.
+                base_scores = _ucb_scores(X, y_measured, unqueried_idx, beta=1.0)
+                delta = np.zeros(len(unqueried), dtype=float)
+                for i, u_idx in enumerate(unqueried_idx):
+                    cid = str(pool.iloc[u_idx]["compound_id"])
+                    engagement = engagement_map.get(cid, 0.0)
+                    residue_sim = 0.0
+                    if hotspot_mask is not None and residue_engagements is not None:
+                        res_eng = residue_engagements.get(cid)
+                        if res_eng is not None:
+                            residue_sim = hotspot_cosine(res_eng, hotspot_mask, n_residues=n_residues)
+                    # Δ_agent = 0.4 * engagement + 0.6 * residue_sim (bounded)
+                    delta[i] = max(-0.15, min(0.15, 0.4 * engagement + 0.6 * residue_sim))
 
-        elif method == "ptarmigan_static":
-            # UCB on molecular features, but round-0 already seeded by Ptarmigan.
-            # Thereafter, UCB on features alone (no Δ_agent).
-            pick_idx = _ucb_pick(X, y_measured, unqueried_idx, beta=1.0)
-            chosen_cid = str(pool.iloc[pick_idx]["compound_id"])
+                # Add Δ_agent — the term that was previously computed and then
+                # dropped on the floor, making M5 ≡ ptarmigan_static.
+                best_i = int(np.argmax(base_scores + delta))
+                chosen_cid = unqueried[best_i]
 
-        elif method == "m5_ptarmigan_hybrid":
-            # UCB on features + Δ_agent from engagement and hotspot similarity.
-            base_scores = np.zeros(len(unqueried))
-            for i, u_idx in enumerate(unqueried_idx):
-                cid = str(pool.iloc[u_idx]["compound_id"])
-                engagement = engagement_map.get(cid, 0.0)
-                residue_sim = 0.0
-                if hotspot_mask is not None and residue_engagements is not None:
-                    res_eng = residue_engagements.get(cid)
-                    if res_eng is not None:
-                        residue_sim = hotspot_cosine(res_eng, hotspot_mask, n_residues=n_residues)
-                # Δ_agent = 0.4 * engagement + 0.6 * residue_sim (bounded to [-0.15, 0.15])
-                delta = 0.4 * engagement + 0.6 * residue_sim
-                delta = max(-0.15, min(0.15, delta))
+                # Falsification counts *pulls that landed on a low-engagement
+                # compound*, so it is expressed as a rate over the adaptive
+                # picks (``falsification_queries``), never as "events / seeds".
+                # A per-seed 0/1 flag was bounded but vacuous: with 30 picks it
+                # read 50/50 on every target and carried no information.
+                engagement_chosen = engagement_map.get(chosen_cid, 0.0)
+                falsification_queries += 1
+                if _falsification_event(engagement_chosen, all_engagements):
+                    falsification_events += 1
+            else:
+                raise ValueError(f"Unknown method: {method}")
 
-                # Get base UCB score.
-                if i < len(remaining_X):
-                    nn_idx = _nn_mu_sigma(X, y_measured, u_idx, k=5)
-                    base_scores[i] = nn_idx
-
-            # Pick the one with the highest + Δ_agent.
-            best_i = int(np.argmax(base_scores))
-            chosen_cid = unqueried[best_i]
-
-            # Falsification check.
-            engagement_chosen = engagement_map.get(chosen_cid, 0.0)
-            if _falsification_event(engagement_chosen, all_engagements):
-                falsification_events += 1
-        else:
-            raise ValueError(f"Unknown method: {method}")
-
-        # ---- Measure ----
-        if chosen_cid:
+            # ---- Measure ----
             queried.append(chosen_cid)
             chosen_y = float(pool.loc[pool["compound_id"] == chosen_cid, "y_bind"].iloc[0])
             y_measured[id_to_idx[chosen_cid]] = chosen_y
@@ -570,6 +616,17 @@ def _run_active(
                 "candidate_id": chosen_cid,
                 "y_bind": chosen_y,
             })
+
+        # ---- Checkpoint after the batch: best qualified binding so far ----
+        known_y = y_measured[~np.isnan(y_measured)]
+        best_y = float(np.nanmax(known_y)) if known_y.size > 0 else float("nan")
+        best_per_round.append({
+            "round": round_number,
+            "query_count": len(queried),
+            "best_qualified_binding": best_y,
+        })
+        if known_y.size > 0:
+            aubqc_checkpoints.append(best_y)
 
     # ---- Final metrics ----
     known_y = y_measured[~np.isnan(y_measured)]
@@ -588,13 +645,20 @@ def _run_active(
     return {
         "seed": seed,
         "method": method,
-        "aubqc": None,  # AUBQC requires a proper acquisition curve — leave for the runner.
+        # AUBQC = mean of the best-so-far binding at each batch checkpoint. This
+        # was previously hardcoded to None because the round loop only advanced
+        # one well per round and never reached TOTAL_QUERIES; it is now measured.
+        "aubqc": float(np.mean(aubqc_checkpoints)) if aubqc_checkpoints else None,
         "spearman_rho_at_q35": float(rho) if rho is not None else None,
         "top_decile_hits": top_decile_hits,
         "top_decile_queries": top_decile_queries,
         "best_per_round": best_per_round,
         "round_histories": round_histories,
         "falsification_events": falsification_events,
+        "falsification_queries": falsification_queries,
+        "falsification_rate": (
+            falsification_events / falsification_queries if falsification_queries else None
+        ),
         "hotspot_residues": [],  # Filled by the runner from Stage A data.
     }
 
