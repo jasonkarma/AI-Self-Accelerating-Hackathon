@@ -35,6 +35,7 @@ reasoning trace, the batch, the reveals and the benchmark curves live.
 | **Method under test** | **M5** Hybrid Virtual Lab — dual surrogate + deterministic tools + bounded agent priors |
 | **Baselines** | M1 Random · M2 Greedy dual-surrogate · M3 Dual-surrogate UCB · M4 UCB + fixed expert priors |
 | **Headline result** | M5 ρ = **0.6578** vs M3 ρ = 0.3442 at q=35 (+0.3136, p = 8.4e-32, **98/100 seeds**) |
+| **Cross-modality extension** | Same loop on **small molecules** vs 3 human kinases, screened by Talus Bio **Ptarmigan-1**, closed on **ChEMBL** measured affinities: M5 > M3 on share-of-gain in **3 of 3** targets |
 | **Stack** | Python 3.11+ / FastAPI backend · React + Vite + Tailwind frontend · SQLite ledger |
 | **Models** | Gemini 4 Argon, Claude Opus 5.5, Claude Sonnet 5.5, GPT-6.1 Sol — one family per seat |
 
@@ -171,6 +172,8 @@ Endpoints: `GET /api/state`, `/api/candidates`, `/api/benchmark`, `/api/cross-ta
 
 ## 6. Results at a glance
 
+### 6.1 Antibodies (the primary claim)
+
 **1N8Z, 100 seeds.** M5 wins on rank correlation at q=35 and ties on AUBQC:
 
 | Metric | M1 | M2 | M3 | M4 | **M5** |
@@ -197,6 +200,46 @@ same order as the gaps between methods, so it is reported beside ρ or not at al
 by itself evidence for the multi-agent hypothesis — where the agent fire rate is 0 % (e.g. `2fjg`),
 M5's advantage comes from pool-level scoring, not from the council; (c) the bundled dataset is a
 deterministic synthetic fixture until the real export is installed.
+
+### 6.2 Small molecules — the same loop, a different modality (Ptarmigan-1)
+
+The antibody half replays a campaign against a hidden oracle over AbBiBench. To show the loop is
+not specific to 13-residue CDR loops, the same closed loop is run against **oral small molecules
+and three human kinase targets**, with Talus Bio's **Ptarmigan-1** as the virtual screener in place
+of a trained surrogate. Ground truth is **ChEMBL measured affinities**, not simulation.
+
+Three provenances, kept distinct: Ptarmigan-1 supplies `engagement`, per-residue
+`residue_engagement` and `coverage`; ChEMBL supplies the measured `pchembl_value`; **every metric
+below is computed in this repo.** AUBQC and share-of-gain are not Talus scores — Ptarmigan-1
+predicts engagement and has no idea what a compound actually binds. That asymmetry is the point.
+
+| Target | length | prior quality (pool ρ) | M3 share of gain | **M5 share of gain** | Δ | p | seeds won |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `CHK1` | 476 aa | +0.379 (informative) | 0.931 | **0.987** | +0.056 | 6.8e-10 | 43/50 |
+| `CDK2` | 298 aa | +0.320 (informative) | 0.790 | **0.868** | +0.078 | 3.5e-07 | 40/50 |
+| `BRAF` | 766 aa | −0.020 (**noise**) | 0.892 | **0.931** | +0.039 | 1.5e-03 | 32/50 |
+
+M5 beats the cold baseline on all three, 50 matched seeds, 35 wells each, $2.2450 of live screen
+spend, every target `ood=[]`.
+
+**`BRAF` is the most instructive cell, because it is where a naive virtual screen fails.** Spending
+the first five wells on Ptarmigan's top-5 by engagement scores 0.535 against M3's 0.892
+(Δ = −0.357, p = 7.0e-34, **0 of 50 seeds won**, top-decile hit rate exactly 0.000) — because on
+BRAF the prior is statistically indistinguishable from noise. M5 survives it because Δ_agent is
+**centred on the pool mean**, so a compound engaging below average is pushed *down*. The loop can
+act against its own prior's advice, which is the self-correction the antibody half claims for
+`audit_past_hypotheses` — demonstrated here on a different modality, with a real screener, on
+measured data.
+
+M5 does **not** win on Spearman ρ over the 35 wells it assayed (trails M3 on CDK2 and CHK1, ties on
+BRAF), and the mechanism is measured rather than explained away: ρ is computed over whichever
+compounds a method chose, so a prior-driven exploiter is penalised for concentrating its budget at
+the top of the affinity distribution where little rank signal remains. Drawing 35 at random instead
+of by engagement rank moves CDK2's ρ from −0.077 to +0.313. Share-of-gain asks the question a
+discovery program decides on; within-batch ρ does not.
+
+Full tables, the three benchmark defects found and fixed, and the two scope rules that keep the
+comparison honest are in [`README.md`](../README.md) § *Results: cross-modality extension*.
 
 ---
 
