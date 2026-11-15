@@ -237,11 +237,14 @@ act against its own prior's advice, which is the self-correction the antibody ha
 measured data.
 
 M5 does **not** win on Spearman ρ over the 35 wells it assayed (trails M3 on CDK2 and CHK1, ties on
-BRAF), and the mechanism is measured rather than explained away: ρ is computed over whichever
+BRAF), and the mechanism is probed rather than explained away: ρ is computed over whichever
 compounds a method chose, so a prior-driven exploiter is penalised for concentrating its budget at
-the top of the affinity distribution where little rank signal remains. Drawing 35 at random instead
-of by engagement rank moves CDK2's ρ from −0.077 to +0.313. Share-of-gain asks the question a
-discovery program decides on; within-batch ρ does not.
+the top of the affinity distribution where little rank signal remains. Correlating engagement
+against measured affinity over CDK2's top 35 by engagement gives ρ = −0.077, while averaging over
+random 35-compound subsets gives +0.313 — the same 35-compound sample size, differing only in
+composition. That is offered as the mechanism by which concentration depresses ρ, not as a
+decomposition of M5's observed deficit. Share-of-gain asks the question a discovery program decides
+on; within-batch ρ does not.
 
 Full tables, the three benchmark defects found and fixed, and the two scope rules that keep the
 comparison honest are in [`README.md`](../README.md) § *Results: cross-modality extension*.

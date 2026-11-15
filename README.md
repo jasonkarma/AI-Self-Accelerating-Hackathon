@@ -421,11 +421,19 @@ p = 0.21, not significant). Top-decile hit rate is mixed: M5 0.171 vs M3 0.182 o
 
 This is expected rather than embarrassing, and the mechanism is measured. ρ is computed over
 whichever 35 compounds a method chose, so a prior-driven exploiter is penalised for concentrating
-its budget at the top of the affinity distribution where little rank signal remains. Sampling 35
-compounds at random instead of by engagement rank moves CDK2's ρ from **−0.077 to +0.313** and
-CHK1's from +0.100 to +0.363. Judging a prior-driven method by within-batch ρ is the wrong
-instrument; share-of-gain asks the question a discovery program actually decides on — *what was
-the best molecule you could put forward?*
+its budget at the top of the affinity distribution where little rank signal remains. A direct probe
+of that effect on CDK2: correlating engagement against measured affinity over the **top 35 by
+engagement** gives **ρ = −0.077**, whereas averaging over 400 random 35-compound subsets gives
+**+0.313 (sd 0.154)**. Same target, same prior, same 35 compounds — only the *composition* of the
+sampled set differs. CHK1 behaves the same way (+0.100 ranked vs +0.363 random). That the probe
+swings by ~0.39 on CDK2 purely from sample composition is the reason this repo does not lead with
+ρ for a prior-driven method: M3's cold seed batch is effectively a random draw and M5's is
+engagement-ranked, so a large part of their ρ gap is the same artifact rather than a difference in
+search quality. **This is an interpretation, not a measurement** — the probe varies the *ranking*
+rule's sample, not the two methods' actual queried sets, and it is offered as the mechanism by
+which concentrating the budget could depress ρ, not as a decomposition of the observed −0.111.
+Share-of-gain, by contrast, asks the question a discovery program actually decides on — *what was
+the best molecule you could put forward?* — and is the metric this section leads with.
 
 **Two scope rules that must not be quietly broken.**
 
