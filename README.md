@@ -329,6 +329,163 @@ but **neither reaches p < 0.05**. Three things must travel with that number:
 Falsification control: flipping the direction moves ρ from +0.3637 to −0.3787, so the
 direction handling is load-bearing rather than cosmetic.
 
+### Results: cross-modality extension — small molecules (Ptarmigan-1)
+
+Everything above is antibodies: a 13-residue CDRH3 loop, a hidden binding oracle over AbBiBench,
+and a structure-free surrogate. This section is the same closed loop applied to a **different
+modality** — oral small molecules against three human kinase targets — using Talus Bio's
+**Ptarmigan-1** as the virtual screener instead of a trained surrogate.
+
+```bash
+python scripts/run_ptarmigan_loop.py --target CDK2 --dry-run     # coverage + cost estimate, spends nothing
+python scripts/run_ptarmigan_loop.py --target BRAF --bypass-gate # Stage A (live screen) + Stage B (50 seeds)
+python scripts/run_ptarmigan_loop.py --merge                     # combine into results/ptarmigan_loop.json
+```
+
+**Three provenances, never to be conflated.** This experiment stands on three separate sources and
+a judge is entitled to know which number came from which:
+
+| Source | Provides | Does *not* provide |
+| --- | --- | --- |
+| **Ptarmigan-1** (Talus Bio, `ptarmigan.app`) | `engagement`, `score`, `predicted_residue`, per-residue `residue_engagement`, `coverage` (incl. `ood_reasons`, `training_max_residues`), screen cost | any metric in this section |
+| **ChEMBL** (EBI) | the wet-lab ground truth: `pchembl_value` = −log₁₀(molar), `assay_type="B"`, exact relations only | anything predictive |
+| **This repo** | the 35-well protocol, all four methods, AUBQC, share-of-gain, ρ, top-decile rate, falsification rate | — |
+
+**AUBQC and every headline figure below are ours. Ptarmigan-1 returns no such score.** It predicts
+engagement for a compound against a target; it does not know what the compound actually binds.
+That asymmetry is the entire point — ChEMBL's measured affinities close the loop on Talus's
+predictions, which is what makes this a real-world result rather than a simulation.
+
+**The panel: three in-distribution targets, all `ood=[]`.**
+
+| Target | UniProt | ChEMBL | Length | Library | Hits | Screen ID | Cost |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `CDK2` | P24941 | CHEMBL301 | 298 aa | 300 | 300 | `67d05220-180d-47aa-8d80-43a4b3599266` | $0.7500 |
+| `BRAF` | P15056 | CHEMBL5145 | 766 aa | 300 | 298 | `6c348ce3-c0ae-4588-b037-7931097eb7ef` | $0.7450 |
+| `CHK1` | O14757 | CHEMBL4630 | 476 aa | 300 | 300 | `b1391dc5-3f45-4e3e-842a-b6b637abea6d` | $0.7500 |
+
+Total live spend **$2.2450**, model `600m-esmc-v13-with-internal-epoch13:1006cf1f4b56`. Every
+target reports `ood_reasons: []` and `is_truncated: false` against
+`training_max_residues = 766`. **`BRAF` sits exactly on that boundary at 766 aa** — it is the
+longest protein the model will score without extrapolating, and it was confirmed in-distribution
+by a `--dry-run` coverage inspection *before* any credit was spent. `ERBB2` was dropped from the
+panel precisely because full-length `P04626` is 1255 aa and trips
+`exceeds_training_length`; a target the model cannot see in-distribution is not a fair test of it.
+
+Libraries are 300 exact (`standard_relation = "="`) `assay_type="B"` ChEMBL measurements spanning
+`pchembl_value` 5.0–9.5, deduplicated by canonical SMILES on the **median** per compound and
+sampled by affinity decile rather than top-N, so the pool carries a genuine gradient instead of a
+wall of near-identical high-affinity inhibitors. The same table is both the library uploaded to
+Ptarmigan-1 *and* the ground truth for Stage B — that identity is deliberate, because joining
+against a partially-measured library would make the static ranker unfairly weak.
+
+**Headline: share of the possible gain, 50 matched seeds, 35 wells each.**
+0 = no better than a typical compound in the library (the pool median); 1 = the best compound that
+exists in it. The floor is a property of the **pool**, never of a method — see the caveat below.
+
+| Target | pool floor → ceiling | M3 (cold UCB) | **M5 (hybrid)** | Δ vs M3 | p | seeds won |
+| --- | --- | --- | --- | --- | --- | --- |
+| `CDK2` | 7.265 → 9.480 | 0.790 | **0.868** | **+0.078** | **3.5e-07** | 40/50 |
+| `BRAF` | 7.240 → 9.400 | 0.892 | **0.931** | **+0.039** | **1.5e-03** | 32/50 |
+| `CHK1` | 7.300 → 9.470 | 0.931 | **0.987** | **+0.056** | **6.8e-10** | 43/50 |
+
+M5 beats the cold baseline on this metric on **all three targets**, every p ≤ 1.5e-3, winning
+32–43 of 50 matched seeds. Absolute AUBQC alongside it: CDK2 9.187 vs 9.014, BRAF 9.250 vs 9.167,
+CHK1 9.442 vs 9.320.
+
+**`BRAF` is the interesting result, and it is a vindication of the falsification design.**
+Blindly spending the first five wells on Ptarmigan's top-5 by engagement (`ptarmigan_static`) is
+*catastrophic* there — share of gain 0.535 against M3's 0.892, Δ = −0.357, p = 7.0e-34,
+**0 of 50 seeds won**, and a top-decile hit rate of exactly **0.000**. The reason is measurable:
+BRAF's pool-wide correlation between engagement and measured affinity is **ρ = −0.0197 (p ≈ 0.5)**
+— the prior is noise on this target. M5 rescues it (+0.039 over M3, p = 1.5e-3) because Δ_agent is
+**centred**, so a compound that engages *below* the pool average is pushed *down* rather than up.
+The loop is able to act against its own prior, which is the property the antibody half of this repo
+claims for `audit_past_hypotheses`. An uncentred prior cannot do this at all — it has no negative
+region to invert into.
+
+**The prior's quality predicts the difficulty, and that is checkable before any benchmark runs:**
+
+| Target | pool-wide ρ(engagement, pchembl) | n | verdict |
+| --- | --- | --- | --- |
+| `CHK1` | **+0.379** | 300 | informative — largest M5 margin, 43/50 |
+| `CDK2` | **+0.320** | 300 | informative, but see the range-restriction caveat |
+| `BRAF` | **−0.020** | 298 | noise — static seeding fails, hybrid survives |
+
+**What M5 does *not* win, stated plainly.** On Spearman ρ over the 35 compounds each method
+actually assayed, M5 trails M3 on CDK2 (+0.2142 vs +0.3252, Δ = −0.111, p = 7.6e-07) and on CHK1
+(+0.3460 vs +0.4262, Δ = −0.080, p = 1.3e-04), and ties on BRAF (−0.0162 vs −0.0506, Δ = +0.034,
+p = 0.21, not significant). Top-decile hit rate is mixed: M5 0.171 vs M3 0.182 on CDK2, 0.143 vs
+0.099 on BRAF, 0.057 vs 0.183 on CHK1.
+
+This is expected rather than embarrassing, and the mechanism is measured. ρ is computed over
+whichever 35 compounds a method chose, so a prior-driven exploiter is penalised for concentrating
+its budget at the top of the affinity distribution where little rank signal remains. Sampling 35
+compounds at random instead of by engagement rank moves CDK2's ρ from **−0.077 to +0.313** and
+CHK1's from +0.100 to +0.363. Judging a prior-driven method by within-batch ρ is the wrong
+instrument; share-of-gain asks the question a discovery program actually decides on — *what was
+the best molecule you could put forward?*
+
+**Two scope rules that must not be quietly broken.**
+
+- **Never compare ρ across scopes.** The active methods' ρ is over the 35 compounds they assayed;
+  `ptarmigan_zeroshot` never enters the lab, so its ρ is over the whole 300-compound pool. The
+  artifact carries `rho_scope` (`"queried"` / `"pool"`) and `rho_n` on every record precisely so
+  the two cannot be averaged or placed in one unlabelled column.
+- **Never normalize against a per-method floor.** An earlier revision rescaled each method
+  between *its own* seed-batch best and the pool ceiling, mirroring `core.baselines._seed_floor`
+  — but that helper is safe only because every antibody method shares one seed batch per seed.
+  Here the seed batches differ *by design*. On BRAF it gave M5 a floor of 9.220 (span 0.180)
+  against M3's 8.520 (span 0.880), scoring M5 at 0.167 and M3 at 0.686 **even though M5's raw
+  AUBQC was the higher of the two**. A per-method floor rewards starting badly and inverts the
+  comparison outright. The floor is now the pool median, identical for every method on a target.
+
+**Falsification rate** — the share of adaptive picks that landed on a compound in the bottom 30th
+percentile of the engagement ranking, i.e. instances where the loop spent a well against its own
+prior's advice: CDK2 16.7 % (250/1500), BRAF 16.7 % (250/1500), CHK1 26.7 % (400/1500). Reported
+as a rate over picks, never as "events per seed": an earlier version summed the counter across the
+30 adaptive picks of each seed and published "100/50 seeds", which is not a quantity a reader can
+interpret.
+
+**Three defects found in this benchmark and fixed before any number was published.** The
+harness, not the model, is the deliverable here — so these are documented with the regression
+tests that now pin them:
+
+1. **The loop spent 11 of 35 wells.** `BATCH_SIZE = 5` was declared, used to compute
+   `TOTAL_QUERIES = 35`, dumped into the artifact metadata — and never wired into the round loop,
+   which picked exactly one compound per round. The artifact therefore advertised a 35-query
+   protocol while running an 11-query one, and AUBQC was hardcoded `None` because the Q=35
+   checkpoint was unreachable. Pinned by `test_round_loop_spends_the_full_batch_budget` and
+   `test_aubqc_is_measured_not_stubbed_to_none`.
+2. **Δ_agent was dead code.** It was computed, clamped, and then never added to the score, so M5
+   was byte-identical to `ptarmigan_static` in-loop and the "hybrid" contributed no Ptarmigan
+   signal after the seed batch. Fixing the addition exposed a second, subtler failure of the same
+   term: engagement lives in [0.389, 0.605] and hotspot cosine in [0.370, 0.539], so their
+   weighted sum floored at 0.1554 — above the ±0.15 clip — and **100 % of compounds clamped to a
+   constant**, which cannot change an `argmax`. Hence the centring above. Pinned by
+   `test_centred_delta_is_signed_and_not_saturated` (asserts spread > 0, some negative values, and
+   < 25 % saturation) and `test_hybrid_diverges_from_static_on_the_same_seed_batch`.
+3. **Missing residue data was read as negative signal.** Only 50 of ~300 compounds carry a
+   residue profile (Stage A fetches detail for the top 50). Centring the cosine term against the
+   profile-holder mean handed the other 250 a uniform −0.30 push and pinned 83.3 % of the pool to
+   the clamp floor — "we have no data on this compound" rendered as "the prior is against this
+   compound". The residue term now contributes only where a profile exists. Pinned by
+   `test_missing_residue_profile_does_not_penalise_a_compound`.
+
+The first regression test written for defect 2 was itself wrong — it asserted that M5 and
+`ptarmigan_static` pick different compounds, which the differing seed batches alone satisfied, so
+it passed against the broken code. It was replaced with one that holds the seed batch fixed.
+
+**Artifact shape.** `results/ptarmigan_loop.json` keeps **CDK2 in the root fields**
+(`screen_id`, `target_gene`, `methods`, `paired_comparisons`, `coverage`, …) so every existing
+consumer is unaffected, and adds `targets` (full Stage A + B payload per gene), `target_genes`,
+`n_targets`, `cross_summary` and `stage_a_payload`. Per-target files
+(`results/ptarmigan_loop_<gene>.json`, `results/ptarmigan_screen_raw_<gene>.json`) are the
+source of truth that `--merge` reads, so re-running one target cannot destroy another's cached
+screen. `GET /api/ptarmigan` serves the combined artifact and is deliberately **not** in
+`api_contract.json`, which stays byte-identical. Raw Stage A responses are cached before any
+parsing, so a parsing bug can never cost a second screen.
+
 ### API contract
 
 ```bash
