@@ -397,8 +397,9 @@ CHK1 9.442 vs 9.320.
 Blindly spending the first five wells on Ptarmigan's top-5 by engagement (`ptarmigan_static`) is
 *catastrophic* there — share of gain 0.535 against M3's 0.892, Δ = −0.357, p = 7.0e-34,
 **0 of 50 seeds won**, and a top-decile hit rate of exactly **0.000**. The reason is measurable:
-BRAF's pool-wide correlation between engagement and measured affinity is **ρ = −0.0197 (p ≈ 0.5)**
-— the prior is noise on this target. M5 rescues it (+0.039 over M3, p = 1.5e-3) because Δ_agent is
+BRAF's pool-wide correlation between engagement and measured affinity is **ρ = −0.0197 over all 300
+compounds, p = 0.73** — the prior is noise on this target. M5 rescues it (+0.039 over M3, p = 1.5e-3)
+because Δ_agent is
 **centred**, so a compound that engages *below* the pool average is pushed *down* rather than up.
 The loop is able to act against its own prior, which is the property the antibody half of this repo
 claims for `audit_past_hypotheses`. An uncentred prior cannot do this at all — it has no negative
@@ -460,9 +461,11 @@ tests that now pin them:
 2. **Δ_agent was dead code.** It was computed, clamped, and then never added to the score, so M5
    was byte-identical to `ptarmigan_static` in-loop and the "hybrid" contributed no Ptarmigan
    signal after the seed batch. Fixing the addition exposed a second, subtler failure of the same
-   term: engagement lives in [0.389, 0.605] and hotspot cosine in [0.370, 0.539], so their
-   weighted sum floored at 0.1554 — above the ±0.15 clip — and **100 % of compounds clamped to a
-   constant**, which cannot change an `argmax`. Hence the centring above. Pinned by
+   term: engagement lives in [0.389, 0.605], so `0.4 × engagement` *alone* floors at 0.1554 —
+   already past the ±0.15 clip — and the cosine term is non-negative, so it only pushes further
+   past it (0.3775 at the observed minimum for compounds that do carry a residue profile).
+   **100 % of compounds clamped to a constant**, which cannot change an `argmax`. Hence the
+   centring above; measured saturation after the fix is 0.0 % (CDK2, CHK1) and 0.7 % (BRAF). Pinned by
    `test_centred_delta_is_signed_and_not_saturated` (asserts spread > 0, some negative values, and
    < 25 % saturation) and `test_hybrid_diverges_from_static_on_the_same_seed_batch`.
 3. **Missing residue data was read as negative signal.** Only 50 of ~300 compounds carry a

@@ -149,10 +149,12 @@ one was producing a number that looked like a result:
 
 Defect 3 is the general lesson: a test that cannot fail is worse than no test, because it converts
 an unverified claim into a green check. The repo now pins the invariant directly (spread > 0, some
-negative values, < 25 % saturation) and measures 0 % saturation on real data against 100 % before.
+negative values, < 25 % saturation) and measures 0.0–0.7 % saturation across the three real targets
+against 100 % before.
 
 **The most useful result is a failure.** On `BRAF` the Ptarmigan prior is statistically
-indistinguishable from noise (pool ρ = −0.020, p ≈ 0.5). Blindly spending the seed batch on its
+indistinguishable from noise (pool ρ = −0.020 over all 300 compounds, p = 0.73). Blindly spending
+the seed batch on its
 top-5 by engagement scores 0.535 against the cold baseline's 0.892 — Δ = −0.357, p = 7.0e-34, **0 of
 50 seeds won**, top-decile hit rate exactly 0.000. The centred hybrid survives it (+0.039,
 p = 1.5e-03) precisely because a centred Δ can go negative, so the loop can spend against its own
