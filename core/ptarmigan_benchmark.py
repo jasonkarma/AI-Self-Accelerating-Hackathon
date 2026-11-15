@@ -72,6 +72,7 @@ METHODS: tuple[str, ...] = (
 )
 
 PAIRED_METRICS: tuple[str, ...] = (
+    "normalized_aubqc",
     "aubqc",
     "spearman_rho_at_q35",
     "top_decile_hit_rate",
@@ -277,6 +278,27 @@ class PtarmiganBenchmarkResult:
     @property
     def aubqc_se(self) -> float | None:
         vals = [r["aubqc"] for r in self.records if r["aubqc"] is not None]
+        return float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else None
+
+    @property
+    def normalized_aubqc(self) -> float | None:
+        """Mean share-of-the-possible-gain across seeds (the headline metric).
+
+        0.0 = never beat the seed batch, 1.0 = found the pool's best binder.
+        ``ptarmigan_zeroshot`` has no curve, so this is ``None`` for it.
+        """
+        vals = [
+            r["normalized_aubqc"] for r in self.records
+            if r.get("normalized_aubqc") is not None
+        ]
+        return float(np.mean(vals)) if vals else None
+
+    @property
+    def normalized_aubqc_se(self) -> float | None:
+        vals = [
+            r["normalized_aubqc"] for r in self.records
+            if r.get("normalized_aubqc") is not None
+        ]
         return float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else None
 
     @property
@@ -595,7 +617,13 @@ def _run_zeroshot(seed: int, pool: pd.DataFrame, initial_ids: list[str]) -> dict
     return {
         "seed": seed,
         "method": "ptarmigan_zeroshot",
-        "aubqc": None,  # No active learning rounds.
+        # No wet-lab rounds, so there is no discovery curve to score. These are
+        # None by definition, not by failure — which is why the frontend must
+        # render them as "not applicable" rather than as a zero.
+        "aubqc": None,
+        "normalized_aubqc": None,
+        "pool_floor": None,
+        "pool_ceiling": None,
         "spearman_rho_at_q35": float(rho) if rho is not None and np.isfinite(rho) else None,
         "rho_scope": "pool",
         "rho_n": int(len(truth)),
@@ -655,6 +683,32 @@ def _run_active(
     # left to the runner so the published figure is always the curve the loop
     # actually walked.
     aubqc_checkpoints: list[float] = []
+
+    # ---- The [0, 1] ruler ----
+    # Raw AUBQC sits near its ceiling on this pool (CHK1's best compound is
+    # 9.47 pchembl and every method ends around 9.3-9.44), so an absolute gap of
+    # 0.08-0.17 understates how much of the available headroom a method
+    # captured.
+    #
+    # The floor MUST be a property of the pool, not of the method. An earlier
+    # version used each method's own seed-batch best, mirroring
+    # ``core.baselines._seed_floor`` — but that helper is safe only because every
+    # antibody method shares one seed batch per seed. Here the seed batches
+    # differ *by design*: that is the experiment. On BRAF it gave M5 a floor of
+    # 9.220 (span 0.180) against M3's 8.520 (span 0.880), so M5 scored 0.167
+    # while M3 scored 0.686 — even though M5's raw AUBQC was the higher of the
+    # two. A per-method floor rewards starting badly, which inverts the
+    # comparison outright.
+    #
+    # The pool median is method-independent and is already the project's
+    # reference point (``threshold_source = "pool_median"`` throughout the
+    # antibody artifacts). Against it, 0.0 = "no better than a typical compound
+    # in the library" and 1.0 = "found the best compound that exists" — one
+    # ruler, shared by every method on that target.
+    y_all = pool["y_bind"].to_numpy(dtype=float)
+    pool_floor = float(np.nanmedian(y_all))
+    pool_ceiling = float(np.nanmax(y_all))
+    normalized_checkpoints: list[float] = []
     round_number = 0
     for round_idx in range(ROUNDS):
         round_number += 1
@@ -735,6 +789,19 @@ def _run_active(
         })
         if known_y.size > 0:
             aubqc_checkpoints.append(best_y)
+            # Share of the possible gain against the pool's own ruler:
+            # 0.0 = no better than a typical compound in the library,
+            # 1.0 = the best compound that exists in it. The floor is the pool
+            # median, so every method on this target is scored on the same
+            # scale. A degenerate span (a pool with no headroom) yields None
+            # rather than a fabricated 0 or an infinity.
+            span = pool_ceiling - pool_floor
+            if np.isfinite(span) and span > 0:
+                normalized_checkpoints.append(
+                    min(1.0, max(0.0, (best_y - pool_floor) / span))
+                )
+            else:
+                normalized_checkpoints.append(float("nan"))
 
     # ---- Final metrics ----
     known_y = y_measured[~np.isnan(y_measured)]
@@ -753,10 +820,30 @@ def _run_active(
     return {
         "seed": seed,
         "method": method,
+        # ---- OUR metrics, not Talus's ----
+        # Everything below is computed by this benchmark. Ptarmigan-1 returns
+        # only ``engagement`` / ``score`` / ``residue_engagement`` / ``coverage``
+        # (see results/ptarmigan_screen_raw_*.json). AUBQC, its normalized form,
+        # ρ, top-decile hit rate and the falsification rate are ours, and the
+        # docs must never imply otherwise.
+        #
         # AUBQC = mean of the best-so-far binding at each batch checkpoint. This
         # was previously hardcoded to None because the round loop only advanced
         # one well per round and never reached TOTAL_QUERIES; it is now measured.
         "aubqc": float(np.mean(aubqc_checkpoints)) if aubqc_checkpoints else None,
+        # Share of the possible gain, on the same [0, 1] ruler as the antibody
+        # artifacts' ``normalized_aubqc``. None when no checkpoint resolved.
+        "normalized_aubqc": (
+            float(np.nanmean(normalized_checkpoints))
+            if normalized_checkpoints and not np.all(np.isnan(normalized_checkpoints))
+            else None
+        ),
+        # The [0, 1] ruler's endpoints, recorded so any reader can recompute the
+        # normalized figure from the raw one. ``pool_floor`` is the pool MEDIAN
+        # and is identical for every method on this target — that is what makes
+        # the comparison valid.
+        "pool_floor": pool_floor if np.isfinite(pool_floor) else None,
+        "pool_ceiling": pool_ceiling if np.isfinite(pool_ceiling) else None,
         "spearman_rho_at_q35": float(rho) if rho is not None else None,
         # An active method can only be ranked on the compounds it actually
         # assayed, so its ρ is over the 35-well subset — NOT comparable with
@@ -854,6 +941,8 @@ def _get_metric(record: dict, metric: str) -> float | None:
         return record.get("spearman_rho_at_q35")
     if metric == "aubqc":
         return record.get("aubqc")
+    if metric == "normalized_aubqc":
+        return record.get("normalized_aubqc")
     if metric == "top_decile_hit_rate":
         hits = record.get("top_decile_hits", 0)
         queries = record.get("top_decile_queries", 0)
@@ -902,9 +991,15 @@ def run_ptarmigan_benchmark(
         results[method] = {
             "method": method,
             "seeds": seeds,
+            # Headline: share of the possible gain, [0, 1], on the same ruler as
+            # the antibody artifacts. Raw AUBQC follows as the absolute figure.
+            "normalized_aubqc": result.normalized_aubqc,
+            "normalized_aubqc_se": result.normalized_aubqc_se,
             "aubqc": result.aubqc,
             "aubqc_se": result.aubqc_se,
             "rho": result.rho,
+            "rho_scope": records[0].get("rho_scope") if records else None,
+            "rho_n": records[0].get("rho_n") if records else None,
             "top_decile_hit_rate": result.top_decile_hit_rate,
             "per_seed": records,
         }

@@ -575,23 +575,41 @@ def _build_summary(result: dict) -> str:
         m = methods.get(method, {})
         rho = m.get("rho")
         dr = m.get("top_decile_hit_rate")
+        naubqc = m.get("normalized_aubqc")
+        # ρ is only comparable within a scope: the active methods are ranked on
+        # the 35 compounds they assayed, ptarmigan_zeroshot on the whole pool.
+        scope = m.get("rho_scope") or "queried"
         rho_str = f"{rho:.4f}" if rho is not None else "N/A"
         dr_str = f"{dr:.2%}" if dr is not None else "N/A"
-        lines.append(f"  {method:25s} ρ={rho_str:>10s}  top-decile={dr_str:>8s}")
+        naubqc_str = f"{naubqc:.3f}" if naubqc is not None else "N/A"
+        lines.append(
+            f"  {method:25s} best-binder-found={naubqc_str:>7s}  "
+            f"ranking-accuracy={rho_str:>8s} ({scope})  top-decile={dr_str:>8s}"
+        )
+
+    lines.append("")
+    lines.append(
+        "  best-binder-found = share of the possible gain, 0 = no better than the "
+        "starting batch, 1 = the best compound in the library.\n"
+        "  ranking-accuracy is computed over the compounds a method actually assayed, "
+        "so the two scopes above are not interchangeable."
+    )
 
     lines.append("")
     lines.append("Head-to-head paired comparisons (vs m3_ucb_cold baseline):")
     for treatment in ("ptarmigan_static", "m5_ptarmigan_hybrid"):
         comp = paired.get(treatment, {})
-        for metric in ("aubqc", "spearman_rho_at_q35", "top_decile_hit_rate"):
+        for metric in ("normalized_aubqc", "aubqc", "spearman_rho_at_q35", "top_decile_hit_rate"):
             pt = comp.get(metric, {})
             md = pt.get("mean_diff")
             pv = pt.get("p_value")
             n = pt.get("n", 0)
+            wins = pt.get("seeds_won")
             if md is not None and not (isinstance(md, float) and math.isnan(md)):
                 pv_str = f"  p={pv:.4e}" if pv is not None and not (isinstance(pv, float) and math.isnan(pv)) else ""
+                wins_str = f"  wins={wins}/{n}" if wins is not None else ""
                 lines.append(
-                    f"  {treatment:25s} {metric:25s} n={n:3d}  Δ={md:+.4f}{pv_str}"
+                    f"  {treatment:25s} {metric:25s} n={n:3d}  Δ={md:+.4f}{pv_str}{wins_str}"
                 )
 
     per_seed = methods.get("m5_ptarmigan_hybrid", {}).get("per_seed") or []
@@ -689,8 +707,22 @@ def _build_cross_summary(targets_payload: dict[str, dict]) -> str:
     lines.append(f"Panel: {len(targets_payload)} in-distribution small-molecule targets")
     lines.append("")
 
-    # Header
-    header = f"{'Target':<12s} {'aa':>5s} {'OOD':<6s} {'Library':>8s} {'Screen':>8s} {'Cost':>7s} {'N_Hotspot':>10s} {'M5-ρ':>8s} {'M3-ρ':>8s} {'Zeroshot-ρ':>12s} {'M5-Δρ':>10s}"
+    def _num(v: object, fmt: str = ".4f") -> str:
+        if v is None or (isinstance(v, float) and math.isnan(v)):
+            return "N/A"
+        return format(v, fmt)
+
+    # ---- Headline: best binder found, as a share of the possible gain ----
+    # This is the metric that separates the methods on every target in the panel,
+    # so it leads. ρ follows as a secondary column with its SCOPE printed,
+    # because an active method's ρ is over the 35 compounds it chose and the
+    # static ranker's is over the whole pool — putting them in one unlabelled
+    # column would invite a comparison the data cannot support.
+    header = (
+        f"{'Target':<7s} {'aa':>4s} {'OOD':<5s} {'Lib':>4s} {'Cost':>7s} "
+        f"{'M5 gain':>8s} {'M3 gain':>8s} {'Δgain':>7s} {'p':>9s} {'wins':>7s} "
+        f"{'M5 ρ':>7s} {'M3 ρ':>7s} {'pool ρ':>7s}"
+    )
     lines.append(header)
     lines.append("-" * len(header))
 
@@ -700,40 +732,43 @@ def _build_cross_summary(targets_payload: dict[str, dict]) -> str:
             continue
         cov = p.get("coverage", {})
         ood = cov.get("ood_reasons", [])
-        n_res = cov.get("sequence_length", "?")
-        lib = p.get("library_size", "?")
-        nhits = p.get("n_hits", "?")
-        cost = p.get("screen_cost_usd", "?")
-        nhs = p.get("hotspot_n_residues", "?")
-
         methods = p.get("methods", {})
         m5 = methods.get("m5_ptarmigan_hybrid", {})
         m3 = methods.get("m3_ucb_cold", {})
         zs = methods.get("ptarmigan_zeroshot", {})
 
-        m5_rho = f"{m5.get('rho', 'N/A'):.4f}" if m5.get("rho") is not None else "N/A"
-        m3_rho = f"{m3.get('rho', 'N/A'):.4f}" if m3.get("rho") is not None else "N/A"
-        zs_rho = f"{zs.get('rho', 'N/A'):.4f}" if zs.get("rho") is not None else "N/A"
+        m5_pair = (p.get("paired_comparisons", {}) or {}).get("m5_ptarmigan_hybrid", {})
+        na = m5_pair.get("normalized_aubqc", {})
+        wins = na.get("seeds_won")
+        n = na.get("n")
+        wins_str = f"{wins}/{n}" if wins is not None and n else "N/A"
 
-        # M5 delta vs M3
-        paired = p.get("paired_comparisons", {})
-        m5_pair = paired.get("m5_ptarmigan_hybrid", {})
-        sp = m5_pair.get("spearman_rho_at_q35", {})
-        m5_delta = sp.get("mean_diff")
-        m5_dr = f"{m5_delta:+.4f}" if m5_delta is not None and not (isinstance(m5_delta, float) and math.isnan(m5_delta)) else "N/A"
-
-        ood_str = str(ood) if ood else "[]"
         lines.append(
-            f"{gene:<12s} {str(n_res):>5s} {ood_str:<6s} "
-            f"{str(lib):>8s} {str(nhits):>8s} {str(cost):>7s} {str(nhs):>10s} "
-            f"{m5_rho:>8s} {m3_rho:>8s} {zs_rho:>12s} {m5_dr:>10s}"
+            f"{gene:<7s} {_num(cov.get('sequence_length'), 'd'):>4s} "
+            f"{('[]' if not ood else str(ood)):<5s} "
+            f"{_num(p.get('library_size'), 'd'):>4s} "
+            f"{str(p.get('screen_cost_usd', '?')):>7s} "
+            f"{_num(m5.get('normalized_aubqc'), '.3f'):>8s} "
+            f"{_num(m3.get('normalized_aubqc'), '.3f'):>8s} "
+            f"{_num(na.get('mean_diff'), '+.3f'):>7s} "
+            f"{_num(na.get('p_value'), '.1e'):>9s} "
+            f"{wins_str:>7s} "
+            f"{_num(m5.get('rho')):>7s} {_num(m3.get('rho')):>7s} "
+            f"{_num(zs.get('rho')):>7s}"
         )
 
     lines.append("")
-    lines.append("Metrics shown: M5-ρ = m5_ptarmigan_hybrid spearman_rho, "
-                 "M3-ρ = m3_ucb_cold spearman_rho, "
-                 "Zeroshot-ρ = ptarmigan_zeroshot spearman_rho, "
-                 "M5-Δρ = mean_diff of m5 vs m3 spearman_rho")
+    lines.append(
+        "M5 gain / M3 gain = share of the possible gain on a ruler BOTH methods "
+        "share: 0 = a typical compound in the library (the pool median), "
+        "1 = the best compound that exists in it. The floor is a property of the "
+        "pool, never of a method — a per-method floor would reward starting badly "
+        "and invert the comparison.\n"
+        "Δgain / p / wins are the paired test of m5_ptarmigan_hybrid against "
+        "m3_ucb_cold over matched seeds.\n"
+        "M5 ρ and M3 ρ are over the 35 compounds each method assayed; pool ρ "
+        "(ptarmigan_zeroshot) is over all 300 and is NOT comparable with them."
+    )
     lines.append("")
     lines.append("Paired head-to-head (each vs m3_ucb_cold, ranking accuracy):")
     for gene in ("CDK2", "BRAF", "CHK1", "SRC"):
