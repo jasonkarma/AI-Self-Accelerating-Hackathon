@@ -15,7 +15,7 @@ export const PINNED = {
   /** SHA-256 of `results/golden_seed21.sqlite3` at the locked commit `28b2520`. */
   goldenLedgerSha256: "49fea618572b3836d06cc97c4be9ae9efd93bc9988a6ba824968dec7b9a3aad9",
   /** Backend suite result recorded for the same commit. Updated when new tests are added. */
-  backendTests: "131 / 131",
+  backendTests: "133 / 133",
   /** The production objective law shipped at `e567cd4` and still in force. */
   objectiveLaw: "a_null := a_base",
   lockedCommit: "28b2520",

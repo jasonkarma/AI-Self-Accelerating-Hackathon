@@ -1,16 +1,22 @@
 """Stage B — closed-loop falsification benchmark over 50 matched seeds.
 
-Four methods, each run over the same 50 seeds with matched ``Round-0`` queries:
+Four methods, each run over the same 50 seeds with matched ``Round-0`` queries.
+Every active method spends the full ``TOTAL_QUERIES = 35`` budget: 5 seed wells
+plus ``ROUNDS × BATCH_SIZE = 6 × 5 = 30`` adaptive wells.
 
-+------------------------+----------+--------+-------------------------------+-------------------------------+
-| Method                 | Rounds   | Wells  | Round-0 selection              | Acquisition rule              |
-+------------------------+----------+--------+-------------------------------+-------------------------------+
-| ``ptarmigan_zeroshot`` | 0        | 0      | Ptarmigan engagement ranking   | None (static)                 |
-| ``m3_ucb_cold``        | 6        | 30     | Random (matched across rows)   | UCB on molecular features     |
-| ``ptarmigan_static``   | 6        | 30     | Ptarmigan engagement ranking   | UCB on molecular features     |
-| ``m5_ptarmigan_hybrid``| 6        | 30     | Ptarmigan engagement ranking   | Engagement + residue cosine   |
-|                        |          |        | + hotspot residue cosine       | as Δ_agent on UCB             |
-+------------------------+----------+--------+-------------------------------+-------------------------------+
++------------------------+----------+--------------+-------------------------------+-------------------------------+
+| Method                 | Rounds   | Wells        | Round-0 selection             | Acquisition rule              |
++------------------------+----------+--------------+-------------------------------+-------------------------------+
+| ``ptarmigan_zeroshot`` | 0        | 0            | Ptarmigan engagement ranking  | None (static)                 |
+| ``m3_ucb_cold``        | 6        | 5 + 30 = 35  | Random (matched across rows)  | UCB on molecular features     |
+| ``ptarmigan_static``   | 6        | 5 + 30 = 35  | Ptarmigan engagement ranking  | UCB on molecular features     |
+| ``m5_ptarmigan_hybrid``| 6        | 5 + 30 = 35  | Ptarmigan engagement ranking  | UCB + centred Δ_agent         |
+|                        |          |              | + hotspot residue cosine      | (see :func:`centred_delta`)   |
++------------------------+----------+--------------+-------------------------------+-------------------------------+
+
+``m3_ucb_cold`` and ``ptarmigan_static`` differ **only** in their seed batch: both
+run pure feature UCB afterwards. ``m5_ptarmigan_hybrid`` is the method that keeps
+using the Ptarmigan prior in-loop, via a signed Δ_agent added to the UCB score.
 
 Paired stats follow the exact arithmetic of :func:`core.baselines._paired_test`.
 """
@@ -21,6 +27,7 @@ import hashlib
 import json
 import math
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +76,21 @@ PAIRED_METRICS: tuple[str, ...] = (
     "spearman_rho_at_q35",
     "top_decile_hit_rate",
 )
+
+DELTA_BOUND = 0.15
+"""Symmetric clip on the centred Δ_agent, in pchembl units.
+
+The clip exists so a single over-confident virtual score cannot dominate the
+surrogate's mean. It is only meaningful on a **centred** term: engagement and
+hotspot cosine are both strictly positive in [0, 1], so uncentred the raw
+combination floors around 0.155 for every compound, the clip saturates, Δ_agent
+becomes a constant, and a constant cannot change an ``argmax``. See
+:data:`DELTA_ENGAGEMENT_WEIGHT` / :data:`DELTA_RESIDUE_WEIGHT`.
+"""
+
+DELTA_ENGAGEMENT_WEIGHT = 0.4
+DELTA_RESIDUE_WEIGHT = 0.6
+"""Weights of the two Δ_agent components: screen engagement vs hotspot profile."""
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +381,79 @@ def _ucb_scores(
 
 
 # ---------------------------------------------------------------------------
+# The agent prior: centred Δ_agent
+# ---------------------------------------------------------------------------
+
+def centred_delta(
+    compound_ids: Sequence[str],
+    engagement_map: dict[str, float],
+    hotspot_mask: np.ndarray | None,
+    residue_engagements: dict[str, list[float | None]] | None,
+    *,
+    n_residues: int,
+) -> np.ndarray:
+    """The signed Δ_agent prior, one value per compound, in pool row order.
+
+    Engagement and hotspot cosine are both strictly positive in ``[0, 1]``.
+    Their weighted sum therefore never drops below ~0.155 on real data, so
+    clipping to ``[-0.15, +0.15]`` **saturates**: every compound receives
+    exactly ``+0.15``, Δ_agent becomes a constant, and a constant cannot change
+    an ``argmax``. The hybrid then collapses onto ``ptarmigan_static`` for every
+    adaptive pick, which is precisely why CDK2's head-to-head came out a tie.
+
+    Centring each component on its pool mean before combining makes the term
+    genuinely signed — a compound that engages *less* than average pulls the
+    score *down*. It is also the only form in which the plan's falsification
+    story ("the prior is inverted for the residues that drove it") is reachable,
+    since an uncentred term has no negative region to invert into.
+
+    Two deliberate choices about missing data:
+
+    * The residue centre is taken over compounds that **have** a profile, not
+      over structural zeros.
+    * The residue term contributes **only** where a profile exists. Subtracting
+      the centre from a zero would hand the ~83% absent-profile majority a
+      uniform ``-0.30`` push and pin them to the clamp floor, reading "no residue
+      data" as "the prior is against this compound" — the same category error
+      the uncentred version makes, mirrored. After centring, neutral is 0, so
+      missing data contributes nothing.
+
+    Returns an array aligned with ``compound_ids`` (i.e. pool row order), clipped
+    to ``[-DELTA_BOUND, +DELTA_BOUND]``.
+    """
+    n = len(compound_ids)
+    if not engagement_map or n == 0:
+        return np.zeros(n, dtype=float)
+
+    eng_vals = np.array(
+        [engagement_map.get(str(cid), 0.0) for cid in compound_ids],
+        dtype=float,
+    )
+    eng_centre = float(eng_vals.mean())
+
+    sim_vals = np.zeros(n, dtype=float)
+    have_profile = np.zeros(n, dtype=bool)
+    if hotspot_mask is not None and residue_engagements:
+        for row, cid in enumerate(compound_ids):
+            res_eng = residue_engagements.get(str(cid))
+            if res_eng is not None:
+                have_profile[row] = True
+                sim_vals[row] = hotspot_cosine(
+                    res_eng, hotspot_mask, n_residues=n_residues
+                )
+
+    sim_centre = float(sim_vals[have_profile].mean()) if have_profile.any() else 0.0
+
+    residue_term = np.zeros(n, dtype=float)
+    residue_term[have_profile] = DELTA_RESIDUE_WEIGHT * (
+        sim_vals[have_profile] - sim_centre
+    )
+
+    delta = DELTA_ENGAGEMENT_WEIGHT * (eng_vals - eng_centre) + residue_term
+    return np.clip(delta, -DELTA_BOUND, DELTA_BOUND)
+
+
+# ---------------------------------------------------------------------------
 # Falsification tracking
 # ---------------------------------------------------------------------------
 
@@ -476,32 +571,41 @@ def _one_seed(
 
 
 def _run_zeroshot(seed: int, pool: pd.DataFrame, initial_ids: list[str]) -> dict[str, Any]:
-    """Static evaluation: predict all pool candidates, compute metrics once.
+    """Static evaluation: rank the whole pool, compute metrics once.
 
-    Zero wet-lab rounds, so AUBQC is null by definition.
+    Zero wet-lab rounds, so AUBQC is ``None`` by definition — a method that
+    spends nothing has no area under a discovery curve.
+
+    ρ is computed over the **entire pool**, not over ``initial_ids``. This
+    method never enters the lab, so the only thing it can be judged on is how
+    well its ranking of all N compounds agrees with measured affinity. The
+    previous version correlated the 5 seed compounds only, which made Spearman
+    quantise to multiples of 0.1 (ρ came out exactly −0.4000 and −0.7000 on two
+    of three targets) and reported a 5-point sample as if it were an effect
+    size. ``rho_scope`` records the difference explicitly so no consumer can
+    read this as comparable with the active methods' 35-well ρ.
     """
-    # The zeroshot "prediction" is the Ptarmigan engagement, sorted descending.
-    # It acts as a static ranker with no active learning.
-    predictions = pool.set_index("compound_id")["engagement"].to_dict()
-    truth = pool.set_index("compound_id")["y_bind"].to_dict()
-
-    # Spearman ρ: correlation of engagement rank vs pchembl rank across all compounds.
-    ordered_truth = [truth[cid] for cid in initial_ids]
-    ordered_pred = [predictions[cid] for cid in initial_ids]
-
     from scipy.stats import spearmanr
-    rho, _ = spearmanr(ordered_truth, ordered_pred) if len(ordered_truth) >= 3 else (None, None)
+
+    engagement = pool["engagement"].to_numpy(dtype=float)
+    truth = pool["y_bind"].to_numpy(dtype=float)
+
+    rho, _ = spearmanr(truth, engagement) if len(truth) >= 3 else (None, None)
 
     return {
         "seed": seed,
         "method": "ptarmigan_zeroshot",
         "aubqc": None,  # No active learning rounds.
-        "spearman_rho_at_q35": float(rho) if rho is not None else None,
+        "spearman_rho_at_q35": float(rho) if rho is not None and np.isfinite(rho) else None,
+        "rho_scope": "pool",
+        "rho_n": int(len(truth)),
         "top_decile_hits": 0,
         "top_decile_queries": 0,
         "best_per_round": [],
         "round_histories": [],
         "falsification_events": 0,
+        "falsification_queries": 0,
+        "falsification_rate": None,
         "hotspot_residues": [],
     }
 
@@ -527,8 +631,18 @@ def _run_active(
     falsification_queries = 0
     all_engagements = list(engagement_map.values()) if engagement_map else []
 
-    # Check for degenerate edge case: all measured values are identical.
     id_to_idx = {cid: i for i, cid in enumerate(pool["compound_id"])}
+
+    # ---- Centred Δ_agent, precomputed once per seed ----
+    delta_by_row = np.zeros(len(pool), dtype=float)
+    if method == "m5_ptarmigan_hybrid":
+        delta_by_row = centred_delta(
+            pool["compound_id"].tolist(),
+            engagement_map,
+            hotspot_mask,
+            residue_engagements,
+            n_residues=n_residues,
+        )
     y_measured = np.full(len(pool), np.nan, dtype=float)
 
     for cid in queried:
@@ -573,24 +687,18 @@ def _run_active(
                 chosen_cid = str(pool.iloc[pick_idx]["compound_id"])
 
             elif method == "m5_ptarmigan_hybrid":
-                # UCB on features PLUS Δ_agent from engagement and hotspot
-                # similarity. Δ_agent is the whole point of the hybrid: without
-                # it this method is byte-identical to ptarmigan_static.
+                # UCB on features PLUS the centred Δ_agent. This term is the
+                # whole point of the hybrid: without it (or with it saturated to
+                # a constant) M5 is byte-identical to ptarmigan_static in-loop.
+                #
+                # ``delta_by_row`` is indexed by POOL ROW, and ``unqueried_idx``
+                # holds exactly those row indices — so the gather is a direct
+                # fancy-index, not a positional lookup. Computing it once per
+                # seed also drops ~8,100 redundant hotspot_cosine calls per seed
+                # that the old in-loop version repeated at every pick.
                 base_scores = _ucb_scores(X, y_measured, unqueried_idx, beta=1.0)
-                delta = np.zeros(len(unqueried), dtype=float)
-                for i, u_idx in enumerate(unqueried_idx):
-                    cid = str(pool.iloc[u_idx]["compound_id"])
-                    engagement = engagement_map.get(cid, 0.0)
-                    residue_sim = 0.0
-                    if hotspot_mask is not None and residue_engagements is not None:
-                        res_eng = residue_engagements.get(cid)
-                        if res_eng is not None:
-                            residue_sim = hotspot_cosine(res_eng, hotspot_mask, n_residues=n_residues)
-                    # Δ_agent = 0.4 * engagement + 0.6 * residue_sim (bounded)
-                    delta[i] = max(-0.15, min(0.15, 0.4 * engagement + 0.6 * residue_sim))
+                delta = delta_by_row[unqueried_idx]
 
-                # Add Δ_agent — the term that was previously computed and then
-                # dropped on the floor, making M5 ≡ ptarmigan_static.
                 best_i = int(np.argmax(base_scores + delta))
                 chosen_cid = unqueried[best_i]
 
@@ -650,6 +758,12 @@ def _run_active(
         # one well per round and never reached TOTAL_QUERIES; it is now measured.
         "aubqc": float(np.mean(aubqc_checkpoints)) if aubqc_checkpoints else None,
         "spearman_rho_at_q35": float(rho) if rho is not None else None,
+        # An active method can only be ranked on the compounds it actually
+        # assayed, so its ρ is over the 35-well subset — NOT comparable with
+        # ptarmigan_zeroshot's pool-wide ρ. Recorded so the two cannot be
+        # silently placed in the same column.
+        "rho_scope": "queried",
+        "rho_n": len(queried),
         "top_decile_hits": top_decile_hits,
         "top_decile_queries": top_decile_queries,
         "best_per_round": best_per_round,

@@ -408,13 +408,22 @@ def _tiny_benchmark_fixture(n_compounds: int = 120):
         "smiles": [f"CC{'C' * (i % 7)}N{'O' * (i % 4)}" for i in range(n_compounds)],
         "pchembl_value": pchembl,
     })
+    # Engagement occupies a narrow band, as it does on the live screens
+    # (CDK2 0.389–0.605, CHK1 0.447–0.625). A uniform [0, 1] draw would make the
+    # centred term far larger than anything seen in production, and would let the
+    # clamp fire for reasons that do not occur on real data.
     ranking = [
-        {"compound_id": f"C{i:03d}", "engagement": float(rng.random())}
+        {"compound_id": f"C{i:03d}", "engagement": float(0.40 + 0.20 * rng.random())}
         for i in range(n_compounds)
     ]
+    # Only ~1 in 6 compounds has a residue profile, matching the real screens
+    # where Stage A fetches per-compound detail for the top 50 of ~300 hits. The
+    # rest are absent from the dict entirely, rather than zero-filled, so the
+    # missing-data path is exercised the way production exercises it.
+    n_with_profile = max(2, n_compounds // 6)
     engagements = {
         f"C{i:03d}": [float(rng.random()) for _ in range(20)]
-        for i in range(n_compounds)
+        for i in range(n_with_profile)
     }
     return df, ranking, engagements
 
@@ -475,12 +484,94 @@ def test_aubqc_is_measured_not_stubbed_to_none() -> None:
     assert result["methods"]["ptarmigan_zeroshot"]["aubqc"] is None
 
 
-def test_hybrid_actually_uses_the_agent_prior() -> None:
-    """Bug 2: Δ_agent must change the pick, not be computed and discarded.
+def test_centred_delta_is_signed_and_not_saturated() -> None:
+    """Bug 2 (the real one): Δ_agent must have spread, or it cannot steer.
 
-    With ``delta`` dropped on the floor, ``m5_ptarmigan_hybrid`` and
-    ``ptarmigan_static`` produced byte-identical pick sequences — the hybrid had
-    no in-loop Ptarmigan signal at all.
+    An earlier version added Δ_agent to the score but computed it *uncentred*.
+    Engagement and hotspot cosine are both positive in [0, 1], so their weighted
+    sum floored around 0.155 — above the 0.15 clip — and every compound clamped
+    to exactly +0.15. A constant offset cannot change an ``argmax``, so the
+    hybrid was inert in-loop while the code looked correct.
+
+    This test pins the invariant directly. It is deliberately NOT expressed as
+    "hybrid and static pick different compounds", because the two methods also
+    differ in their seed batch; differing seeds alone would satisfy that
+    assertion and the test would pass against the broken version.
+    """
+    from core.ptarmigan_benchmark import DELTA_BOUND, centred_delta, compute_hotspot_mask
+
+    df, ranking, engagements = _tiny_benchmark_fixture()
+    engagement_map = {h["compound_id"]: float(h["engagement"]) for h in ranking}
+    mask = compute_hotspot_mask(list(engagements.values()), top_pct=0.10)
+
+    delta = centred_delta(
+        df["compound_id"].tolist(), engagement_map, mask, engagements,
+        n_residues=len(mask),
+    )
+
+    assert delta.max() - delta.min() > 0, "Δ_agent has no spread — it cannot steer a pick"
+    assert (delta < 0).any(), "Δ_agent is never negative — no region to invert into"
+    assert (delta > 0).any(), "Δ_agent is never positive"
+    assert np.abs(delta).max() <= DELTA_BOUND + 1e-12, "Δ_agent escapes its clip"
+
+    saturated = int(np.sum(np.abs(delta) >= DELTA_BOUND - 1e-12))
+    assert saturated / len(delta) < 0.25, (
+        f"{saturated}/{len(delta)} compounds sit on the clamp boundary — "
+        "Δ_agent is close to constant again, which makes the hybrid inert"
+    )
+
+
+def test_missing_residue_profile_does_not_penalise_a_compound() -> None:
+    """Absence of residue data must be neutral, not negative.
+
+    Centring alone is not enough: only ~17% of compounds have a residue profile,
+    so subtracting the profile-holder mean from a structural zero gives the
+    absent-profile majority a uniform −0.30 push and pins them to the clamp
+    floor. That reads "we have no data on this compound" as "the prior is
+    against this compound" — the same category error as the uncentred version,
+    mirrored.
+    """
+    from core.ptarmigan_benchmark import DELTA_BOUND, centred_delta
+
+    ids = [f"C{i:02d}" for i in range(20)]
+    # Uniform engagement, so any non-zero delta must come from the residue term.
+    engagement_map = {cid: 0.5 for cid in ids}
+    # Only the first two compounds have a residue profile. Their hotspot cosines
+    # straddle the profile-holder mean without being extreme — real screens
+    # produce cosines in a narrow band (CDK2 0.370–0.539), and a perfectly
+    # orthogonal pair would give ±0.30, which the clamp is *supposed* to
+    # attenuate. Keeping the fixture inside the band means the assertions below
+    # test the missing-data rule rather than the clip.
+    profiles = {ids[0]: [1.0, 0.5, 1.0], ids[1]: [0.5, 1.0, 0.5]}
+    mask = np.array([True, False, True])
+
+    delta = centred_delta(ids, engagement_map, mask, profiles, n_residues=3)
+
+    no_profile = delta[2:]
+    assert np.allclose(no_profile, 0.0), (
+        f"compounds without a residue profile got delta "
+        f"{no_profile.min():+.4f}..{no_profile.max():+.4f}; missing data must be neutral"
+    )
+    # The two profile-holders must sit on opposite sides of zero — the term is
+    # signed — and neither may be pinned to the clamp, which would mean the
+    # residue spread is being flattened away.
+    assert delta[0] > 0 and delta[1] < 0, (
+        f"profile-holders got {delta[0]:+.4f} / {delta[1]:+.4f}; "
+        "expected one above and one below the centre"
+    )
+    assert np.abs(delta[[0, 1]]).max() < DELTA_BOUND, (
+        "a profile-holder sits on the clamp boundary"
+    )
+
+
+def test_hybrid_diverges_from_static_on_the_same_seed_batch() -> None:
+    """Bug 2, end-to-end: with the *same* seeds, Δ_agent must still change picks.
+
+    ``ptarmigan_static`` and ``m5_ptarmigan_hybrid`` share a round-0 seed batch
+    (both take the Ptarmigan top-5), so after the first round their futures are
+    driven only by the acquisition rule. Any divergence here is attributable to
+    Δ_agent and to nothing else — unlike a comparison against ``m3_ucb_cold``,
+    whose cold seeds confound the two effects.
     """
     from core.ptarmigan_benchmark import compute_hotspot_mask, run_ptarmigan_benchmark
 
@@ -490,17 +581,18 @@ def test_hybrid_actually_uses_the_agent_prior() -> None:
         df, ranking, engagements, mask, n_residues=len(mask), seeds=2,
     )
 
-    def sequences(method: str) -> set:
-        return {
+    def sequences(method: str) -> list:
+        return [
             tuple(h["candidate_id"] for h in rec["round_histories"])
             for rec in result["methods"][method]["per_seed"]
-        }
+        ]
 
     static_seqs = sequences("ptarmigan_static")
     hybrid_seqs = sequences("m5_ptarmigan_hybrid")
-    assert static_seqs.isdisjoint(hybrid_seqs), (
-        "m5_ptarmigan_hybrid picked exactly the same compounds as "
-        "ptarmigan_static — Δ_agent is not being added to the score"
+    identical = sum(1 for a, b in zip(static_seqs, hybrid_seqs) if a == b)
+    assert identical == 0, (
+        f"{identical}/2 seeds produced identical adaptive picks for "
+        "ptarmigan_static and m5_ptarmigan_hybrid — Δ_agent is not steering"
     )
 
 
