@@ -372,12 +372,15 @@ by a `--dry-run` coverage inspection *before* any credit was spent. `ERBB2` was 
 panel precisely because full-length `P04626` is 1255 aa and trips
 `exceeds_training_length`; a target the model cannot see in-distribution is not a fair test of it.
 
-Libraries are 300 exact (`standard_relation = "="`) `assay_type="B"` ChEMBL measurements spanning
-`pchembl_value` 5.0–9.5, deduplicated by canonical SMILES on the **median** per compound and
-sampled by affinity decile rather than top-N, so the pool carries a genuine gradient instead of a
-wall of near-identical high-affinity inhibitors. The same table is both the library uploaded to
-Ptarmigan-1 *and* the ground truth for Stage B — that identity is deliberate, because joining
-against a partially-measured library would make the static ranker unfairly weak.
+Libraries are 300 exact (`standard_relation = "="`) `assay_type="B"` ChEMBL measurements selected
+from the `pchembl_value` band 5.0–9.5 (observed maxima: CDK2 9.48, CHK1 9.47, BRAF 9.40),
+deduplicated by canonical SMILES on the **median** per compound and sampled by affinity decile
+rather than top-N, so the pool carries a genuine gradient instead of a wall of near-identical
+high-affinity inhibitors. The same table is both the library uploaded to Ptarmigan-1 *and* the
+ground truth for Stage B — that identity is deliberate, because joining against a
+partially-measured library would make the static ranker unfairly weak. Only the top 50 hits of each
+screen carry a per-residue profile (Stage A fetches compound detail for 50), which is why the
+residue term below contributes for 50 of 300 compounds and must be treated as *absent*, not *zero*.
 
 **Headline: share of the possible gain, 50 matched seeds, 35 wells each.**
 0 = no better than a typical compound in the library (the pool median); 1 = the best compound that
