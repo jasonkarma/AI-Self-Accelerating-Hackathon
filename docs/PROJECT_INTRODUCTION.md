@@ -163,10 +163,15 @@ The React front-end is built against `api_contract.json` and has five views:
 - **Attribution** — the ablation stack: what each component of M5 actually contributes.
 
 Endpoints: `GET /api/state`, `/api/candidates`, `/api/benchmark`, `/api/cross-target`,
-`/api/attribution`, `/api/ledger`, `/api/hypotheses`, `/api/config`, `/api/rounds`, and
-`GET /api/stream-round` (server-sent events, eleven event types, ending in `round_complete` +
-`stream_end`). Control: `POST /api/round/run`, `/api/round/approve`, `/api/round/reject`,
-`/api/campaign/reset`, `/api/restore-golden`, `/api/rewind`.
+`/api/attribution`, `/api/ptarmigan`, `/api/ledger`, `/api/hypotheses`, `/api/config`,
+`/api/rounds`, and `GET /api/stream-round` (server-sent events, eleven event types, ending in
+`round_complete` + `stream_end`). Control: `POST /api/round/run`, `/api/round/approve`,
+`/api/round/reject`, `/api/campaign/reset`, `/api/restore-golden`, `/api/rewind`.
+
+`/api/ptarmigan` is deliberately **not** in `api_contract.json`: the contract covers the four
+locked antibody payloads and stays byte-identical, while the cross-modality artifact is served
+straight from `results/ptarmigan_loop.json` with the same mtime-cache and `available: false`
+degradation as the lockbox and cross-target payloads.
 
 ---
 
@@ -247,16 +252,21 @@ comparison honest are in [`README.md`](../README.md) § *Results: cross-modality
 
 ```
 data/       dataset loader + synthetic fixture generator + hidden oracles
+            processed/ also holds the curated small-molecule libraries (ptarmigan_<target>.csv)
 core/       features, developability, preregistration, ledger, oracle, tool arsenal,
             dual surrogates, acquisition, 5 baselines, LLM routing, agents,
             virtual-lab runner, campaign, contract state
-app/        FastAPI server (/api/*, SSE round stream)
+            plus the cross-modality trio: ptarmigan.py (read-only API client),
+            ptarmigan_library.py (ChEMBL curation), ptarmigan_benchmark.py (Stage B loop + stats)
+app/        FastAPI server (/api/*, SSE round stream, /api/ptarmigan)
 frontend/   React + Vite + Tailwind, built against api_contract.json
 scripts/    fixture generation, freeze, benchmark, campaign runner, cross-target,
-            attribution ablation, lockbox audit, learnability gate, contract generator
-tests/      unit, contract, async orchestration, stage-readiness
+            attribution ablation, lockbox audit, learnability gate, contract generator,
+            run_ptarmigan_loop.py (Stage A live screen + Stage B benchmark + --merge)
+tests/      unit, contract, async orchestration, stage-readiness, ptarmigan
 config/     settings + frozen_protocol.json (write-once)
-results/    benchmark artifacts, golden ledger, lockbox metadata
+results/    benchmark artifacts, golden ledger, lockbox metadata,
+            ptarmigan_loop[_<target>].json + ptarmigan_screen_raw[_<target>].json
 ```
 
 ---
@@ -275,6 +285,17 @@ python scripts/run_benchmark.py --seeds 100     # the full race
 python scripts/run_campaign.py --rounds 1       # one live agent round, streamed to the terminal
 uvicorn app.server:app --reload --port 8000     # API + SSE
 python scripts/generate_api_contract.py --check # fail if the contract is stale
+```
+
+The cross-modality extension needs a `PTARMIGAN_API_KEY` in `.env` and spends credits, so it is
+deliberately **not** in the default path above. Stage B re-runs entirely from cached Stage A
+output, so once a screen is paid for the benchmark can be replayed offline for free:
+
+```bash
+python scripts/run_ptarmigan_loop.py --target CDK2 --dry-run       # coverage + estimate, 0 credits
+python scripts/run_ptarmigan_loop.py --target BRAF --bypass-gate   # Stage A (live) + Stage B (50 seeds)
+python scripts/run_ptarmigan_loop.py --stage B --target CHK1       # re-run Stage B from cache only
+python scripts/run_ptarmigan_loop.py --merge                       # combine targets into one artifact
 ```
 
 ---

@@ -122,6 +122,46 @@ The project is done when all of the following hold, and each is machine-checked 
 portfolio depth and top-decile hit rate. On the pre-registered lockbox `aayl51` it ranks 3/5 at every
 coverage level — a published negative result.
 
+### 5.1 A second modality, and the harness catching its own bugs
+
+The same loop is run on **small molecules against three human kinase targets**, using Talus Bio's
+**Ptarmigan-1** as the virtual screener and **ChEMBL measured affinities** as ground truth
+(`scripts/run_ptarmigan_loop.py`). M5 beats the cold baseline on share of the possible gain in
+**3 of 3** targets — CDK2 +0.078 (p = 3.5e-07, 40/50), BRAF +0.039 (p = 1.5e-03, 32/50), CHK1 +0.056
+(p = 6.8e-10, 43/50) — at $2.2450 of live screen spend, every target `ood=[]`.
+
+This section exists in the problem statement rather than only in the README because it is the
+clearest available demonstration of the thesis in §1: **the evaluation harness is the deliverable.**
+Building it surfaced three defects in the benchmark that no passing test would have caught, and each
+one was producing a number that looked like a result:
+
+1. The round loop picked one compound per round while `BATCH_SIZE = 5` sat unused, so the campaign
+   spent **11 of 35 wells** while the artifact's own metadata advertised 35. AUBQC was hardcoded
+   `None` because the Q=35 checkpoint was unreachable.
+2. `Δ_agent` was computed, clamped, and never added to the score — so the "hybrid" method was
+   byte-identical to the static one in-loop. Fixing that revealed a subtler variant: because
+   engagement and hotspot cosine are both positive, the weighted sum floored *above* the ±0.15 clip,
+   so **100 % of compounds clamped to a constant**, and a constant cannot change an `argmax`. The
+   prior had to be centred on the pool mean to be signed at all.
+3. A regression test written for defect 2 **passed against the broken code**, because it asserted
+   that the two methods pick different compounds while they also differ in seed batch — the seeds
+   alone satisfied it. It was replaced by one that holds the seed batch fixed.
+
+Defect 3 is the general lesson: a test that cannot fail is worse than no test, because it converts
+an unverified claim into a green check. The repo now pins the invariant directly (spread > 0, some
+negative values, < 25 % saturation) and measures 0 % saturation on real data against 100 % before.
+
+**The most useful result is a failure.** On `BRAF` the Ptarmigan prior is statistically
+indistinguishable from noise (pool ρ = −0.020, p ≈ 0.5). Blindly spending the seed batch on its
+top-5 by engagement scores 0.535 against the cold baseline's 0.892 — Δ = −0.357, p = 7.0e-34, **0 of
+50 seeds won**, top-decile hit rate exactly 0.000. The centred hybrid survives it (+0.039,
+p = 1.5e-03) precisely because a centred Δ can go negative, so the loop can spend against its own
+prior's advice. An uncentred prior has no negative region to invert into, and the self-correction
+claimed in §4 clause 5 would be untestable. `ERBB2` was removed from the panel because full-length
+`P04626` (1255 aa) exceeds Ptarmigan-1's `training_max_residues = 766`; `BRAF` at exactly 766 aa is
+the longest in-distribution target available, confirmed by a zero-credit `--dry-run` coverage
+inspection before any screen was queued.
+
 ---
 
 ## 6. Explicitly out of scope / open problems
@@ -143,6 +183,25 @@ These are stated up front so the claims above are not read as broader than they 
   R=1, so M5 and M3 propose the identical batch and AUBQC is bit-identical by construction.
 - **The 16 `L=14` AbBiBench targets are unusable** — they collapse to 1–2 distinct CDR3 sequences and
   are not search problems.
+- **The small-molecule panel is exploratory, not a holdout.** CDK2, BRAF and CHK1 were selected for
+  being *in-distribution* for Ptarmigan-1 (`ood=[]`, ≤ 766 aa) and for having ≥ 250 exact binding
+  measurements in ChEMBL — not chosen blind by a metadata-only script before any number existed. The
+  antibody half's pre-registered lockbox (`aayl51`) is the only holdout in this repo, and it is
+  consumed. Nothing in §5.1 may be described as confirmatory generalisation.
+- **No cross-modality metric is comparable with the antibody metrics.** The small-molecule pool is
+  300 compounds with a `pchembl_value` gradient, not a 13-residue epistatic CDR loop with a
+  developability gate; there is no `y_dev`, no `tau_dev`, no M1–M4 and no six-method comparison.
+  AUBQC is a different absolute scale in the two halves and is only ever compared *within* one.
+- **Two scope rules the artifact enforces mechanically.** ρ is recorded with `rho_scope`
+  (`"queried"`, n=35 / `"pool"`, n=300) and `rho_n` on every record, because a static ranker that
+  never enters the lab cannot be scored on the same 35 compounds as an active method. And the
+  share-of-gain floor is the **pool median**, never a method's own seed batch — a per-method floor
+  rewards starting badly and inverted the BRAF comparison outright (M5 0.167 vs M3 0.686 while M5's
+  raw AUBQC was higher). Both are pinned by tests in `tests/test_ptarmigan.py`.
+- **Ptarmigan-1 supplies no metric.** It returns `engagement`, `score`, `predicted_residue`,
+  per-residue `residue_engagement` and `coverage`. Every score in §5.1 — AUBQC, share of gain, ρ,
+  top-decile hit rate, falsification rate — is computed in this repo against ChEMBL measurements.
+  Attributing any of them to Talus would be a false claim about a third party's product.
 
 ---
 
