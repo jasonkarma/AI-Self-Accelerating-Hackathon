@@ -571,8 +571,19 @@ def _build_summary(result: dict) -> str:
 
     lines.append("")
     lines.append("Benchmark methods (50 matched seeds, R=6, k=5, 35 queries):")
-    for method in ("ptarmigan_zeroshot", "m3_ucb_cold", "ptarmigan_static", "m5_ptarmigan_hybrid"):
+    # Ordered as an ablation ladder so each rung differs from the one above it in
+    # exactly one respect, which is what makes "how much did the screen buy us"
+    # answerable rather than rhetorical.
+    for method, what in (
+        ("m3_ucb_cold", "NO Talus call at all — molecular features + UCB, random cold seed"),
+        ("ptarmigan_static", "Talus used ONLY as a static seed batch, then identical UCB"),
+        ("ptarmigan_seed_matched_hybrid", "same seed batch as the row above, PLUS Δ_agent in-loop"),
+        ("m5_ptarmigan_hybrid", "the shipped loop: Δ_agent-blended seed batch AND Δ_agent in-loop"),
+        ("ptarmigan_zeroshot", "Talus ranking only — never enters the lab"),
+    ):
         m = methods.get(method, {})
+        if not m:
+            continue
         rho = m.get("rho")
         dr = m.get("top_decile_hit_rate")
         naubqc = m.get("normalized_aubqc")
@@ -583,23 +594,40 @@ def _build_summary(result: dict) -> str:
         dr_str = f"{dr:.2%}" if dr is not None else "N/A"
         naubqc_str = f"{naubqc:.3f}" if naubqc is not None else "N/A"
         lines.append(
-            f"  {method:25s} best-binder-found={naubqc_str:>7s}  "
+            f"  {method:34s} best-binder-found={naubqc_str:>7s}  "
             f"ranking-accuracy={rho_str:>8s} ({scope})  top-decile={dr_str:>8s}"
         )
+        lines.append(f"  {'':34s} {what}")
 
     lines.append("")
     lines.append(
-        "  best-binder-found = share of the possible gain, 0 = no better than the "
-        "starting batch, 1 = the best compound in the library.\n"
+        "  best-binder-found = share of the possible gain on a ruler every method "
+        "shares: 0 = a typical compound in the library (the pool median), "
+        "1 = the best compound that exists in it. The floor is a property of the "
+        "POOL, never of a method — a per-method floor rewards starting badly and "
+        "inverts the comparison.\n"
         "  ranking-accuracy is computed over the compounds a method actually assayed, "
         "so the two scopes above are not interchangeable."
     )
 
     lines.append("")
-    lines.append("Head-to-head paired comparisons (vs m3_ucb_cold baseline):")
-    for treatment in ("ptarmigan_static", "m5_ptarmigan_hybrid"):
+    lines.append("What the Talus screen bought, decomposed (paired over matched seeds):")
+    # The control is read from the artifact rather than assumed, because one of
+    # these three pairs is deliberately NOT against the cold baseline: the
+    # seed-matched rung is paired against ptarmigan_static so that Δ_agent is
+    # the only difference between the two rows being subtracted.
+    for treatment, question in (
+        ("ptarmigan_static", "value of the screen as a static seed batch (vs no screen)"),
+        ("m5_ptarmigan_hybrid", "value of the screen in total (vs no screen)"),
+        ("ptarmigan_seed_matched_hybrid", "value of the IN-LOOP prior ALONE (seed batch held identical)"),
+    ):
         comp = paired.get(treatment, {})
-        for metric in ("normalized_aubqc", "aubqc", "spearman_rho_at_q35", "top_decile_hit_rate"):
+        if not comp:
+            continue
+        control = comp.get("control", "m3_ucb_cold")
+        lines.append(f"  {treatment}  [control: {control}]")
+        lines.append(f"      {question}")
+        for metric in ("normalized_aubqc", "spearman_rho_at_q35", "top_decile_hit_rate"):
             pt = comp.get(metric, {})
             md = pt.get("mean_diff")
             pv = pt.get("p_value")
@@ -609,8 +637,17 @@ def _build_summary(result: dict) -> str:
                 pv_str = f"  p={pv:.4e}" if pv is not None and not (isinstance(pv, float) and math.isnan(pv)) else ""
                 wins_str = f"  wins={wins}/{n}" if wins is not None else ""
                 lines.append(
-                    f"  {treatment:25s} {metric:25s} n={n:3d}  Δ={md:+.4f}{pv_str}{wins_str}"
+                    f"      {metric:24s} n={n:3d}  Δ={md:+.4f}{pv_str}{wins_str}"
                 )
+
+    lines.append("")
+    lines.append(
+        "  NOTE: m5_ptarmigan_hybrid minus ptarmigan_static is NOT the in-loop "
+        "contribution. M5 re-ranks its round-0 batch by 0.7*engagement + "
+        "0.3*hotspot_cosine while ptarmigan_static uses pure engagement, so the "
+        "two start from different five wells on every target. Use "
+        "ptarmigan_seed_matched_hybrid for that subtraction."
+    )
 
     per_seed = methods.get("m5_ptarmigan_hybrid", {}).get("per_seed") or []
     falsification_events = sum(s.get("falsification_events", 0) or 0 for s in per_seed)

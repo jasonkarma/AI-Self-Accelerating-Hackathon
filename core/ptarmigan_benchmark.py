@@ -64,10 +64,49 @@ NGRAM_MAX = 5
 HARD_GATE_USD = 15.0
 
 #: The four benchmark method names, in display order.
+#: The four shipped methods, plus one ablation rung.
+#:
+#: The ladder answers "how much did the Talus screen buy us?", and each rung
+#: differs from the one below it in exactly ONE respect:
+#:
+#:   m3_ucb_cold ........... no Ptarmigan call at all (random cold seed)
+#:   ptarmigan_static ...... Ptarmigan in the seed batch ONLY, then plain UCB
+#:   ptarmigan_seed_matched_hybrid
+#: ......................... same seed batch as ptarmigan_static, PLUS Δ_agent in-loop
+#:   m5_ptarmigan_hybrid ... the shipped method: Δ_agent-blended seed AND Δ_agent in-loop
+#:
+#: The third rung exists because the first three do NOT decompose cleanly on
+#: their own. M5's round-0 seed is ranked by ``0.7*engagement + 0.3*hotspot_cosine``
+#: while ``ptarmigan_static``'s is pure engagement, so the two seed batches
+#: differ on every target in the panel (verified: CDK2, BRAF and CHK1 all
+#: disagree). ``M5 - ptarmigan_static`` therefore mixes the in-loop prior with
+#: a different starting five wells, and cannot be reported as "the in-loop
+#: contribution". With the seed batch held identical to ``ptarmigan_static``,
+#: the only remaining difference is Δ_agent, so that subtraction is clean.
+#:
+#: ``m5_ptarmigan_hybrid`` stays the shipped method and its published numbers
+#: are untouched — this rung is an ablation, not a replacement.
 METHODS: tuple[str, ...] = (
     "ptarmigan_zeroshot",
     "m3_ucb_cold",
     "ptarmigan_static",
+    "ptarmigan_seed_matched_hybrid",
+    "m5_ptarmigan_hybrid",
+)
+
+#: Methods whose ACQUISITION rule uses Δ_agent (as opposed to plain UCB).
+DELTA_AGENT_METHODS: tuple[str, ...] = (
+    "ptarmigan_seed_matched_hybrid",
+    "m5_ptarmigan_hybrid",
+)
+
+#: Methods whose round-0 seed batch comes from Ptarmigan engagement (as opposed
+#: to a random cold draw). ``m5_ptarmigan_hybrid`` is deliberately absent: it
+#: re-ranks the seed batch by a hotspot blend and so does NOT share a seed with
+#: ``ptarmigan_static`` — which is precisely why the seed-matched rung is needed.
+PTARMIGAN_SEEDED_METHODS: tuple[str, ...] = (
+    "ptarmigan_static",
+    "ptarmigan_seed_matched_hybrid",
     "m5_ptarmigan_hybrid",
 )
 
@@ -542,16 +581,25 @@ def _one_seed(
     ptarmigan_ordered_ids = pool["compound_id"].tolist()
 
     # !=---------- seed-matching ----------!=
-
-    # For m3_ucb_cold: use rng for random round-0.
-    # For ptarmigan_zeroshot: static ranking, no rounds.
-    # For ptarmigan_static: round-0 seeded by top-5 ptarmigan, then UCB.
-    # For m5_ptarmigan_hybrid: round-0 seeded by ptarmigan + hotspot cosine, then UCB+Δ.
+    #
+    #   m3_ucb_cold ........................... random cold round-0 (no Ptarmigan)
+    #   ptarmigan_zeroshot .................... static, no rounds
+    #   ptarmigan_static ...................... round-0 = top-5 by engagement, then plain UCB
+    #   ptarmigan_seed_matched_hybrid ......... round-0 = top-5 by engagement (IDENTICAL to
+    #                                           ptarmigan_static), then UCB + Δ_agent
+    #   m5_ptarmigan_hybrid ................... round-0 = top-5 by 0.7·engagement +
+    #                                           0.3·hotspot_cosine, then UCB + Δ_agent
+    #
+    # The seed-matched rung shares its first five wells with ptarmigan_static by
+    # construction, so subtracting one from the other isolates Δ_agent alone.
+    # m5_ptarmigan_hybrid does NOT — its seed batch is re-ranked by the hotspot
+    # blend — which is exactly why M5 − ptarmigan_static is not a clean measure
+    # of the in-loop prior.
 
     # Round-0 selection.
     n_pool = len(pool)
-    if method in ("ptarmigan_static", "m5_ptarmigan_hybrid"):
-        # Top 5 by engagement (enriched by hotspot cosine for hybrid).
+    if method in PTARMIGAN_SEEDED_METHODS:
+        # Top 5 by engagement, enriched by hotspot cosine for the shipped hybrid only.
         if method == "m5_ptarmigan_hybrid" and hotspot_mask is not None and residue_engagements:
             # Re-rank by a blend: 0.7 * engagement + 0.3 * hotspot cosine.
             scores: list[tuple[int, float]] = []
@@ -567,6 +615,8 @@ def _one_seed(
             scores.sort(key=lambda x: -x[1])
             initial_ids = [str(pool.at[idx, "compound_id"]) for idx, _ in scores[:INITIAL_QUERIES]]
         else:
+            # ptarmigan_static AND ptarmigan_seed_matched_hybrid land here, so
+            # their seed batches are identical by construction.
             initial_ids = ptarmigan_ordered_ids[:INITIAL_QUERIES]
 
     elif method == "m3_ucb_cold":
@@ -662,8 +712,11 @@ def _run_active(
     id_to_idx = {cid: i for i, cid in enumerate(pool["compound_id"])}
 
     # ---- Centred Δ_agent, precomputed once per seed ----
+    # Computed for BOTH Δ_agent methods. The seed-matched rung uses the identical
+    # term as the shipped hybrid, so the only difference between them is the
+    # round-0 seed batch — which is what makes their subtraction clean.
     delta_by_row = np.zeros(len(pool), dtype=float)
-    if method == "m5_ptarmigan_hybrid":
+    if method in DELTA_AGENT_METHODS:
         delta_by_row = centred_delta(
             pool["compound_id"].tolist(),
             engagement_map,
@@ -740,7 +793,7 @@ def _run_active(
                 pick_idx = _ucb_pick(X, y_measured, unqueried_idx, beta=1.0)
                 chosen_cid = str(pool.iloc[pick_idx]["compound_id"])
 
-            elif method == "m5_ptarmigan_hybrid":
+            elif method in DELTA_AGENT_METHODS:
                 # UCB on features PLUS the centred Δ_agent. This term is the
                 # whole point of the hybrid: without it (or with it saturated to
                 # a constant) M5 is byte-identical to ptarmigan_static in-loop.
@@ -820,6 +873,15 @@ def _run_active(
     return {
         "seed": seed,
         "method": method,
+        # The round-0 wells, recorded so the seed-matching invariant is
+        # CHECKABLE from the artifact rather than asserted in a comment. This
+        # exists because a regression test in this repo once passed against
+        # broken code: its docstring claimed two methods shared a seed batch,
+        # nothing verified it, and the divergence it observed came from the
+        # seeds rather than from the term under study. ``initial_queries``
+        # being equal across two methods is necessary but not sufficient —
+        # compare this list.
+        "initial_queries": list(initial_ids),
         # ---- OUR metrics, not Talus's ----
         # Everything below is computed by this benchmark. Ptarmigan-1 returns
         # only ``engagement`` / ``score`` / ``residue_engagement`` / ``coverage``
@@ -1004,14 +1066,40 @@ def run_ptarmigan_benchmark(
             "per_seed": records,
         }
 
-    # Paired comparisons: each active method vs the cold UCB control.
+    # Paired comparisons, forming an ablation ladder. Each entry records its own
+    # ``control`` so no consumer can assume every pair is against the cold
+    # baseline — the third one deliberately is not.
+    #
+    #   ptarmigan_static        vs m3_ucb_cold  -> what the SCREEN bought, used
+    #                                              ONLY as a static seed batch
+    #   m5_ptarmigan_hybrid     vs m3_ucb_cold  -> what the screen bought in total
+    #                                              (seed batch + in-loop prior)
+    #   ptarmigan_seed_matched_hybrid
+    #                           vs ptarmigan_static
+    #                                           -> the IN-LOOP prior alone. The two
+    #                                              share an identical round-0 seed
+    #                                              batch, so Δ_agent is the only
+    #                                              difference between them.
+    #
+    # The last pair is the reason the seed-matched rung exists: M5 minus
+    # ptarmigan_static is NOT a clean measure of the in-loop contribution,
+    # because M5 re-ranks its seed batch by 0.7·engagement + 0.3·hotspot_cosine
+    # while ptarmigan_static uses pure engagement. The two start from different
+    # five wells on every target in the panel, so that subtraction confounds the
+    # in-loop prior with a different starting point.
+    PAIRED_PAIRS: tuple[tuple[str, str], ...] = (
+        ("ptarmigan_static", "m3_ucb_cold"),
+        ("m5_ptarmigan_hybrid", "m3_ucb_cold"),
+        ("ptarmigan_seed_matched_hybrid", "ptarmigan_static"),
+    )
+
     paired: dict[str, dict[str, dict]] = {}
-    for treatment in ("ptarmigan_static", "m5_ptarmigan_hybrid"):
-        paired[treatment] = {}
+    for treatment, control in PAIRED_PAIRS:
+        paired[treatment] = {"control": control}
         for metric in PAIRED_METRICS:
             paired[treatment][metric] = paired_test(
                 all_seed_records[treatment],
-                all_seed_records["m3_ucb_cold"],
+                all_seed_records[control],
                 metric,
             )
 

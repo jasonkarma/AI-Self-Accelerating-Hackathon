@@ -564,14 +564,74 @@ def test_missing_residue_profile_does_not_penalise_a_compound() -> None:
     )
 
 
-def test_hybrid_diverges_from_static_on_the_same_seed_batch() -> None:
-    """Bug 2, end-to-end: with the *same* seeds, Δ_agent must still change picks.
+def test_seed_matched_rung_shares_statics_seed_batch() -> None:
+    """The ablation's whole premise, asserted rather than commented.
 
-    ``ptarmigan_static`` and ``m5_ptarmigan_hybrid`` share a round-0 seed batch
-    (both take the Ptarmigan top-5), so after the first round their futures are
-    driven only by the acquisition rule. Any divergence here is attributable to
-    Δ_agent and to nothing else — unlike a comparison against ``m3_ucb_cold``,
-    whose cold seeds confound the two effects.
+    ``ptarmigan_seed_matched_hybrid`` exists so that subtracting
+    ``ptarmigan_static`` from it isolates Δ_agent: identical round-0 wells, and
+    the acquisition rule the only difference. If the seed batches ever stop
+    matching, that subtraction silently becomes the confounded M5 − static
+    comparison again, so the invariant is checked against the recorded
+    ``initial_queries`` on every seed.
+
+    This test replaces an earlier one whose docstring claimed
+    ``ptarmigan_static`` and ``m5_ptarmigan_hybrid`` shared a seed batch. They
+    do not — M5 re-ranks the seed batch by ``0.7·engagement +
+    0.3·hotspot_cosine`` — and because nothing verified the claim, that test
+    passed while measuring the wrong thing. Recording ``initial_queries`` in the
+    per-seed record is what makes this checkable at all.
+    """
+    from core.ptarmigan_benchmark import (
+        INITIAL_QUERIES,
+        compute_hotspot_mask,
+        run_ptarmigan_benchmark,
+    )
+
+    df, ranking, engagements = _tiny_benchmark_fixture()
+    mask = compute_hotspot_mask(list(engagements.values()), top_pct=0.10)
+    result = run_ptarmigan_benchmark(
+        df, ranking, engagements, mask, n_residues=len(mask), seeds=3,
+    )
+
+    static = result["methods"]["ptarmigan_static"]["per_seed"]
+    matched = result["methods"]["ptarmigan_seed_matched_hybrid"]["per_seed"]
+
+    for s_rec, m_rec in zip(static, matched):
+        assert s_rec["seed"] == m_rec["seed"], "records must be paired by seed"
+        assert len(s_rec["initial_queries"]) == INITIAL_QUERIES
+        assert list(s_rec["initial_queries"]) == list(m_rec["initial_queries"]), (
+            f"seed {s_rec['seed']}: seed-matched rung started from "
+            f"{m_rec['initial_queries']} but static started from "
+            f"{s_rec['initial_queries']} — the two must be identical or "
+            "Δseed_matched − Δstatic does not isolate Δ_agent"
+        )
+
+    # Same seed batch, different adaptive picks => Δ_agent is doing the work.
+    def sequences(method: str) -> list:
+        return [
+            tuple(h["candidate_id"] for h in rec["round_histories"])
+            for rec in result["methods"][method]["per_seed"]
+        ]
+
+    static_seqs = sequences("ptarmigan_static")
+    matched_seqs = sequences("ptarmigan_seed_matched_hybrid")
+    identical = sum(1 for a, b in zip(static_seqs, matched_seqs) if a == b)
+    assert identical == 0, (
+        f"{identical}/{len(static_seqs)} seeds produced identical adaptive picks "
+        "for ptarmigan_static and ptarmigan_seed_matched_hybrid despite sharing a "
+        "round-0 batch — Δ_agent is not steering the loop"
+    )
+
+
+def test_shipped_hybrid_seed_batch_is_confounded_with_static() -> None:
+    """Document, in a test, why the seed-matched rung is necessary.
+
+    ``m5_ptarmigan_hybrid`` re-ranks its round-0 batch by the hotspot blend, so
+    it does NOT share a seed batch with ``ptarmigan_static``. Therefore
+    ``M5 − ptarmigan_static`` mixes the in-loop prior with a different starting
+    five wells and must never be reported as "the in-loop contribution". This
+    asserts the confound exists so that if the two ever are made identical, the
+    redundancy is noticed rather than silently doubling the ladder.
     """
     from core.ptarmigan_benchmark import compute_hotspot_mask, run_ptarmigan_benchmark
 
@@ -581,18 +641,12 @@ def test_hybrid_diverges_from_static_on_the_same_seed_batch() -> None:
         df, ranking, engagements, mask, n_residues=len(mask), seeds=2,
     )
 
-    def sequences(method: str) -> list:
-        return [
-            tuple(h["candidate_id"] for h in rec["round_histories"])
-            for rec in result["methods"][method]["per_seed"]
-        ]
-
-    static_seqs = sequences("ptarmigan_static")
-    hybrid_seqs = sequences("m5_ptarmigan_hybrid")
-    identical = sum(1 for a, b in zip(static_seqs, hybrid_seqs) if a == b)
-    assert identical == 0, (
-        f"{identical}/2 seeds produced identical adaptive picks for "
-        "ptarmigan_static and m5_ptarmigan_hybrid — Δ_agent is not steering"
+    static_seed = result["methods"]["ptarmigan_static"]["per_seed"][0]["initial_queries"]
+    m5_seed = result["methods"]["m5_ptarmigan_hybrid"]["per_seed"][0]["initial_queries"]
+    assert list(static_seed) != list(m5_seed), (
+        "m5_ptarmigan_hybrid and ptarmigan_static now share a round-0 batch; "
+        "if that is intentional the seed-matched rung is redundant and the "
+        "ablation ladder should be collapsed, not duplicated"
     )
 
 
